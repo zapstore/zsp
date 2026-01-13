@@ -46,6 +46,7 @@ var (
 	previewFlag          = flag.Bool("preview", false, "Show HTML preview in browser before publishing")
 	portFlag             = flag.Int("port", 0, "Custom port for browser preview/signing (default: 17007 for signing, 17008 for preview)")
 	overwriteReleaseFlag = flag.Bool("overwrite-release", false, "Bypass cache and re-publish even if release unchanged")
+	wizardFlag           = flag.Bool("wizard", false, "Run interactive wizard (uses existing config as defaults)")
 	versionFlag          = flag.Bool("v", false, "Print version and exit")
 	helpFlag             = flag.Bool("h", false, "Show help")
 )
@@ -107,6 +108,7 @@ USAGE
   zsp -r <repo>                  Fetch latest release from repo
   zsp <app.apk> --extract        Extract APK metadata as JSON
   zsp                            Interactive wizard (no args, no config)
+  zsp --wizard                   Interactive wizard (uses existing config as defaults)
 
 FLAGS
   -r <url>        Repository URL (GitHub/GitLab/F-Droid)
@@ -116,6 +118,7 @@ FLAGS
   -h, --help      Show this help
   -v, --version   Print version
 
+  --wizard        Run interactive wizard (uses existing config as defaults)
   --fetch-metadata <source>   Same as -m
   --extract       Extract APK metadata as JSON (local APK only)
   --check-apk     Verify config fetches and parses an arm64-v8a APK (exit 0=success)
@@ -249,6 +252,23 @@ func run() error {
 func loadConfig() (*config.Config, error) {
 	args := flag.Args()
 
+	// --wizard flag: run wizard with optional existing config as defaults
+	if *wizardFlag {
+		if *quietFlag {
+			return nil, fmt.Errorf("--wizard cannot be used with --quiet")
+		}
+		// Try to load existing config for defaults
+		var defaults *config.Config
+		configPath := "zapstore.yaml"
+		if len(args) > 0 && !strings.HasSuffix(strings.ToLower(args[0]), ".apk") {
+			configPath = args[0]
+		}
+		if cfg, err := config.Load(configPath); err == nil {
+			defaults = cfg
+		}
+		return config.RunWizard(defaults)
+	}
+
 	// Quick mode with APK file as positional argument
 	if len(args) > 0 && strings.HasSuffix(strings.ToLower(args[0]), ".apk") {
 		return loadAPKConfig(args[0])
@@ -300,7 +320,7 @@ func loadConfig() (*config.Config, error) {
 		return nil, fmt.Errorf("no configuration provided. Use 'zsp <config.yaml>' or 'zsp -r <repo-url>'")
 	}
 
-	return config.RunWizard()
+	return config.RunWizard(nil)
 }
 
 // loadAPKConfig creates config from a local APK path with optional -r and -s flags.

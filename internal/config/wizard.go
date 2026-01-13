@@ -24,32 +24,51 @@ const Logo = `
 `
 
 // RunWizard runs the interactive configuration wizard.
-func RunWizard() (*Config, error) {
+// If defaults is non-nil, those values are used as defaults for prompts.
+func RunWizard(defaults *Config) (*Config, error) {
 	fmt.Print(ui.Title(Logo))
-	fmt.Println(ui.Title("Publish Wizard"))
+	if defaults != nil {
+		fmt.Println(ui.Title("Edit Configuration"))
+	} else {
+		fmt.Println(ui.Title("Publish Wizard"))
+	}
 	fmt.Println()
 
-	// Introduction
-	fmt.Println(ui.Dim("zsp helps you publish Android apps to Nostr relays used by Zapstore."))
-	fmt.Println()
-	fmt.Println(ui.Dim("Quick start (if you release on GitHub):"))
-	fmt.Println(ui.Dim("  zsp -r github.com/user/repo"))
-	fmt.Println(ui.Dim("or with a local APK:"))
-	fmt.Println(ui.Dim("  zsp ./app.apk -r github.com/user/repo"))
-	fmt.Println()
-	fmt.Println(ui.Dim("If that is sufficient, hit Ctrl+C and run it"))
-	fmt.Println()
-	fmt.Println(ui.Dim("For richer metadata (description, screenshots, etc), this wizard helps you create"))
-	fmt.Println(ui.Dim("a zapstore.yaml config specifying sources like Play Store or F-droid to pull from."))
-	fmt.Println()
+	// Introduction (only show for new configs)
+	if defaults == nil {
+		fmt.Println(ui.Dim("zsp helps you publish Android apps to Nostr relays used by Zapstore."))
+		fmt.Println()
+		fmt.Println(ui.Dim("Quick start (if you release on GitHub):"))
+		fmt.Println(ui.Dim("  zsp -r github.com/user/repo"))
+		fmt.Println(ui.Dim("or with a local APK:"))
+		fmt.Println(ui.Dim("  zsp ./app.apk -r github.com/user/repo"))
+		fmt.Println()
+		fmt.Println(ui.Dim("If that is sufficient, hit Ctrl+C and run it"))
+		fmt.Println()
+		fmt.Println(ui.Dim("For richer metadata (description, screenshots, etc), this wizard helps you create"))
+		fmt.Println(ui.Dim("a zapstore.yaml config specifying sources like Play Store or F-droid to pull from."))
+		fmt.Println()
+	}
 
+	// Initialize config from defaults or empty
 	cfg := &Config{}
+	if defaults != nil {
+		*cfg = *defaults // Copy defaults
+	}
+
+	// Compute default source value for prompt
+	defaultSource := ""
+	if cfg.Repository != "" {
+		defaultSource = cfg.Repository
+	} else if cfg.Local != "" {
+		defaultSource = cfg.Local
+	}
 
 	// Step 1: Get source (with validation loop)
 	var sourceType SourceType
 	for {
 		fmt.Println(ui.Bold("1. What's the source?"))
-		source, err := ui.PromptDefault("   Repository URL or local path", "")
+		source, err := ui.PromptDefault("   Repository URL or local path", defaultSource)
 		if err != nil {
 			return nil, err
 		}
@@ -121,7 +140,8 @@ func RunWizard() (*Config, error) {
 			proceed, _ := ui.Confirm("   Proceed anyway?", false)
 			if !proceed {
 				fmt.Println()
-				continue // Loop back to ask for source again
+				defaultSource = source // Keep the entered value for retry
+				continue               // Loop back to ask for source again
 			}
 		}
 
@@ -133,24 +153,33 @@ func RunWizard() (*Config, error) {
 	// Step 2: App metadata
 	fmt.Println(ui.Bold("2. App metadata (optional, press Enter to skip)"))
 
-	name, _ := ui.PromptDefault("   App name", "")
+	name, _ := ui.PromptDefault("   App name", cfg.Name)
 	if name != "" {
 		cfg.Name = name
+	} else {
+		cfg.Name = ""
 	}
 
-	description, _ := ui.PromptDefault("   Description", "")
+	description, _ := ui.PromptDefault("   Description", cfg.Description)
 	if description != "" {
 		cfg.Description = description
+	} else {
+		cfg.Description = ""
 	}
 
-	summary, _ := ui.PromptDefault("   Summary (short tagline)", "")
+	summary, _ := ui.PromptDefault("   Summary (short tagline)", cfg.Summary)
 	if summary != "" {
 		cfg.Summary = summary
+	} else {
+		cfg.Summary = ""
 	}
 
-	tagsStr, _ := ui.PromptDefault("   Tags (space-separated)", "")
+	defaultTags := strings.Join(cfg.Tags, " ")
+	tagsStr, _ := ui.PromptDefault("   Tags (space-separated)", defaultTags)
 	if tagsStr != "" {
 		cfg.Tags = strings.Fields(tagsStr)
+	} else {
+		cfg.Tags = nil
 	}
 
 	fmt.Println()
