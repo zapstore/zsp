@@ -116,15 +116,53 @@ func Parse(path string) (*APKInfo, error) {
 
 // extractLabel extracts the app label from an APK.
 // It handles nested resource references that the standard library doesn't resolve.
+// Prioritizes English locale to avoid getting localized names in other scripts.
 func extractLabel(pkg *apk.Apk, path string) string {
-	// First try the library's built-in method
-	label, err := pkg.Label(nil)
-	if err == nil && label != "" {
+	// Try English locale first to avoid getting Arabic/RTL/other localized names
+	englishConfig := &androidbinary.ResTableConfig{
+		Language: [2]uint8{'e', 'n'},
+	}
+	label, err := pkg.Label(englishConfig)
+	if err == nil && label != "" && isLikelyEnglish(label) {
+		return label
+	}
+
+	// Try with default/nil config
+	label, err = pkg.Label(nil)
+	if err == nil && label != "" && isLikelyEnglish(label) {
 		return label
 	}
 
 	// Fall back to our custom extraction that handles nested references
+	// with English preference
 	return extractLabelWithReferences(path)
+}
+
+// isLikelyEnglish checks if a string appears to be in English/Latin script.
+// Returns false if it contains characters from Arabic, Hebrew, CJK, or other non-Latin scripts.
+func isLikelyEnglish(s string) bool {
+	for _, r := range s {
+		// Arabic range: U+0600 to U+06FF (Arabic)
+		// Arabic Supplement: U+0750 to U+077F
+		// Arabic Extended-A: U+08A0 to U+08FF
+		// Hebrew: U+0590 to U+05FF
+		// CJK ranges start at U+4E00
+		// Cyrillic: U+0400 to U+04FF
+		// Thai: U+0E00 to U+0E7F
+		// Devanagari: U+0900 to U+097F
+		if (r >= 0x0600 && r <= 0x06FF) || // Arabic
+			(r >= 0x0750 && r <= 0x077F) || // Arabic Supplement
+			(r >= 0x08A0 && r <= 0x08FF) || // Arabic Extended-A
+			(r >= 0x0590 && r <= 0x05FF) || // Hebrew
+			(r >= 0x4E00 && r <= 0x9FFF) || // CJK Unified Ideographs
+			(r >= 0x3040 && r <= 0x30FF) || // Hiragana + Katakana
+			(r >= 0x0400 && r <= 0x04FF) || // Cyrillic
+			(r >= 0x0E00 && r <= 0x0E7F) || // Thai
+			(r >= 0x0900 && r <= 0x097F) { // Devanagari
+			return false
+		}
+	}
+	return true
 }
 
 // extractLabelWithReferences extracts the label by manually resolving resource references.
@@ -200,8 +238,23 @@ func extractLabelWithReferences(path string) string {
 		return ""
 	}
 
-	// Resolve the resource, following references
-	return resolveStringResource(table, androidbinary.ResID(labelResID), nil, 10)
+	// Try English locale first
+	englishConfig := &androidbinary.ResTableConfig{
+		Language: [2]uint8{'e', 'n'},
+	}
+	label := resolveStringResource(table, androidbinary.ResID(labelResID), englishConfig, 10)
+	if label != "" && isLikelyEnglish(label) {
+		return label
+	}
+
+	// Fall back to default config
+	label = resolveStringResource(table, androidbinary.ResID(labelResID), nil, 10)
+	if label != "" && isLikelyEnglish(label) {
+		return label
+	}
+
+	// Return whatever we got, even if it's not English
+	return label
 }
 
 // findLabelResourceID finds the label resource ID from the binary XML manifest.
