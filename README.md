@@ -48,7 +48,11 @@ tags: [productivity, tools]
 Then run:
 
 ```bash
+zsp
+# equivalent to
 zsp zapstore.yaml
+# equivalent to
+cat zapstore.yaml | zsp
 ```
 
 ### Interactive Wizard
@@ -61,7 +65,7 @@ zsp
 
 ## Configuration
 
-See [SPEC.md](SPEC.md) for full configuration reference.
+Run `--help` for full configuration reference.
 
 ### Minimal Config
 
@@ -139,28 +143,28 @@ Enrich app metadata from external sources:
 
 ```bash
 # Fetch from GitHub (description, topics, license, website)
-zsp zapstore.yaml -m github
+zsp -m github
 
 # Fetch from F-Droid (name, summary, description, categories)
-zsp zapstore.yaml -m fdroid
+zsp -m fdroid
 
 # Combine multiple sources
-zsp zapstore.yaml -m github -m fdroid
+zsp -m github -m fdroid
 ```
 
-Available sources: `github`, `fdroid`, `playstore` (not yet implemented)
+Available sources: `github`, `fdroid`, `playstore`.
 
 ## Signing Methods
 
 ### Private Key (direct signing)
 
 ```bash
-SIGN_WITH=nsec1... zsp zapstore.yaml
+ SIGN_WITH=nsec1... zsp zapstore.yaml
 ```
 
 > ⚠️ **Security Note:** Passing private keys via environment variables has risks:
 > - May be visible in `/proc/*/environ` on Linux
-> - Can appear in shell history if set inline
+> - Can appear in shell history if set inline (mitigate by prefixing with a space)
 > - May be logged by process monitoring tools
 >
 > For production use, prefer **bunker://** or **browser** signing methods.
@@ -174,7 +178,7 @@ SIGN_WITH=npub1... zsp zapstore.yaml > unsigned-events.json
 ### NIP-46 Bunker (remote signing)
 
 ```bash
-SIGN_WITH="bunker://..." zsp zapstore.yaml
+SIGN_WITH="bunker://..." zsp
 ```
 
 ### Browser Extension (NIP-07)
@@ -182,7 +186,7 @@ SIGN_WITH="bunker://..." zsp zapstore.yaml
 Sign events using your browser's Nostr extension (Alby, nos2x, Flamingo, etc.):
 
 ```bash
-SIGN_WITH=browser zsp zapstore.yaml
+SIGN_WITH=browser zsp
 ```
 
 This opens a browser window where you can approve signing with your NIP-07 extension.
