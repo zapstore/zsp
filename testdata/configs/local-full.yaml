@@ -1,0 +1,26 @@
+# Full local config with all options
+local: "../apks/sample.apk"
+
+# App metadata (overrides APK-extracted values)
+name: Sample App
+description: Just a sample APK for testing
+summary: Sample summary
+tags: [zapstore, repository, test]
+license: MIT
+website: https://zapstore.dev
+
+# Custom icon (otherwise extracted from APK)
+icon: "../fixtures/icon.png"
+
+# Screenshots
+images:
+  - https://raw.githubusercontent.com/purplebase/purplestack/main/assets/images/purplestack.png
+
+# Source code repository (for display, not fetching)
+repository: https://github.com/zapstore/zapstore
+
+# Changelog file
+changelog: CHANGELOG.md
+
+# Fetch additional metadata
+fetch_metadata: [github]

@@ -1,0 +1,5 @@
+# F-Droid source example
+# Source code is on GitHub, APKs come from F-Droid
+repository: https://github.com/AntennaPod/AntennaPod
+release_repository: https://f-droid.org/packages/de.danoeh.antennapod
+

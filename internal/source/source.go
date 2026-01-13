@@ -1,0 +1,154 @@
+// Package source handles fetching APKs from various sources.
+package source
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+
+	"github.com/zapstore/zsp/internal/apk"
+	"github.com/zapstore/zsp/internal/config"
+)
+
+// Asset represents a downloadable APK asset.
+type Asset struct {
+	Name        string // Filename
+	URL         string // Download URL (empty for local files)
+	Size        int64  // Size in bytes (0 if unknown)
+	LocalPath   string // Local file path (set after download or for local sources)
+	ContentType string // MIME type (if known)
+}
+
+// Release represents a release containing one or more APK assets.
+type Release struct {
+	Version    string   // Version string (e.g., "1.2.3" or "v1.2.3")
+	TagName    string   // Git tag name (if applicable)
+	Changelog  string   // Release notes/changelog
+	Assets     []*Asset // Available APK assets
+	PreRelease bool     // Whether this is a pre-release
+}
+
+// Source is the interface for APK sources.
+type Source interface {
+	// Type returns the source type.
+	Type() config.SourceType
+
+	// FetchLatestRelease fetches the latest release information.
+	FetchLatestRelease(ctx context.Context) (*Release, error)
+
+	// Download downloads an asset and returns the local path.
+	// For local sources, this may just return the existing path.
+	// The optional progress callback is called during download.
+	Download(ctx context.Context, asset *Asset, destDir string, progress DownloadProgress) (string, error)
+}
+
+// ParsedRelease contains a release with its parsed APK information.
+type ParsedRelease struct {
+	Release *Release
+	APK     *apk.APKInfo
+	Asset   *Asset
+}
+
+// Options contains options for creating a source.
+type Options struct {
+	// BaseDir is the base directory for resolving relative paths.
+	// Typically the directory containing the config file.
+	BaseDir string
+}
+
+// New creates a new source based on the config.
+func New(cfg *config.Config) (Source, error) {
+	return NewWithOptions(cfg, Options{})
+}
+
+// NewWithOptions creates a new source with options.
+func NewWithOptions(cfg *config.Config, opts Options) (Source, error) {
+	sourceType := cfg.GetSourceType()
+
+	switch sourceType {
+	case config.SourceLocal:
+		return NewLocalWithBase(cfg.Local, opts.BaseDir)
+	case config.SourceGitHub:
+		return NewGitHub(cfg)
+	case config.SourceGitLab:
+		return NewGitLab(cfg)
+	case config.SourceFDroid:
+		return NewFDroid(cfg)
+	case config.SourceWeb:
+		return NewWeb(cfg)
+	default:
+		return nil, fmt.Errorf("unsupported source type: %s", sourceType)
+	}
+}
+
+// DownloadProgress is called during downloads to report progress.
+type DownloadProgress func(downloaded, total int64)
+
+// Downloader wraps an io.Reader to track download progress.
+type ProgressReader struct {
+	Reader     io.Reader
+	Total      int64
+	Downloaded int64
+	OnProgress DownloadProgress
+}
+
+func (pr *ProgressReader) Read(p []byte) (int, error) {
+	n, err := pr.Reader.Read(p)
+	pr.Downloaded += int64(n)
+	if pr.OnProgress != nil {
+		pr.OnProgress(pr.Downloaded, pr.Total)
+	}
+	return n, err
+}
+
+// DownloadHTTP downloads a file from a URL with optional progress reporting.
+// This is a shared helper for all HTTP-based sources.
+func DownloadHTTP(ctx context.Context, client *http.Client, url, destPath string, expectedSize int64, progress DownloadProgress) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("download failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download failed with status %d", resp.StatusCode)
+	}
+
+	// Use Content-Length from response if available, otherwise use expected size
+	total := resp.ContentLength
+	if total <= 0 {
+		total = expectedSize
+	}
+
+	// Create destination file
+	f, err := os.Create(destPath)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %w", err)
+	}
+	defer f.Close()
+
+	// Wrap reader with progress tracking if callback provided
+	var reader io.Reader = resp.Body
+	if progress != nil {
+		reader = &ProgressReader{
+			Reader:     resp.Body,
+			Total:      total, // May be 0 if unknown; callback will receive 0 as total
+			OnProgress: progress,
+		}
+	}
+
+	_, err = io.Copy(f, reader)
+	if err != nil {
+		os.Remove(destPath)
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+
+	return nil
+}
