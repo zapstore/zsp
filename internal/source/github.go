@@ -14,13 +14,17 @@ import (
 	"github.com/zapstore/zsp/internal/config"
 )
 
+// ErrNotModified is returned when the release hasn't changed since the last check.
+var ErrNotModified = fmt.Errorf("release not modified")
+
 // GitHub implements Source for GitHub releases.
 type GitHub struct {
-	cfg    *config.Config
-	owner  string
-	repo   string
-	token  string
-	client *http.Client
+	cfg      *config.Config
+	owner    string
+	repo     string
+	token    string
+	client   *http.Client
+	cacheDir string
 }
 
 // NewGitHub creates a new GitHub source.
@@ -36,18 +40,49 @@ func NewGitHub(cfg *config.Config) (*GitHub, error) {
 		return nil, fmt.Errorf("invalid GitHub repo path: %s", repoPath)
 	}
 
+	// Set up cache directory for ETags
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		cacheDir = os.TempDir()
+	}
+	cacheDir = filepath.Join(cacheDir, "zsp", "github")
+
 	return &GitHub{
-		cfg:    cfg,
-		owner:  parts[0],
-		repo:   parts[1],
-		token:  os.Getenv("GITHUB_TOKEN"),
-		client: &http.Client{Timeout: 30 * time.Second},
+		cfg:      cfg,
+		owner:    parts[0],
+		repo:     parts[1],
+		token:    os.Getenv("GITHUB_TOKEN"),
+		client:   &http.Client{Timeout: 30 * time.Second},
+		cacheDir: cacheDir,
 	}, nil
 }
 
 // Type returns the source type.
 func (g *GitHub) Type() config.SourceType {
 	return config.SourceGitHub
+}
+
+// etagFilePath returns the file path for storing an ETag.
+func (g *GitHub) etagFilePath() string {
+	// Use owner_repo as filename to avoid path issues
+	return filepath.Join(g.cacheDir, fmt.Sprintf("%s_%s.etag", g.owner, g.repo))
+}
+
+// loadETag reads the cached ETag from disk.
+func (g *GitHub) loadETag() string {
+	data, err := os.ReadFile(g.etagFilePath())
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// saveETag writes the ETag to disk.
+func (g *GitHub) saveETag(etag string) error {
+	if err := os.MkdirAll(g.cacheDir, 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(g.etagFilePath(), []byte(etag), 0644)
 }
 
 // githubRelease represents a GitHub release API response.
@@ -70,6 +105,8 @@ type githubAsset struct {
 }
 
 // FetchLatestRelease fetches the latest release from GitHub.
+// Uses conditional requests (ETag/If-None-Match) to reduce rate limit usage.
+// Returns ErrNotModified if the release hasn't changed since the last check.
 func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", g.owner, g.repo)
 
@@ -84,11 +121,21 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		req.Header.Set("Authorization", "Bearer "+g.token)
 	}
 
+	// Add If-None-Match header if we have a cached ETag
+	if etag := g.loadETag(); etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
+
 	resp, err := g.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch release: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// Handle 304 Not Modified - no new release since last check
+	if resp.StatusCode == http.StatusNotModified {
+		return nil, ErrNotModified
+	}
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("no releases found for %s/%s", g.owner, g.repo)
@@ -112,7 +159,16 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		return nil, fmt.Errorf("failed to parse release: %w", err)
 	}
 
-	// Convert to our Release type
+	// Save ETag for future conditional requests
+	if etag := resp.Header.Get("ETag"); etag != "" {
+		_ = g.saveETag(etag) // Ignore error, caching is best-effort
+	}
+
+	return g.convertRelease(&ghRelease), nil
+}
+
+// convertRelease converts a GitHub release to our Release type.
+func (g *GitHub) convertRelease(ghRelease *githubRelease) *Release {
 	assets := make([]*Asset, len(ghRelease.Assets))
 	for i, a := range ghRelease.Assets {
 		assets[i] = &Asset{
@@ -135,7 +191,7 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		Changelog:  ghRelease.Body,
 		Assets:     assets,
 		PreRelease: ghRelease.Prerelease,
-	}, nil
+	}
 }
 
 // Download downloads an asset from GitHub.
