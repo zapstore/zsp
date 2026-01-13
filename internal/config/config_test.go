@@ -324,6 +324,11 @@ func TestDetectSourceType(t *testing.T) {
 		{"https://github.com/user/repo", SourceGitHub},
 		{"https://GITHUB.COM/User/Repo", SourceGitHub},
 		{"https://gitlab.com/user/repo", SourceGitLab},
+		{"https://GITLAB.COM/User/Repo", SourceGitLab},
+		// Self-hosted GitLab instances with "gitlab" in the domain
+		{"https://gitlab.example.com/user/repo", SourceGitLab},
+		{"https://gitlab.company.org/user/repo", SourceGitLab},
+		{"https://my-gitlab.company.com/user/repo", SourceGitLab},
 		{"https://codeberg.org/user/repo", SourceGitea},
 		{"https://CODEBERG.ORG/User/Repo", SourceGitea},
 		{"https://f-droid.org/packages/com.example", SourceFDroid},

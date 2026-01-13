@@ -350,7 +350,8 @@ func DetectSourceType(rawURL string) SourceType {
 	if strings.Contains(lower, "github.com") {
 		return SourceGitHub
 	}
-	if strings.Contains(lower, "gitlab.com") {
+	// GitLab: gitlab.com and self-hosted instances with "gitlab" in the domain
+	if strings.Contains(lower, "gitlab.com") || containsGitLab(lower) {
 		return SourceGitLab
 	}
 	if strings.Contains(lower, "codeberg.org") {
@@ -367,6 +368,16 @@ func DetectSourceType(rawURL string) SourceType {
 	}
 
 	return SourceUnknown
+}
+
+// containsGitLab checks if a URL's domain contains "gitlab" (for self-hosted instances).
+func containsGitLab(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return strings.Contains(host, "gitlab")
 }
 
 // FDroidRepoInfo contains information about an F-Droid compatible repository.
