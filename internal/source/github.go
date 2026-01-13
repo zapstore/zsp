@@ -17,14 +17,21 @@ import (
 // ErrNotModified is returned when the release hasn't changed since the last check.
 var ErrNotModified = fmt.Errorf("release not modified")
 
+// releaseCache stores ETag and release data for conditional requests.
+type releaseCache struct {
+	ETag    string         `json:"etag"`
+	Release *githubRelease `json:"release"`
+}
+
 // GitHub implements Source for GitHub releases.
 type GitHub struct {
-	cfg      *config.Config
-	owner    string
-	repo     string
-	token    string
-	client   *http.Client
-	cacheDir string
+	cfg       *config.Config
+	owner     string
+	repo      string
+	token     string
+	client    *http.Client
+	cacheDir  string
+	SkipCache bool // Set to true to bypass ETag cache (--overwrite-release)
 }
 
 // NewGitHub creates a new GitHub source.
@@ -62,27 +69,59 @@ func (g *GitHub) Type() config.SourceType {
 	return config.SourceGitHub
 }
 
-// etagFilePath returns the file path for storing an ETag.
-func (g *GitHub) etagFilePath() string {
+// cacheFilePath returns the file path for storing cached release data.
+func (g *GitHub) cacheFilePath() string {
 	// Use owner_repo as filename to avoid path issues
-	return filepath.Join(g.cacheDir, fmt.Sprintf("%s_%s.etag", g.owner, g.repo))
+	return filepath.Join(g.cacheDir, fmt.Sprintf("%s_%s.json", g.owner, g.repo))
 }
 
-// loadETag reads the cached ETag from disk.
-func (g *GitHub) loadETag() string {
-	data, err := os.ReadFile(g.etagFilePath())
+// loadCache reads the cached release data from disk.
+func (g *GitHub) loadCache() *releaseCache {
+	data, err := os.ReadFile(g.cacheFilePath())
 	if err != nil {
-		return ""
+		return nil
 	}
-	return strings.TrimSpace(string(data))
+	var cache releaseCache
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return nil
+	}
+	return &cache
 }
 
-// saveETag writes the ETag to disk.
-func (g *GitHub) saveETag(etag string) error {
+// saveCache writes the release data and ETag to disk.
+func (g *GitHub) saveCache(etag string, release *githubRelease) error {
 	if err := os.MkdirAll(g.cacheDir, 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(g.etagFilePath(), []byte(etag), 0644)
+	cache := releaseCache{
+		ETag:    etag,
+		Release: release,
+	}
+	data, err := json.Marshal(&cache)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(g.cacheFilePath(), data, 0644)
+}
+
+// GetCachedRelease returns the cached release if available.
+func (g *GitHub) GetCachedRelease() *Release {
+	cache := g.loadCache()
+	if cache == nil || cache.Release == nil {
+		return nil
+	}
+	return g.convertRelease(cache.Release)
+}
+
+// ClearCache removes the cached release data.
+// This should be called when publishing fails so the next run can retry.
+func (g *GitHub) ClearCache() error {
+	cachePath := g.cacheFilePath()
+	err := os.Remove(cachePath)
+	if os.IsNotExist(err) {
+		return nil // No cache to clear
+	}
+	return err
 }
 
 // githubRelease represents a GitHub release API response.
@@ -107,6 +146,7 @@ type githubAsset struct {
 // FetchLatestRelease fetches the latest release from GitHub.
 // Uses conditional requests (ETag/If-None-Match) to reduce rate limit usage.
 // Returns ErrNotModified if the release hasn't changed since the last check.
+// Set SkipCache field to true to bypass the ETag check and always fetch fresh data.
 func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", g.owner, g.repo)
 
@@ -121,9 +161,11 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		req.Header.Set("Authorization", "Bearer "+g.token)
 	}
 
-	// Add If-None-Match header if we have a cached ETag
-	if etag := g.loadETag(); etag != "" {
-		req.Header.Set("If-None-Match", etag)
+	// Add If-None-Match header if we have a cached ETag (unless skipping cache)
+	if !g.SkipCache {
+		if cache := g.loadCache(); cache != nil && cache.ETag != "" {
+			req.Header.Set("If-None-Match", cache.ETag)
+		}
 	}
 
 	resp, err := g.client.Do(req)
@@ -159,9 +201,9 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		return nil, fmt.Errorf("failed to parse release: %w", err)
 	}
 
-	// Save ETag for future conditional requests
+	// Save ETag and release data for future conditional requests
 	if etag := resp.Header.Get("ETag"); etag != "" {
-		_ = g.saveETag(etag) // Ignore error, caching is best-effort
+		_ = g.saveCache(etag, &ghRelease) // Ignore error, caching is best-effort
 	}
 
 	return g.convertRelease(&ghRelease), nil

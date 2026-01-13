@@ -30,7 +30,7 @@ func NewPublisher(relayURLs []string) *Publisher {
 	return &Publisher{relayURLs: relayURLs}
 }
 
-// NewPublisherFromEnv creates a publisher from the RELAYS environment variable.
+// NewPublisherFromEnv creates a publisher from the RELAY_URLS environment variable.
 func NewPublisherFromEnv(relaysEnv string) *Publisher {
 	if relaysEnv == "" {
 		return NewPublisher(nil)
@@ -94,13 +94,13 @@ func (p *Publisher) publishToRelay(ctx context.Context, url string, event *nostr
 func (p *Publisher) PublishEventSet(ctx context.Context, events *EventSet) (map[string][]PublishResult, error) {
 	results := make(map[string][]PublishResult)
 
-	// Publish in order: app metadata, release, asset
+	// Publish in order: Software Application, Software Release, Software Asset
 	eventList := []struct {
 		name  string
 		event *nostr.Event
 	}{
-		{"app_metadata", events.AppMetadata},
-		{"release", events.Release},
+		{"software_application", events.AppMetadata},
+		{"software_release", events.Release},
 		{"software_asset", events.SoftwareAsset},
 	}
 
@@ -116,3 +116,72 @@ func (p *Publisher) RelayURLs() []string {
 	return p.relayURLs
 }
 
+// ExistingAsset contains information about an existing software asset on relays.
+type ExistingAsset struct {
+	Event    *nostr.Event
+	RelayURL string
+	Version  string
+}
+
+// CheckExistingAsset queries all relays to check if a Software Asset already exists.
+// It searches for kind 3063 events with a matching `i` tag (identifier) and `version` tag.
+// Returns the first existing Software Asset found, or nil if none exists.
+func (p *Publisher) CheckExistingAsset(ctx context.Context, identifier, version string) (*ExistingAsset, error) {
+	filter := nostr.Filter{
+		Kinds: []int{KindSoftwareAsset},
+		Tags: nostr.TagMap{
+			"i":       []string{identifier},
+			"version": []string{version},
+		},
+		Limit: 1,
+	}
+
+	// Query each relay until we find an existing asset
+	for _, url := range p.relayURLs {
+		event, err := p.queryRelay(ctx, url, filter)
+		if err != nil {
+			// Log error but continue to other relays
+			continue
+		}
+		if event != nil {
+			// Extract version from the event for confirmation
+			existingVersion := ""
+			for _, tag := range event.Tags {
+				if len(tag) >= 2 && tag[0] == "version" {
+					existingVersion = tag[1]
+					break
+				}
+			}
+			return &ExistingAsset{
+				Event:    event,
+				RelayURL: url,
+				Version:  existingVersion,
+			}, nil
+		}
+	}
+
+	return nil, nil
+}
+
+// queryRelay queries a single relay for events matching the filter.
+func (p *Publisher) queryRelay(ctx context.Context, url string, filter nostr.Filter) (*nostr.Event, error) {
+	ctx, cancel := context.WithTimeout(ctx, RelayTimeout)
+	defer cancel()
+
+	relay, err := nostr.RelayConnect(ctx, url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect: %w", err)
+	}
+	defer relay.Close()
+
+	events, err := relay.QuerySync(ctx, filter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query: %w", err)
+	}
+
+	if len(events) > 0 {
+		return events[0], nil
+	}
+
+	return nil, nil
+}

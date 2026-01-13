@@ -339,9 +339,8 @@ func (f *MetadataFetcher) fetchFDroidMetadata(ctx context.Context) (*AppMetadata
 
 	// Create F-Droid source to fetch metadata
 	fdroidSrc := &FDroid{
-		packageID:     packageID,
-		fdroidDataDir: os.Getenv("FDROID_DATA_PATH"),
-		client:        f.client,
+		packageID: packageID,
+		client:    f.client,
 	}
 
 	fdMeta, err := fdroidSrc.FetchMetadata(ctx)

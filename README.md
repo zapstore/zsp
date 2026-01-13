@@ -113,9 +113,8 @@ changelog: ./CHANGELOG.md  # Optional, uses remote release notes if not set
 |----------|----------|-------------|
 | `SIGN_WITH` | Yes | `nsec1...`, `npub1...`, `bunker://...`, or `browser` |
 | `GITHUB_TOKEN` | No | GitHub API token (avoids rate limits) |
-| `RELAYS` | No | Custom relay URLs (comma-separated) |
-| `BLOSSOM` | No | Custom Blossom server |
-| `FDROID_DATA_PATH` | No | Path to fdroiddata clone |
+| `RELAY_URLS` | No | Custom relay URLs (comma-separated) |
+| `BLOSSOM_URL` | No | Custom Blossom server |
 
 ## CLI Flags
 

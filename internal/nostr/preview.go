@@ -1,0 +1,1045 @@
+package nostr
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"html"
+	"net"
+	"net/http"
+	"os/exec"
+	"regexp"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/nbd-wtf/go-nostr"
+	"github.com/zapstore/zsp/internal/apk"
+	"github.com/zapstore/zsp/internal/config"
+)
+
+// DefaultPreviewPort is the default port for the HTML preview server.
+const DefaultPreviewPort = 17008
+
+// PreviewData contains all data needed to render the preview.
+type PreviewData struct {
+	// Software Application
+	AppName     string
+	PackageID   string
+	Summary     string
+	Description string
+	Website     string
+	Repository  string
+	License     string
+	Tags        []string
+	IconData    []byte   // Raw PNG icon data
+	IconURL     string   // URL if using remote icon
+	ImageURLs   []string // Screenshot URLs
+	Platforms   []string
+
+	// Software Release
+	Version     string
+	VersionCode int64
+	Channel     string
+	Changelog   string
+
+	// Software Asset
+	SHA256          string
+	FileSize        int64
+	Filename        string
+	CertFingerprint string
+	MinSDK          int32
+	TargetSDK       int32
+
+	// Publish targets (where it WILL be published)
+	BlossomServer string
+	RelayURLs     []string
+
+	// Events for JSON view (optional - may be nil before signing)
+	AppMetadataEvent   *nostr.Event
+	ReleaseEvent       *nostr.Event
+	SoftwareAssetEvent *nostr.Event
+}
+
+// BuildPreviewDataFromAPK creates preview data from APK info and config (before signing).
+// This is used for the pre-signing preview where events are not yet available.
+func BuildPreviewDataFromAPK(apkInfo *apk.APKInfo, cfg *config.Config, changelog string, blossomURL string, relayURLs []string) *PreviewData {
+	// Determine app name
+	name := cfg.Name
+	if name == "" {
+		name = apkInfo.Label
+	}
+	if name == "" {
+		name = apkInfo.PackageID
+	}
+
+	// Convert architectures to platform identifiers
+	platforms := make([]string, 0, len(apkInfo.Architectures))
+	for _, arch := range apkInfo.Architectures {
+		platforms = append(platforms, archToPlatform(arch))
+	}
+	if len(platforms) == 0 {
+		platforms = []string{"android-arm64-v8a", "android-armeabi-v7a", "android-x86", "android-x86_64"}
+	}
+
+	return &PreviewData{
+		AppName:         name,
+		PackageID:       apkInfo.PackageID,
+		Summary:         cfg.Summary,
+		Description:     cfg.Description,
+		Website:         cfg.Website,
+		Repository:      cfg.Repository,
+		License:         cfg.License,
+		Tags:            cfg.Tags,
+		IconData:        apkInfo.Icon,
+		ImageURLs:       cfg.Images,
+		Platforms:       platforms,
+		Version:         apkInfo.VersionName,
+		VersionCode:     apkInfo.VersionCode,
+		Channel:         "main",
+		Changelog:       changelog,
+		SHA256:          apkInfo.SHA256,
+		FileSize:        apkInfo.FileSize,
+		Filename:        apkInfo.FilePath,
+		CertFingerprint: apkInfo.CertFingerprint,
+		MinSDK:          apkInfo.MinSDK,
+		TargetSDK:       apkInfo.TargetSDK,
+		BlossomServer:   blossomURL,
+		RelayURLs:       relayURLs,
+	}
+}
+
+// BuildPreviewData creates preview data from APK info, config, and events.
+// Use this after signing when events are available.
+func BuildPreviewData(apkInfo *apk.APKInfo, cfg *config.Config, events *EventSet, changelog string, blossomURL string, relayURLs []string) *PreviewData {
+	data := BuildPreviewDataFromAPK(apkInfo, cfg, changelog, blossomURL, relayURLs)
+	if events != nil {
+		data.AppMetadataEvent = events.AppMetadata
+		data.ReleaseEvent = events.Release
+		data.SoftwareAssetEvent = events.SoftwareAsset
+	}
+	return data
+}
+
+// PreviewServer serves the HTML preview.
+type PreviewServer struct {
+	port        int
+	server      *http.Server
+	listener    net.Listener
+	data        *PreviewData
+	confirmed   chan bool
+	done        chan struct{}
+	cliConfirm  chan struct{} // signals when confirmed from CLI
+	changelog   string
+	iconURL     string
+	iconDataB64 string
+}
+
+// NewPreviewServer creates a preview server on the specified port.
+// If port is 0, it uses the default port.
+func NewPreviewServer(data *PreviewData, changelog, iconURL string, port int) *PreviewServer {
+	if port == 0 {
+		port = DefaultPreviewPort
+	}
+
+	// Pre-encode icon to base64 if available
+	var iconDataB64 string
+	if len(data.IconData) > 0 {
+		iconDataB64 = base64.StdEncoding.EncodeToString(data.IconData)
+	}
+
+	return &PreviewServer{
+		port:        port,
+		data:        data,
+		confirmed:   make(chan bool, 1),
+		done:        make(chan struct{}),
+		cliConfirm:  make(chan struct{}),
+		changelog:   changelog,
+		iconURL:     iconURL,
+		iconDataB64: iconDataB64,
+	}
+}
+
+// Start starts the preview server and opens the browser.
+func (s *PreviewServer) Start() (string, error) {
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", s.port))
+	if err != nil {
+		return "", fmt.Errorf("failed to start preview server: %w", err)
+	}
+	s.listener = listener
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", s.handleIndex)
+	mux.HandleFunc("/api/confirm", s.handleConfirm)
+	mux.HandleFunc("/api/cancel", s.handleCancel)
+	mux.HandleFunc("/api/events", s.handleEvents)
+	mux.HandleFunc("/api/poll", s.handlePoll)
+
+	s.server = &http.Server{Handler: mux}
+	go s.server.Serve(listener)
+
+	url := fmt.Sprintf("http://localhost:%d/", s.port)
+
+	// Open browser
+	if err := openBrowser(url); err != nil {
+		// Non-fatal: user can manually open the URL
+		fmt.Printf("Could not open browser automatically. Please open: %s\n", url)
+	}
+
+	return url, nil
+}
+
+// WaitForConfirmation blocks until user confirms or cancels in the browser.
+func (s *PreviewServer) WaitForConfirmation(ctx context.Context) (bool, error) {
+	select {
+	case confirmed := <-s.confirmed:
+		return confirmed, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case <-time.After(10 * time.Minute):
+		return false, fmt.Errorf("preview confirmation timed out")
+	}
+}
+
+// WaitForBrowserConfirmation returns a channel that receives the result when browser confirms/cancels.
+func (s *PreviewServer) WaitForBrowserConfirmation() <-chan bool {
+	return s.confirmed
+}
+
+// Close shuts down the preview server.
+func (s *PreviewServer) Close() error {
+	close(s.done)
+	if s.server != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		return s.server.Shutdown(ctx)
+	}
+	return nil
+}
+
+func (s *PreviewServer) handleIndex(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(s.buildHTML()))
+}
+
+func (s *PreviewServer) handleConfirm(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	select {
+	case s.confirmed <- true:
+	default:
+	}
+}
+
+func (s *PreviewServer) handleCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	select {
+	case s.confirmed <- false:
+	default:
+	}
+}
+
+func (s *PreviewServer) handleEvents(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	// Events may be nil if preview is shown before signing
+	if s.data.AppMetadataEvent == nil {
+		json.NewEncoder(w).Encode(map[string]any{
+			"message": "Events will be generated after signing",
+		})
+		return
+	}
+	events := map[string]any{
+		"softwareApplication": s.data.AppMetadataEvent,
+		"softwareRelease":     s.data.ReleaseEvent,
+		"softwareAsset":       s.data.SoftwareAssetEvent,
+	}
+	json.NewEncoder(w).Encode(events)
+}
+
+// handlePoll returns whether the preview was confirmed from CLI.
+// Browser polls this to know when to close itself.
+func (s *PreviewServer) handlePoll(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	select {
+	case <-s.cliConfirm:
+		// Confirmed from CLI, tell browser to close
+		json.NewEncoder(w).Encode(map[string]any{"close": true})
+	default:
+		// Not yet confirmed
+		json.NewEncoder(w).Encode(map[string]any{"close": false})
+	}
+}
+
+// ConfirmFromCLI confirms the preview from the CLI, which signals the browser to close.
+func (s *PreviewServer) ConfirmFromCLI() {
+	close(s.cliConfirm)
+	select {
+	case s.confirmed <- true:
+	default:
+	}
+}
+
+func (s *PreviewServer) buildHTML() string {
+	d := s.data
+
+	// Icon handling
+	iconHTML := ""
+	if s.iconDataB64 != "" {
+		iconHTML = fmt.Sprintf(`<img src="data:image/png;base64,%s" alt="App Icon">`, s.iconDataB64)
+	} else if s.iconURL != "" {
+		iconHTML = fmt.Sprintf(`<img src="%s" alt="App Icon">`, html.EscapeString(s.iconURL))
+	}
+
+	// Tags HTML
+	tagsHTML := ""
+	if len(d.Tags) > 0 {
+		var tagSpans []string
+		for _, tag := range d.Tags {
+			tagSpans = append(tagSpans, fmt.Sprintf(`<span class="tag">%s</span>`, html.EscapeString(tag)))
+		}
+		tagsHTML = strings.Join(tagSpans, " ")
+	}
+
+	// Platforms HTML
+	platformsHTML := ""
+	if len(d.Platforms) > 0 {
+		var platformSpans []string
+		for _, p := range d.Platforms {
+			platformSpans = append(platformSpans, fmt.Sprintf(`<span class="platform">%s</span>`, html.EscapeString(p)))
+		}
+		platformsHTML = strings.Join(platformSpans, " ")
+	}
+
+	// Screenshots HTML
+	screenshotsHTML := ""
+	if len(d.ImageURLs) > 0 {
+		var imgs []string
+		for _, url := range d.ImageURLs {
+			imgs = append(imgs, fmt.Sprintf(`<img src="%s" alt="Screenshot">`, html.EscapeString(url)))
+		}
+		screenshotsHTML = fmt.Sprintf(`<div class="screenshots">%s</div>`, strings.Join(imgs, ""))
+	}
+
+	// Format file size
+	fileSizeStr := formatBytes(d.FileSize)
+
+	// Relay URLs HTML
+	relayURLsHTML := ""
+	if len(d.RelayURLs) > 0 {
+		var urls []string
+		for _, url := range d.RelayURLs {
+			urls = append(urls, fmt.Sprintf(`<span class="url">%s</span>`, html.EscapeString(url)))
+		}
+		relayURLsHTML = strings.Join(urls, "<br>")
+	}
+
+	// Changelog - convert to HTML
+	changelogHTML := ""
+	if s.changelog != "" {
+		changelogHTML = simpleMarkdownToHTML(s.changelog)
+	}
+
+	// Description - convert markdown to HTML
+	descriptionHTML := ""
+	if d.Description != "" {
+		descriptionHTML = simpleMarkdownToHTML(d.Description)
+	}
+
+	return fmt.Sprintf(previewHTML,
+		// Title and header
+		html.EscapeString(d.AppName),
+		iconHTML,
+		html.EscapeString(d.AppName),
+		// App details
+		html.EscapeString(d.PackageID),
+		html.EscapeString(d.Summary),
+		buildInfoRow("Website", d.Website, true),
+		buildInfoRow("Repository", d.Repository, true),
+		buildInfoRow("License", d.License, false),
+		tagsHTML,
+		platformsHTML,
+		// Description
+		descriptionHTML,
+		screenshotsHTML,
+		// Release info
+		html.EscapeString(d.Version),
+		d.VersionCode,
+		html.EscapeString(d.Channel),
+		changelogHTML,
+		// Asset info
+		html.EscapeString(d.SHA256),
+		fileSizeStr,
+		strconv.Itoa(int(d.MinSDK)),
+		strconv.Itoa(int(d.TargetSDK)),
+		html.EscapeString(d.CertFingerprint),
+		// Publish targets
+		html.EscapeString(d.BlossomServer),
+		relayURLsHTML,
+	)
+}
+
+// simpleMarkdownToHTML converts basic markdown to HTML.
+func simpleMarkdownToHTML(text string) string {
+	// Escape HTML first
+	text = html.EscapeString(text)
+
+	// Convert headers (### Header -> <h3>Header</h3>)
+	lines := strings.Split(text, "\n")
+	var result []string
+	inCodeBlock := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Handle code blocks
+		if strings.HasPrefix(trimmed, "```") {
+			inCodeBlock = !inCodeBlock
+			if inCodeBlock {
+				result = append(result, "<pre><code>")
+			} else {
+				result = append(result, "</code></pre>")
+			}
+			continue
+		}
+
+		if inCodeBlock {
+			result = append(result, line)
+			continue
+		}
+
+		// Headers
+		if strings.HasPrefix(trimmed, "### ") {
+			result = append(result, "<h4>"+strings.TrimPrefix(trimmed, "### ")+"</h4>")
+			continue
+		}
+		if strings.HasPrefix(trimmed, "## ") {
+			result = append(result, "<h3>"+strings.TrimPrefix(trimmed, "## ")+"</h3>")
+			continue
+		}
+		if strings.HasPrefix(trimmed, "# ") {
+			result = append(result, "<h2>"+strings.TrimPrefix(trimmed, "# ")+"</h2>")
+			continue
+		}
+
+		// List items
+		if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
+			result = append(result, "<li>"+strings.TrimPrefix(strings.TrimPrefix(trimmed, "- "), "* ")+"</li>")
+			continue
+		}
+
+		// Empty lines become paragraph breaks
+		if trimmed == "" {
+			result = append(result, "<br>")
+			continue
+		}
+
+		// Regular text - apply inline formatting
+		line = applyInlineMarkdown(line)
+		result = append(result, line)
+	}
+
+	return strings.Join(result, "\n")
+}
+
+// applyInlineMarkdown applies inline markdown formatting (bold, italic, code, links).
+func applyInlineMarkdown(text string) string {
+	// Bold: **text** or __text__
+	text = replacePattern(text, `\*\*([^*]+)\*\*`, "<strong>$1</strong>")
+	text = replacePattern(text, `__([^_]+)__`, "<strong>$1</strong>")
+
+	// Italic: *text* or _text_
+	text = replacePattern(text, `\*([^*]+)\*`, "<em>$1</em>")
+	text = replacePattern(text, `_([^_]+)_`, "<em>$1</em>")
+
+	// Inline code: `text`
+	text = replacePattern(text, "`([^`]+)`", "<code>$1</code>")
+
+	// Links: [text](url)
+	text = replacePattern(text, `\[([^\]]+)\]\(([^)]+)\)`, `<a href="$2" target="_blank">$1</a>`)
+
+	return text
+}
+
+// replacePattern applies a regex replacement.
+func replacePattern(text, pattern, replacement string) string {
+	re := regexp.MustCompile(pattern)
+	return re.ReplaceAllString(text, replacement)
+}
+
+func buildInfoRow(label, value string, isLink bool) string {
+	if value == "" {
+		return ""
+	}
+	if isLink && (strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://")) {
+		return fmt.Sprintf(`<div class="info-row"><span class="label">%s</span><a href="%s" target="_blank">%s</a></div>`,
+			label, html.EscapeString(value), html.EscapeString(value))
+	}
+	return fmt.Sprintf(`<div class="info-row"><span class="label">%s</span><span>%s</span></div>`,
+		label, html.EscapeString(value))
+}
+
+func formatBytes(bytes int64) string {
+	if bytes < 1024 {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	if bytes < 1024*1024 {
+		return fmt.Sprintf("%.1f KB", float64(bytes)/1024)
+	}
+	return fmt.Sprintf("%.2f MB", float64(bytes)/(1024*1024))
+}
+
+func openBrowser(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", url)
+	default:
+		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
+	}
+	return cmd.Start()
+}
+
+const previewHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>%s - Release Preview</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    
+    body {
+      font-family: 'SF Pro Text', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a1e;
+      color: #e0e0e4;
+      min-height: 100vh;
+      line-height: 1.6;
+    }
+    
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 32px 24px;
+    }
+    
+    .header-banner {
+      background: #4a3a5c;
+      padding: 16px 24px;
+      border-radius: 8px;
+      margin-bottom: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    
+    .header-banner h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: #fff;
+    }
+    
+    .header-banner .badge {
+      background: rgba(255,255,255,0.15);
+      padding: 6px 12px;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      color: #e0e0e4;
+    }
+    
+    .app-header {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      padding: 24px;
+      background: #232328;
+      border: 1px solid #3a3a42;
+      border-radius: 8px;
+      margin-bottom: 24px;
+    }
+    
+    .app-header img {
+      width: 96px;
+      height: 96px;
+      border-radius: 16px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    }
+    
+    .app-header .app-title {
+      flex: 1;
+    }
+    
+    .app-header h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 4px;
+    }
+    
+    .app-header .package-id {
+      font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+      font-size: 0.9rem;
+      color: #9080a0;
+      background: rgba(74, 58, 92, 0.3);
+      padding: 4px 10px;
+      border-radius: 4px;
+      display: inline-block;
+    }
+    
+    .app-header .summary {
+      color: #a0a0a8;
+      margin-top: 8px;
+      font-size: 1.05rem;
+    }
+    
+    .section {
+      background: #232328;
+      border: 1px solid #3a3a42;
+      border-radius: 8px;
+      padding: 24px;
+      margin-bottom: 20px;
+    }
+    
+    .section h2 {
+      font-size: 1.2rem;
+      font-weight: 600;
+      color: #9080a0;
+      border-bottom: 1px solid #3a3a42;
+      padding-bottom: 12px;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    
+    .section h2::before {
+      content: '';
+      display: block;
+      width: 4px;
+      height: 20px;
+      background: #4a3a5c;
+      border-radius: 2px;
+    }
+    
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+    }
+    
+    .info-row {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    
+    .info-row .label {
+      font-size: 0.8rem;
+      color: #8a8a94;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    
+    .info-row a {
+      color: #9080a0;
+      text-decoration: none;
+      word-break: break-all;
+    }
+    
+    .info-row a:hover {
+      text-decoration: underline;
+      color: #a898b8;
+    }
+    
+    .tags-container, .platforms-container {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    
+    .tag {
+      background: rgba(74, 58, 92, 0.3);
+      border: 1px solid rgba(74, 58, 92, 0.5);
+      color: #9080a0;
+      padding: 4px 12px;
+      border-radius: 4px;
+      font-size: 0.85rem;
+    }
+    
+    .platform {
+      background: rgba(90, 90, 100, 0.2);
+      border: 1px solid rgba(90, 90, 100, 0.4);
+      color: #a0a0a8;
+      padding: 4px 12px;
+      border-radius: 4px;
+      font-size: 0.85rem;
+      font-family: 'SF Mono', monospace;
+    }
+    
+    .description {
+      color: #c8c8d0;
+      line-height: 1.7;
+    }
+    .description h2, .description h3, .description h4 {
+      color: #9080a0;
+      margin: 16px 0 8px 0;
+    }
+    .description h2:first-child, .description h3:first-child, .description h4:first-child {
+      margin-top: 0;
+    }
+    .description a { color: #9080a0; }
+    .description code {
+      background: rgba(74, 58, 92, 0.3);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: 'SF Mono', monospace;
+      font-size: 0.9em;
+    }
+    .description pre {
+      background: #1a1a1e;
+      padding: 12px;
+      border-radius: 6px;
+      overflow-x: auto;
+      margin: 12px 0;
+      border: 1px solid #3a3a42;
+    }
+    .description li {
+      margin-left: 20px;
+      margin-bottom: 4px;
+    }
+    
+    .screenshots {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 16px;
+      margin-top: 16px;
+    }
+    
+    .screenshots img {
+      width: 100%%;
+      border-radius: 6px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    }
+    
+    .version-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(74, 58, 92, 0.3);
+      border: 1px solid rgba(74, 58, 92, 0.5);
+      padding: 8px 16px;
+      border-radius: 6px;
+      margin-bottom: 16px;
+    }
+    
+    .version-badge .ver {
+      font-size: 1.2rem;
+      font-weight: 600;
+      color: #fff;
+    }
+    
+    .version-badge .code {
+      font-size: 0.8rem;
+      color: #8a8a94;
+    }
+    
+    .channel-badge {
+      background: #4a3a5c;
+      color: #e0e0e4;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+    
+    .changelog {
+      background: #1a1a1e;
+      padding: 16px;
+      border-radius: 6px;
+      border: 1px solid #3a3a42;
+      color: #c8c8d0;
+      max-height: 300px;
+      overflow-y: auto;
+      font-size: 0.95rem;
+    }
+    .changelog h2, .changelog h3, .changelog h4 {
+      color: #9080a0;
+      margin: 12px 0 6px 0;
+    }
+    .changelog li {
+      margin-left: 20px;
+      margin-bottom: 4px;
+    }
+    
+    .asset-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+    }
+    
+    .asset-item {
+      background: #1a1a1e;
+      padding: 16px;
+      border-radius: 6px;
+      border: 1px solid #3a3a42;
+    }
+    
+    .asset-item .label {
+      font-size: 0.75rem;
+      color: #8a8a94;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 4px;
+    }
+    
+    .asset-item .value {
+      font-family: 'SF Mono', monospace;
+      font-size: 0.9rem;
+      color: #e0e0e4;
+      word-break: break-all;
+    }
+    
+    .url {
+      color: #9080a0;
+      text-decoration: none;
+      font-family: 'SF Mono', monospace;
+      font-size: 0.85rem;
+    }
+    
+    .url:hover {
+      text-decoration: underline;
+    }
+    
+    .actions {
+      display: flex;
+      gap: 16px;
+      margin-top: 32px;
+      padding-top: 24px;
+      border-top: 1px solid #3a3a42;
+    }
+    
+    button {
+      flex: 1;
+      padding: 16px 32px;
+      border: none;
+      border-radius: 6px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    
+    .btn-confirm {
+      background: #4a3a5c;
+      color: #e0e0e4;
+      box-shadow: 0 2px 8px rgba(74, 58, 92, 0.3);
+    }
+    
+    .btn-confirm:hover {
+      background: #5a4a6c;
+      box-shadow: 0 4px 12px rgba(74, 58, 92, 0.4);
+    }
+    
+    .btn-cancel {
+      background: #2a2a30;
+      color: #c8c8d0;
+      border: 1px solid #3a3a42;
+    }
+    
+    .btn-cancel:hover {
+      background: #3a3a42;
+    }
+    
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none !important;
+    }
+    
+    .status {
+      text-align: center;
+      padding: 24px;
+      border-radius: 6px;
+      margin-top: 16px;
+      display: none;
+    }
+    
+    .status.success {
+      display: block;
+      background: rgba(74, 58, 92, 0.3);
+      border: 1px solid #4a3a5c;
+      color: #9080a0;
+    }
+    
+    .status.error {
+      display: block;
+      background: rgba(140, 50, 50, 0.2);
+      border: 1px solid #8c3232;
+      color: #e0a0a0;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header-banner">
+      <h1>⚡ zsp Release Preview</h1>
+      <span class="badge">Review before signing</span>
+    </div>
+    
+    <div class="app-header">
+      %s
+      <div class="app-title">
+        <h1>%s</h1>
+        <span class="package-id">%s</span>
+        <p class="summary">%s</p>
+      </div>
+    </div>
+    
+    <div class="section">
+      <h2>App Details</h2>
+      <div class="info-grid">
+        %s
+        %s
+        %s
+      </div>
+      <div class="tags-container">%s</div>
+      <div class="platforms-container">%s</div>
+    </div>
+    
+    <div class="section">
+      <h2>Description</h2>
+      <div class="description">%s</div>
+      %s
+    </div>
+    
+    <div class="section">
+      <h2>Software Release</h2>
+      <div class="version-badge">
+        <span class="ver">v%s</span>
+        <span class="code">(%d)</span>
+        <span class="channel-badge">%s</span>
+      </div>
+      <div class="changelog">%s</div>
+    </div>
+    
+    <div class="section">
+      <h2>Software Asset</h2>
+      <div class="asset-grid">
+        <div class="asset-item">
+          <div class="label">SHA256</div>
+          <div class="value">%s</div>
+        </div>
+        <div class="asset-item">
+          <div class="label">File Size</div>
+          <div class="value">%s</div>
+        </div>
+        <div class="asset-item">
+          <div class="label">Min SDK</div>
+          <div class="value">%s</div>
+        </div>
+        <div class="asset-item">
+          <div class="label">Target SDK</div>
+          <div class="value">%s</div>
+        </div>
+        <div class="asset-item" style="grid-column: 1 / -1;">
+          <div class="label">APK Certificate Hash</div>
+          <div class="value">%s</div>
+        </div>
+      </div>
+    </div>
+    
+    <div class="section">
+      <h2>Publish To</h2>
+      <div class="asset-grid">
+        <div class="asset-item" style="grid-column: 1 / -1;">
+          <div class="label">Blossom CDN</div>
+          <div class="value">%s</div>
+        </div>
+        <div class="asset-item" style="grid-column: 1 / -1;">
+          <div class="label">Nostr Relays</div>
+          <div class="value">%s</div>
+        </div>
+      </div>
+    </div>
+    
+    <div class="actions">
+      <button class="btn-cancel" onclick="cancel()">Cancel</button>
+      <button class="btn-confirm" onclick="confirm()">✓ Looks Good - Continue</button>
+    </div>
+    
+    <div id="status" class="status"></div>
+  </div>
+  
+  <script>
+    let polling = true;
+    
+    async function confirm() {
+      polling = false;
+      try {
+        await fetch('/api/confirm', { method: 'POST' });
+        const status = document.getElementById('status');
+        status.className = 'status success';
+        status.innerHTML = '✓ Confirmed! Returning to terminal...';
+        document.querySelectorAll('button').forEach(b => b.disabled = true);
+        setTimeout(() => window.close(), 500);
+      } catch (e) {
+        const status = document.getElementById('status');
+        status.className = 'status error';
+        status.textContent = 'Error: ' + e.message;
+      }
+    }
+    
+    async function cancel() {
+      polling = false;
+      try {
+        await fetch('/api/cancel', { method: 'POST' });
+        const status = document.getElementById('status');
+        status.className = 'status error';
+        status.innerHTML = 'Cancelled. Returning to terminal...';
+        document.querySelectorAll('button').forEach(b => b.disabled = true);
+        setTimeout(() => window.close(), 500);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    
+    // Poll for CLI confirmation
+    async function pollCLI() {
+      while (polling) {
+        try {
+          const resp = await fetch('/api/poll');
+          const data = await resp.json();
+          if (data.close) {
+            const status = document.getElementById('status');
+            status.className = 'status success';
+            status.innerHTML = '✓ Confirmed from terminal! Closing...';
+            document.querySelectorAll('button').forEach(b => b.disabled = true);
+            setTimeout(() => window.close(), 500);
+            return;
+          }
+        } catch (e) {
+          // Server probably closed
+          return;
+        }
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
+    
+    pollCLI();
+  </script>
+</body>
+</html>`

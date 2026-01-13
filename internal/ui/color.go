@@ -47,29 +47,29 @@ func initStyles() {
 
 	TitleStyle = lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("99")) // Purple
+		Foreground(lipgloss.Color("#9080a0")) // Dark muted purple
 
 	SuccessStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("42")) // Green
+		Foreground(lipgloss.Color("#6b8c6b")) // Muted sage green
 
 	ErrorStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("196")) // Red
+		Foreground(lipgloss.Color("#c87070")) // Muted coral red
 
 	WarningStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("214")) // Orange
+		Foreground(lipgloss.Color("#c9a866")) // Muted gold
 
 	InfoStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("39")) // Blue
+		Foreground(lipgloss.Color("#8a9fc9")) // Muted steel blue
 
 	DimStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("242")) // Gray
+		Foreground(lipgloss.Color("#6a6a74")) // Dark grey
 
 	BoldStyle = lipgloss.NewStyle().
 		Bold(true)
 
 	CodeStyle = lipgloss.NewStyle().
-		Background(lipgloss.Color("236")).
-		Foreground(lipgloss.Color("252")).
+		Background(lipgloss.Color("#2a2a30")).
+		Foreground(lipgloss.Color("#c8c8d0")).
 		Padding(0, 1)
 }
 

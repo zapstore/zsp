@@ -13,13 +13,13 @@ import (
 
 // Event kinds for Zapstore
 const (
-	KindAppMetadata   = 32267 // App metadata (name, description, icon, platforms)
-	KindRelease       = 30063 // Release metadata (version, changelog, asset links)
-	KindSoftwareAsset = 3063  // Software asset (hash, size, URLs, cert hash, platforms)
+	KindAppMetadata   = 32267 // Software Application (name, description, icon, platforms)
+	KindRelease       = 30063 // Software Release (version, changelog, asset links)
+	KindSoftwareAsset = 3063  // Software Asset (hash, size, URLs, cert hash, platforms)
 	KindBlossomAuth   = 24242 // Blossom upload authorization
 )
 
-// AppMetadata contains app-level metadata for kind 32267.
+// AppMetadata contains Software Application metadata (kind 32267).
 type AppMetadata struct {
 	PackageID   string
 	Name        string
@@ -34,7 +34,7 @@ type AppMetadata struct {
 	Platforms   []string // Platform identifiers (e.g., "android-arm64-v8a")
 }
 
-// ReleaseMetadata contains release-level metadata for kind 30063.
+// ReleaseMetadata contains Software Release metadata (kind 30063).
 type ReleaseMetadata struct {
 	PackageID      string
 	Version        string
@@ -45,7 +45,7 @@ type ReleaseMetadata struct {
 	AssetRelayHint string   // Optional relay hint for asset events
 }
 
-// AssetMetadata contains asset-level metadata for kind 3063.
+// AssetMetadata contains Software Asset metadata (kind 3063).
 type AssetMetadata struct {
 	Identifier      string // Asset identifier (may differ from app identifier)
 	Version         string
@@ -67,7 +67,7 @@ type EventSet struct {
 	SoftwareAsset *nostr.Event
 }
 
-// BuildAppMetadataEvent creates a kind 32267 event.
+// BuildAppMetadataEvent creates a Software Application event (kind 32267).
 func BuildAppMetadataEvent(meta *AppMetadata, pubkey string) *nostr.Event {
 	tags := nostr.Tags{
 		{"d", meta.PackageID},
@@ -109,7 +109,7 @@ func BuildAppMetadataEvent(meta *AppMetadata, pubkey string) *nostr.Event {
 	}
 }
 
-// BuildReleaseEvent creates a kind 30063 event.
+// BuildReleaseEvent creates a Software Release event (kind 30063).
 func BuildReleaseEvent(meta *ReleaseMetadata, pubkey string) *nostr.Event {
 	// Channel defaults to "main" if not specified
 	channel := meta.Channel
@@ -142,7 +142,7 @@ func BuildReleaseEvent(meta *ReleaseMetadata, pubkey string) *nostr.Event {
 	}
 }
 
-// BuildSoftwareAssetEvent creates a kind 3063 event.
+// BuildSoftwareAssetEvent creates a Software Asset event (kind 3063).
 func BuildSoftwareAssetEvent(meta *AssetMetadata, pubkey string) *nostr.Event {
 	tags := nostr.Tags{
 		{"i", meta.Identifier},
@@ -274,7 +274,7 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		platforms = []string{"android-arm64-v8a", "android-armeabi-v7a", "android-x86", "android-x86_64"}
 	}
 
-	// App metadata event
+	// Software Application event
 	appMeta := &AppMetadata{
 		PackageID:   apkInfo.PackageID,
 		Name:        name,
@@ -289,7 +289,7 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		Platforms:   platforms,
 	}
 
-	// Release metadata event
+	// Software Release event
 	// AssetEventIDs will be populated by SignEventSet after asset is signed
 	releaseMeta := &ReleaseMetadata{
 		PackageID:     apkInfo.PackageID,
@@ -300,7 +300,7 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		AssetEventIDs: []string{}, // Populated after signing
 	}
 
-	// Asset metadata event
+	// Software Asset event
 	assetMeta := &AssetMetadata{
 		Identifier:      apkInfo.PackageID, // Asset ID same as app ID for APKs
 		Version:         apkInfo.VersionName,

@@ -42,8 +42,18 @@ type Signer interface {
 	Close() error
 }
 
+// SignerOptions contains options for creating a signer.
+type SignerOptions struct {
+	Port int // Custom port for browser signer (0 = default)
+}
+
 // NewSigner creates a signer from a SIGN_WITH value.
 func NewSigner(ctx context.Context, signWith string) (Signer, error) {
+	return NewSignerWithOptions(ctx, signWith, SignerOptions{})
+}
+
+// NewSignerWithOptions creates a signer from a SIGN_WITH value with options.
+func NewSignerWithOptions(ctx context.Context, signWith string, opts SignerOptions) (Signer, error) {
 	signWith = strings.TrimSpace(signWith)
 
 	if strings.HasPrefix(signWith, "nsec1") {
@@ -59,7 +69,7 @@ func NewSigner(ctx context.Context, signWith string) (Signer, error) {
 	}
 
 	if signWith == "browser" {
-		return NewNIP07Signer(ctx)
+		return NewNIP07Signer(ctx, opts.Port)
 	}
 
 	// Check if it's a hex private key (64 hex characters = 32 bytes)
@@ -219,8 +229,8 @@ type BatchSigner interface {
 }
 
 // SignEventSet signs all events in an event set.
-// It signs the SoftwareAsset first to get its ID, adds the reference to Release,
-// then signs Release and AppMetadata.
+// It signs the Software Asset first to get its ID, adds the reference to Software Release,
+// then signs Software Release and Software Application.
 func SignEventSet(ctx context.Context, signer Signer, events *EventSet, relayHint string) error {
 	// Use batch signing if available (e.g., NIP-07 browser signer)
 	// For batch signing, we need to pre-compute the asset ID before signing
@@ -229,22 +239,22 @@ func SignEventSet(ctx context.Context, signer Signer, events *EventSet, relayHin
 	}
 
 	// Sequential signing: sign asset first, add reference to release, then sign rest
-	// 1. Sign the software asset first to get its event ID
+	// 1. Sign the Software Asset first to get its event ID
 	if err := signer.Sign(ctx, events.SoftwareAsset); err != nil {
-		return fmt.Errorf("failed to sign software asset event: %w", err)
+		return fmt.Errorf("failed to sign Software Asset event: %w", err)
 	}
 
-	// 2. Add the asset event ID reference to the release event
+	// 2. Add the asset event ID reference to the Software Release event
 	events.AddAssetReference(events.SoftwareAsset.ID, relayHint)
 
-	// 3. Sign the release event (now with asset reference)
+	// 3. Sign the Software Release event (now with asset reference)
 	if err := signer.Sign(ctx, events.Release); err != nil {
-		return fmt.Errorf("failed to sign release event: %w", err)
+		return fmt.Errorf("failed to sign Software Release event: %w", err)
 	}
 
-	// 4. Sign the app metadata event
+	// 4. Sign the Software Application event
 	if err := signer.Sign(ctx, events.AppMetadata); err != nil {
-		return fmt.Errorf("failed to sign app metadata event: %w", err)
+		return fmt.Errorf("failed to sign Software Application event: %w", err)
 	}
 
 	return nil
@@ -253,15 +263,15 @@ func SignEventSet(ctx context.Context, signer Signer, events *EventSet, relayHin
 // signEventSetBatch handles batch signing for signers like NIP-07.
 // For batch signing, we need a different approach since all events are signed at once.
 func signEventSetBatch(ctx context.Context, batchSigner BatchSigner, events *EventSet, relayHint string) error {
-	// For batch signing, we can't sign asset first and then update release.
-	// Instead, we pre-compute what the asset event ID will be.
+	// For batch signing, we can't sign Software Asset first and then update Software Release.
+	// Instead, we pre-compute what the Software Asset event ID will be.
 	// The ID is SHA256 of the serialized event, so we can compute it before signing.
 
-	// Compute what the asset event ID will be (based on unsigned content)
+	// Compute what the Software Asset event ID will be (based on unsigned content)
 	events.SoftwareAsset.PubKey = events.Release.PubKey // Ensure pubkey is set
 	assetID := events.SoftwareAsset.GetID()
 
-	// Add the asset reference to release before batch signing
+	// Add the asset reference to Software Release before batch signing
 	events.AddAssetReference(assetID, relayHint)
 
 	// Now batch sign all events

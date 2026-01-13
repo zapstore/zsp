@@ -155,9 +155,9 @@ func NewProgress(message string, total int64) *Progress {
 			progress.WithoutPercentage(),
 		)
 	} else {
-		// Beautiful gradient bar with colors
+		// Dark muted purple gradient bar
 		bar = progress.New(
-			progress.WithDefaultGradient(),
+			progress.WithGradient("#4a3a5c", "#6a5a7c"),
 			progress.WithWidth(30),
 			progress.WithoutPercentage(),
 		)
@@ -224,8 +224,9 @@ func NewDownloadTracker(message string, initialTotal int64) *DownloadTracker {
 			progress.WithoutPercentage(),
 		)
 	} else {
+		// Dark muted purple gradient bar
 		bar = progress.New(
-			progress.WithDefaultGradient(),
+			progress.WithGradient("#4a3a5c", "#6a5a7c"),
 			progress.WithWidth(30),
 			progress.WithoutPercentage(),
 		)

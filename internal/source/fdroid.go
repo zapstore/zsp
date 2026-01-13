@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/zapstore/zsp/internal/config"
@@ -18,10 +17,9 @@ import (
 
 // FDroid implements Source for F-Droid packages.
 type FDroid struct {
-	cfg           *config.Config
-	packageID     string
-	fdroidDataDir string // Local fdroiddata clone path (from FDROID_DATA_PATH)
-	client        *http.Client
+	cfg       *config.Config
+	packageID string
+	client    *http.Client
 }
 
 // NewFDroid creates a new F-Droid source.
@@ -33,10 +31,9 @@ func NewFDroid(cfg *config.Config) (*FDroid, error) {
 	}
 
 	return &FDroid{
-		cfg:           cfg,
-		packageID:     packageID,
-		fdroidDataDir: os.Getenv("FDROID_DATA_PATH"),
-		client:        &http.Client{Timeout: 60 * time.Second},
+		cfg:       cfg,
+		packageID: packageID,
+		client:    &http.Client{Timeout: 60 * time.Second},
 	}, nil
 }
 
@@ -212,41 +209,9 @@ func (f *FDroid) Download(ctx context.Context, asset *Asset, destDir string, pro
 	return destPath, nil
 }
 
-// FetchMetadata fetches app metadata from fdroiddata.
+// FetchMetadata fetches app metadata from fdroiddata via GitLab API.
 func (f *FDroid) FetchMetadata(ctx context.Context) (*fdroidMetadata, error) {
-	// Try local fdroiddata first
-	if f.fdroidDataDir != "" {
-		meta, err := f.fetchMetadataLocal()
-		if err == nil {
-			return meta, nil
-		}
-	}
-
-	// Fall back to GitLab API
 	return f.fetchMetadataRemote(ctx)
-}
-
-// fetchMetadataLocal reads metadata from local fdroiddata clone.
-func (f *FDroid) fetchMetadataLocal() (*fdroidMetadata, error) {
-	// Try YAML format first (newer)
-	yamlPath := filepath.Join(f.fdroidDataDir, "metadata", f.packageID+".yml")
-	data, err := os.ReadFile(yamlPath)
-	if err == nil {
-		var meta fdroidMetadata
-		if err := yaml.Unmarshal(data, &meta); err != nil {
-			return nil, fmt.Errorf("failed to parse metadata YAML: %w", err)
-		}
-		return &meta, nil
-	}
-
-	// Try txt format (older)
-	txtPath := filepath.Join(f.fdroidDataDir, "metadata", f.packageID+".txt")
-	data, err = os.ReadFile(txtPath)
-	if err != nil {
-		return nil, fmt.Errorf("metadata file not found")
-	}
-
-	return f.parseTxtMetadata(string(data))
 }
 
 // fetchMetadataRemote fetches metadata from GitLab.
@@ -280,40 +245,6 @@ func (f *FDroid) fetchMetadataRemote(ctx context.Context) (*fdroidMetadata, erro
 	}
 
 	return &meta, nil
-}
-
-// parseTxtMetadata parses the older .txt metadata format.
-func (f *FDroid) parseTxtMetadata(content string) (*fdroidMetadata, error) {
-	meta := &fdroidMetadata{}
-	lines := strings.Split(content, "\n")
-
-	for _, line := range lines {
-		if idx := strings.Index(line, ":"); idx > 0 {
-			key := strings.TrimSpace(line[:idx])
-			value := strings.TrimSpace(line[idx+1:])
-
-			switch key {
-			case "Categories":
-				meta.Categories = strings.Split(value, ",")
-			case "License":
-				meta.License = value
-			case "Web Site":
-				meta.WebSite = value
-			case "Source Code":
-				meta.SourceCode = value
-			case "Issue Tracker":
-				meta.IssueTracker = value
-			case "Name":
-				meta.Name = value
-			case "Auto Name":
-				meta.AutoName = value
-			case "Summary":
-				meta.Summary = value
-			}
-		}
-	}
-
-	return meta, nil
 }
 
 // PackageID returns the F-Droid package ID.

@@ -14,7 +14,8 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 )
 
-const defaultNIP07Port = 17007
+// DefaultNIP07Port is the default port for the NIP-07 browser signer.
+const DefaultNIP07Port = 17007
 
 // NIP07Signer signs events via browser NIP-07 extension.
 type NIP07Signer struct {
@@ -32,10 +33,19 @@ type NIP07Signer struct {
 	browserOpened bool
 }
 
+// NIP07SignerOptions contains options for creating a NIP-07 signer.
+type NIP07SignerOptions struct {
+	Port int // Custom port (0 = use default)
+}
+
 // NewNIP07Signer creates and initializes a NIP-07 browser signer.
-func NewNIP07Signer(ctx context.Context) (*NIP07Signer, error) {
+// If port is 0, the default port (17007) is used.
+func NewNIP07Signer(ctx context.Context, port int) (*NIP07Signer, error) {
+	if port == 0 {
+		port = DefaultNIP07Port
+	}
 	s := &NIP07Signer{
-		port:          defaultNIP07Port,
+		port:          port,
 		mode:          "idle",
 		pubkeyResult:  make(chan string, 1),
 		signingResult: make(chan []map[string]any, 1),
@@ -286,31 +296,32 @@ const nip07HTML = `<!DOCTYPE html>
       max-width: 700px;
       margin: 0 auto;
       padding: 24px;
-      background: #0d1117;
-      color: #c9d1d9;
+      background: linear-gradient(135deg, #1a0a1f 0%, #12071a 50%, #0d0510 100%);
+      color: #e8e0f0;
       line-height: 1.5;
+      min-height: 100vh;
     }
-    h1 { color: #58a6ff; margin-bottom: 8px; }
-    .subtitle { color: #8b949e; margin-bottom: 24px; }
+    h1 { color: #e879f9; margin-bottom: 8px; }
+    .subtitle { color: #a78baf; margin-bottom: 24px; }
     .status {
       padding: 16px;
       border-radius: 8px;
       margin-bottom: 16px;
-      border: 1px solid #30363d;
+      border: 1px solid #3d1f47;
     }
-    .status.waiting { background: #161b22; }
-    .status.success { background: #1f3d2f; border-color: #238636; }
-    .status.error { background: #3d1f1f; border-color: #da3633; }
+    .status.waiting { background: rgba(26, 10, 31, 0.8); }
+    .status.success { background: linear-gradient(135deg, rgba(147, 51, 234, 0.3), rgba(219, 39, 119, 0.3)); border-color: #9333ea; color: #e879f9; }
+    .status.error { background: linear-gradient(135deg, #3d1f1f, #5c1f1f); border-color: #991b1b; color: #fca5a5; }
     pre {
-      background: #161b22;
+      background: #0d0510;
       padding: 16px;
       border-radius: 8px;
       overflow-x: auto;
       font-size: 13px;
-      border: 1px solid #30363d;
+      border: 1px solid #2d1535;
     }
     button {
-      background: #238636;
+      background: linear-gradient(135deg, #9333ea, #db2777);
       color: white;
       border: none;
       padding: 12px 24px;
@@ -318,27 +329,29 @@ const nip07HTML = `<!DOCTYPE html>
       font-size: 16px;
       cursor: pointer;
       font-weight: 500;
+      box-shadow: 0 4px 12px rgba(147, 51, 234, 0.4);
+      transition: all 0.2s ease;
     }
-    button:hover { background: #2ea043; }
-    button:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+    button:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(147, 51, 234, 0.5); }
+    button:disabled { background: #1a0a1f; color: #6b5577; cursor: not-allowed; box-shadow: none; transform: none; }
     .event {
-      background: #161b22;
-      border: 1px solid #30363d;
+      background: rgba(26, 10, 31, 0.8);
+      border: 1px solid #3d1f47;
       border-radius: 8px;
       padding: 16px;
       margin-bottom: 12px;
     }
-    .event.signed { border-color: #238636; }
-    .json-key { color: #7ee787; }
-    .json-string { color: #a5d6ff; }
-    .json-number { color: #d2a8ff; }
+    .event.signed { border-color: #9333ea; box-shadow: 0 0 12px rgba(147, 51, 234, 0.3); }
+    .json-key { color: #c084fc; }
+    .json-string { color: #f0abfc; }
+    .json-number { color: #f472b6; }
     #idle-section, #publicKey-section, #sign-section { display: none; }
     .spinner {
       display: inline-block;
       width: 16px;
       height: 16px;
-      border: 2px solid #30363d;
-      border-top-color: #58a6ff;
+      border: 2px solid #3d1f47;
+      border-top-color: #e879f9;
       border-radius: 50%;
       animation: spin 1s linear infinite;
       margin-right: 8px;
@@ -348,7 +361,7 @@ const nip07HTML = `<!DOCTYPE html>
   </style>
 </head>
 <body>
-  <h1>zsp</h1>
+  <h1>⚡ zsp</h1>
   <p class="subtitle">Sign Nostr events with your browser extension</p>
 
   <div id="idle-section">
@@ -362,7 +375,7 @@ const nip07HTML = `<!DOCTYPE html>
   <div id="sign-section">
     <div id="sign-status" class="status waiting">Ready to sign events</div>
     <button id="sign-all">Sign All Events</button>
-    <p style="margin-top: 12px; color: #8b949e;">After signing, this window will show a completion message and you can close it.</p>
+    <p style="margin-top: 12px; color: #a78baf;">After signing, this window will show a completion message and you can close it.</p>
     <div id="events-container" style="margin-top: 16px;"></div>
   </div>
 

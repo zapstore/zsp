@@ -56,6 +56,9 @@ type Options struct {
 	// BaseDir is the base directory for resolving relative paths.
 	// Typically the directory containing the config file.
 	BaseDir string
+
+	// SkipCache bypasses ETag cache for GitHub sources (--overwrite-release).
+	SkipCache bool
 }
 
 // New creates a new source based on the config.
@@ -71,7 +74,12 @@ func NewWithOptions(cfg *config.Config, opts Options) (Source, error) {
 	case config.SourceLocal:
 		return NewLocalWithBase(cfg.Local, opts.BaseDir)
 	case config.SourceGitHub:
-		return NewGitHub(cfg)
+		gh, err := NewGitHub(cfg)
+		if err != nil {
+			return nil, err
+		}
+		gh.SkipCache = opts.SkipCache
+		return gh, nil
 	case config.SourceGitLab:
 		return NewGitLab(cfg)
 	case config.SourceFDroid:
@@ -85,6 +93,14 @@ func NewWithOptions(cfg *config.Config, opts Options) (Source, error) {
 
 // DownloadProgress is called during downloads to report progress.
 type DownloadProgress func(downloaded, total int64)
+
+// CacheClearer is an optional interface for sources that support cache clearing.
+// Sources that cache release data (like GitHub with ETags) should implement this
+// to allow clearing the cache when publishing fails.
+type CacheClearer interface {
+	// ClearCache removes any cached release data.
+	ClearCache() error
+}
 
 // Downloader wraps an io.Reader to track download progress.
 type ProgressReader struct {

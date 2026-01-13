@@ -150,6 +150,21 @@ func PromptSecret(message string) (string, error) {
 	return strings.TrimSpace(input), nil
 }
 
+// PromptInt asks for an integer input with a default value.
+func PromptInt(message string, defaultValue int) (int, error) {
+	defaultStr := strconv.Itoa(defaultValue)
+	input, err := PromptDefault(message, defaultStr)
+	if err != nil {
+		return 0, err
+	}
+
+	value, err := strconv.Atoi(input)
+	if err != nil {
+		return 0, fmt.Errorf("invalid number: %s", input)
+	}
+	return value, nil
+}
+
 // PrintHeader prints a section header.
 func PrintHeader(message string) {
 	fmt.Println()
