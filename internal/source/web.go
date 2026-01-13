@@ -23,7 +23,7 @@ type Web struct {
 
 // NewWeb creates a new web scraping source.
 func NewWeb(cfg *config.Config) (*Web, error) {
-	if cfg.ReleaseRepository == nil || !cfg.ReleaseRepository.IsWebSource {
+	if cfg.ReleaseSource == nil || !cfg.ReleaseSource.IsWebSource {
 		return nil, fmt.Errorf("invalid web source configuration")
 	}
 
@@ -40,7 +40,7 @@ func (w *Web) Type() config.SourceType {
 
 // FetchLatestRelease fetches the latest release via web scraping.
 func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
-	repo := w.cfg.ReleaseRepository
+	repo := w.cfg.ReleaseSource
 
 	// Extract version using the configured method
 	version, err := w.extractVersion(ctx, repo)
@@ -66,7 +66,7 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 }
 
 // extractVersion extracts the version using the configured method.
-func (w *Web) extractVersion(ctx context.Context, repo *config.ReleaseRepository) (string, error) {
+func (w *Web) extractVersion(ctx context.Context, repo *config.ReleaseSource) (string, error) {
 	if repo.HTML != nil {
 		return w.extractVersionHTML(ctx, repo.URL, repo.HTML)
 	}

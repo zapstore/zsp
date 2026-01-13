@@ -1,0 +1,5 @@
+# IzzyOnDroid source example
+# Source code is on GitHub, APKs come from IzzyOnDroid F-Droid repo
+repository: https://github.com/AntennaPod/AntennaPod
+release_source: https://apt.izzysoft.de/fdroid/index/apk/de.danoeh.antennapod
+

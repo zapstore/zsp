@@ -1,7 +1,7 @@
 # Web scraping example
 # Version is scraped from a web page, APK downloaded from templated URL
 repository: https://github.com/AntennaPod/AntennaPod
-release_repository:
+release_source:
   url: https://f-droid.org/packages/de.danoeh.antennapod/
   asset_url: https://f-droid.org/repo/de.danoeh.antennapod_$version.apk
   html:

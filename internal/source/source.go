@@ -82,6 +82,8 @@ func NewWithOptions(cfg *config.Config, opts Options) (Source, error) {
 		return gh, nil
 	case config.SourceGitLab:
 		return NewGitLab(cfg)
+	case config.SourceGitea:
+		return NewGitea(cfg)
 	case config.SourceFDroid:
 		return NewFDroid(cfg)
 	case config.SourceWeb:

@@ -15,25 +15,26 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// FDroid implements Source for F-Droid packages.
+// FDroid implements Source for F-Droid compatible repositories.
+// Supports: f-droid.org, IzzyOnDroid (apt.izzysoft.de), and other F-Droid repos.
 type FDroid struct {
-	cfg       *config.Config
-	packageID string
-	client    *http.Client
+	cfg      *config.Config
+	repoInfo *config.FDroidRepoInfo
+	client   *http.Client
 }
 
 // NewFDroid creates a new F-Droid source.
 func NewFDroid(cfg *config.Config) (*FDroid, error) {
 	url := cfg.GetAPKSourceURL()
-	packageID := config.GetFDroidPackageID(url)
-	if packageID == "" {
+	repoInfo := config.GetFDroidRepoInfo(url)
+	if repoInfo == nil {
 		return nil, fmt.Errorf("invalid F-Droid URL: %s", url)
 	}
 
 	return &FDroid{
-		cfg:       cfg,
-		packageID: packageID,
-		client:    &http.Client{Timeout: 60 * time.Second},
+		cfg:      cfg,
+		repoInfo: repoInfo,
+		client:   &http.Client{Timeout: 60 * time.Second},
 	}, nil
 }
 
@@ -76,18 +77,18 @@ type fdroidMetadata struct {
 	Description   string   `yaml:"Description"`
 }
 
-// FetchLatestRelease fetches the latest release from F-Droid.
+// FetchLatestRelease fetches the latest release from an F-Droid compatible repository.
 func (f *FDroid) FetchLatestRelease(ctx context.Context) (*Release, error) {
-	// Try to get version info from F-Droid index
+	// Try to get version info from the repo index
 	version, err := f.fetchLatestVersion(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	// Build APK download URL
-	// Format: https://f-droid.org/repo/{packageId}_{versionCode}.apk
-	apkURL := fmt.Sprintf("https://f-droid.org/repo/%s_%d.apk", f.packageID, version.VersionCode)
-	apkName := fmt.Sprintf("%s_%d.apk", f.packageID, version.VersionCode)
+	// Format: {repoURL}/{packageId}_{versionCode}.apk
+	apkURL := fmt.Sprintf("%s/%s_%d.apk", f.repoInfo.RepoURL, f.repoInfo.PackageID, version.VersionCode)
+	apkName := fmt.Sprintf("%s_%d.apk", f.repoInfo.PackageID, version.VersionCode)
 
 	assets := []*Asset{
 		{
@@ -103,34 +104,31 @@ func (f *FDroid) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	}, nil
 }
 
-// fetchLatestVersion fetches the latest version info from F-Droid index.
+// fetchLatestVersion fetches the latest version info from the repo index.
 func (f *FDroid) fetchLatestVersion(ctx context.Context) (*fdroidPackageVersion, error) {
-	// Fetch the F-Droid index
-	indexURL := "https://f-droid.org/repo/index-v1.json"
-
-	req, err := http.NewRequestWithContext(ctx, "GET", indexURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", f.repoInfo.IndexURL, nil)
 	if err != nil {
 		return nil, err
 	}
 
 	resp, err := f.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch F-Droid index: %w", err)
+		return nil, fmt.Errorf("failed to fetch repo index: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("F-Droid index fetch failed with status %d", resp.StatusCode)
+		return nil, fmt.Errorf("repo index fetch failed with status %d", resp.StatusCode)
 	}
 
 	var index fdroidIndex
 	if err := json.NewDecoder(resp.Body).Decode(&index); err != nil {
-		return nil, fmt.Errorf("failed to parse F-Droid index: %w", err)
+		return nil, fmt.Errorf("failed to parse repo index: %w", err)
 	}
 
-	versions, ok := index.Packages[f.packageID]
+	versions, ok := index.Packages[f.repoInfo.PackageID]
 	if !ok || len(versions) == 0 {
-		return nil, fmt.Errorf("package %s not found in F-Droid", f.packageID)
+		return nil, fmt.Errorf("package %s not found in repository", f.repoInfo.PackageID)
 	}
 
 	// Find the latest version (highest versionCode)
@@ -209,17 +207,13 @@ func (f *FDroid) Download(ctx context.Context, asset *Asset, destDir string, pro
 	return destPath, nil
 }
 
-// FetchMetadata fetches app metadata from fdroiddata via GitLab API.
+// FetchMetadata fetches app metadata from the repository's metadata source.
 func (f *FDroid) FetchMetadata(ctx context.Context) (*fdroidMetadata, error) {
-	return f.fetchMetadataRemote(ctx)
-}
+	if f.repoInfo.MetadataURL == "" {
+		return nil, fmt.Errorf("no metadata URL available for this repository")
+	}
 
-// fetchMetadataRemote fetches metadata from GitLab.
-func (f *FDroid) fetchMetadataRemote(ctx context.Context) (*fdroidMetadata, error) {
-	// Try YAML format
-	url := fmt.Sprintf("https://gitlab.com/fdroid/fdroiddata/-/raw/master/metadata/%s.yml", f.packageID)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", f.repoInfo.MetadataURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -247,9 +241,14 @@ func (f *FDroid) fetchMetadataRemote(ctx context.Context) (*fdroidMetadata, erro
 	return &meta, nil
 }
 
-// PackageID returns the F-Droid package ID.
+// PackageID returns the package ID.
 func (f *FDroid) PackageID() string {
-	return f.packageID
+	return f.repoInfo.PackageID
+}
+
+// RepoInfo returns the repository information.
+func (f *FDroid) RepoInfo() *config.FDroidRepoInfo {
+	return f.repoInfo
 }
 
 // Helper to convert string to int64

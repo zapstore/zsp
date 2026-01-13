@@ -16,8 +16,10 @@ import (
 )
 
 // GitLab implements Source for GitLab releases.
+// Supports both gitlab.com and self-hosted GitLab instances.
 type GitLab struct {
 	cfg       *config.Config
+	baseURL   string // e.g., "https://gitlab.com" or self-hosted URL
 	projectID string // URL-encoded project path (e.g., "user%2Frepo")
 	client    *http.Client
 }
@@ -25,9 +27,16 @@ type GitLab struct {
 // NewGitLab creates a new GitLab source.
 func NewGitLab(cfg *config.Config) (*GitLab, error) {
 	repoURL := cfg.GetAPKSourceURL()
-	repoPath := config.GetGitLabRepo(repoURL)
+
+	// Use the new helper that extracts both base URL and repo path
+	baseURL, repoPath := config.GetGitLabRepoWithBase(repoURL)
 	if repoPath == "" {
-		return nil, fmt.Errorf("invalid GitLab URL: %s", repoURL)
+		// Fallback to old method for gitlab.com URLs
+		repoPath = config.GetGitLabRepo(repoURL)
+		if repoPath == "" {
+			return nil, fmt.Errorf("invalid GitLab URL: %s", repoURL)
+		}
+		baseURL = "https://gitlab.com"
 	}
 
 	// URL-encode the project path for API calls
@@ -35,6 +44,7 @@ func NewGitLab(cfg *config.Config) (*GitLab, error) {
 
 	return &GitLab{
 		cfg:       cfg,
+		baseURL:   baseURL,
 		projectID: projectID,
 		client:    &http.Client{Timeout: 30 * time.Second},
 	}, nil
@@ -67,7 +77,7 @@ type gitlabAssetLink struct {
 func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	// GitLab API: GET /projects/:id/releases
 	// Returns releases sorted by released_at descending
-	apiURL := fmt.Sprintf("https://gitlab.com/api/v4/projects/%s/releases", g.projectID)
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/releases", g.baseURL, g.projectID)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 	if err != nil {

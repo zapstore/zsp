@@ -27,8 +27,9 @@ type AppMetadata struct {
 
 // MetadataFetcher fetches metadata from external sources.
 type MetadataFetcher struct {
-	cfg    *config.Config
-	client *http.Client
+	cfg       *config.Config
+	client    *http.Client
+	PackageID string // App package ID (e.g., "com.example.app") - set from APK parsing
 }
 
 // NewMetadataFetcher creates a new metadata fetcher.
@@ -39,9 +40,26 @@ func NewMetadataFetcher(cfg *config.Config) *MetadataFetcher {
 	}
 }
 
-// DefaultMetadataSources returns the default metadata sources based on the config's source type.
-// Returns nil if no automatic metadata source applies.
+// NewMetadataFetcherWithPackageID creates a new metadata fetcher with a known package ID.
+func NewMetadataFetcherWithPackageID(cfg *config.Config, packageID string) *MetadataFetcher {
+	return &MetadataFetcher{
+		cfg:       cfg,
+		client:    &http.Client{Timeout: 30 * time.Second},
+		PackageID: packageID,
+	}
+}
+
+// DefaultMetadataSources returns the metadata sources to use.
+// If metadata_sources is specified in config, those are used.
+// Otherwise, defaults are inferred from release_source or repository.
+// Returns nil if no metadata source applies.
 func DefaultMetadataSources(cfg *config.Config) []string {
+	// If explicitly configured, use those
+	if len(cfg.MetadataSources) > 0 {
+		return cfg.MetadataSources
+	}
+
+	// Otherwise, infer from source type
 	sourceType := cfg.GetSourceType()
 
 	switch sourceType {
@@ -83,10 +101,7 @@ func (f *MetadataFetcher) FetchMetadata(ctx context.Context, sources []string) e
 		case "fdroid":
 			meta, err = f.fetchFDroidMetadata(ctx)
 		case "playstore":
-			// Play Store scraping is complex and may violate ToS
-			// For now, skip with a warning
-			fmt.Println("  Note: Play Store metadata fetching not yet implemented")
-			continue
+			meta, err = f.fetchPlayStoreMetadata(ctx)
 		default:
 			return fmt.Errorf("unknown metadata source: %s", source)
 		}
@@ -216,9 +231,9 @@ func (f *MetadataFetcher) fetchGitHubReadme(ctx context.Context, owner, repo str
 func (f *MetadataFetcher) fetchGitLabMetadata(ctx context.Context) (*AppMetadata, error) {
 	repoPath := config.GetGitLabRepo(f.cfg.Repository)
 	if repoPath == "" {
-		// Try release_repository if repository doesn't have GitLab
-		if f.cfg.ReleaseRepository != nil {
-			repoPath = config.GetGitLabRepo(f.cfg.ReleaseRepository.URL)
+		// Try release_source if repository doesn't have GitLab
+		if f.cfg.ReleaseSource != nil {
+			repoPath = config.GetGitLabRepo(f.cfg.ReleaseSource.URL)
 		}
 	}
 	if repoPath == "" {
@@ -325,22 +340,22 @@ func (f *MetadataFetcher) fetchGitLabReadme(ctx context.Context, encodedPath, br
 	return "", fmt.Errorf("no README found")
 }
 
-// fetchFDroidMetadata fetches metadata from F-Droid.
+// fetchFDroidMetadata fetches metadata from F-Droid compatible repositories.
 func (f *MetadataFetcher) fetchFDroidMetadata(ctx context.Context) (*AppMetadata, error) {
-	// Get package ID from release_repository or detect from config
-	var packageID string
-	if f.cfg.ReleaseRepository != nil {
-		packageID = config.GetFDroidPackageID(f.cfg.ReleaseRepository.URL)
+	// Get repo info from release_source
+	var repoInfo *config.FDroidRepoInfo
+	if f.cfg.ReleaseSource != nil {
+		repoInfo = config.GetFDroidRepoInfo(f.cfg.ReleaseSource.URL)
 	}
 
-	if packageID == "" {
-		return nil, fmt.Errorf("no F-Droid package ID configured")
+	if repoInfo == nil {
+		return nil, fmt.Errorf("no F-Droid package configured")
 	}
 
 	// Create F-Droid source to fetch metadata
 	fdroidSrc := &FDroid{
-		packageID: packageID,
-		client:    f.client,
+		repoInfo: repoInfo,
+		client:   f.client,
 	}
 
 	fdMeta, err := fdroidSrc.FetchMetadata(ctx)
@@ -365,6 +380,41 @@ func (f *MetadataFetcher) fetchFDroidMetadata(ctx context.Context) (*AppMetadata
 	// Convert categories to tags
 	for _, cat := range fdMeta.Categories {
 		meta.Tags = append(meta.Tags, strings.ToLower(cat))
+	}
+
+	return meta, nil
+}
+
+// fetchPlayStoreMetadata fetches metadata from Google Play Store.
+func (f *MetadataFetcher) fetchPlayStoreMetadata(ctx context.Context) (*AppMetadata, error) {
+	// Get package ID - prefer the one set from APK parsing
+	packageID := f.PackageID
+
+	// Fallback: try to get from Play Store URL in release_source
+	if packageID == "" && f.cfg.ReleaseSource != nil {
+		packageID = GetPlayStorePackageID(f.cfg.ReleaseSource.URL)
+	}
+
+	// Fallback: try repository URL
+	if packageID == "" {
+		packageID = GetPlayStorePackageID(f.cfg.Repository)
+	}
+
+	if packageID == "" {
+		return nil, fmt.Errorf("no package ID available - ensure APK is parsed first or provide a play.google.com URL")
+	}
+
+	// Create Play Store fetcher and get metadata
+	ps := NewPlayStore(packageID)
+	psMeta, err := ps.FetchMetadata(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	meta := &AppMetadata{
+		Name:        psMeta.Name,
+		Description: psMeta.Description,
+		ImageURLs:   psMeta.ImageURLs,
 	}
 
 	return meta, nil

@@ -77,14 +77,14 @@ repository: https://github.com/user/app
 
 ```yaml
 repository: https://github.com/AntennaPod/AntennaPod
-release_repository: https://f-droid.org/packages/de.danoeh.antennapod
+release_source: https://f-droid.org/packages/de.danoeh.antennapod
 ```
 
 ### Web Scraping Source
 
 ```yaml
 repository: https://github.com/user/app
-release_repository:
+release_source:
   url: https://example.com/releases
   asset_url: https://example.com/app_$version.apk
   html:
@@ -123,6 +123,7 @@ Usage: zsp [options] [config.yaml]
 
 Options:
   -r <url>        Repository URL (quick mode)
+  -s <url>        Release source URL (defaults to -r if not specified)
   -m <source>     Fetch metadata from source (repeatable: -m github -m fdroid)
   -y              Skip confirmations
   -h, --help      Show help with examples
