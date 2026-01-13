@@ -2,6 +2,7 @@ package nostr
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -61,7 +62,22 @@ func NewSigner(ctx context.Context, signWith string) (Signer, error) {
 		return NewNIP07Signer(ctx)
 	}
 
-	return nil, fmt.Errorf("invalid SIGN_WITH format: must be nsec1..., npub1..., bunker://..., or browser")
+	// Check if it's a hex private key (64 hex characters = 32 bytes)
+	if len(signWith) == 64 && isValidHex(signWith) {
+		nsec, err := nip19.EncodePrivateKey(signWith)
+		if err != nil {
+			return nil, fmt.Errorf("invalid hex private key: %w", err)
+		}
+		return NewNsecSigner(nsec)
+	}
+
+	return nil, fmt.Errorf("invalid SIGN_WITH format: must be nsec1..., npub1..., hex private key, bunker://..., or browser")
+}
+
+// isValidHex checks if a string is valid hexadecimal.
+func isValidHex(s string) bool {
+	_, err := hex.DecodeString(s)
+	return err == nil
 }
 
 // NsecSigner signs events with a private key.
