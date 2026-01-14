@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -144,7 +145,7 @@ ENVIRONMENT
   BLOSSOM_URL       Custom CDN server (default: https://cdn.zapstore.dev)
 
 CONFIG FILE (zapstore.yaml)
-  repository: https://github.com/user/app    # Source code repo (for display)
+  repository: https://github.com/user/app    # Source code repo (URL or NIP-34 naddr)
   release_source: <url>                      # APK source (if different from repo)
   local: ./build/app.apk                     # Local APK path (highest priority)
   match: ".*arm64.*\\.apk$"                  # Asset filter regex
@@ -156,7 +157,14 @@ CONFIG FILE (zapstore.yaml)
   website: https://myapp.com                 # App homepage
   icon: ./icon.png                           # Custom icon (local path or URL)
   images: [./screenshot1.png, ...]           # Screenshots (local paths or URLs)
-  changelog: ./CHANGELOG.md                  # Local changelog file (optional)
+  release_notes: ./CHANGELOG.md              # Release notes (file path or URL)
+  release_channel: main                      # Channel: main, beta, nightly, dev
+  commit: abc123                             # Git commit hash (for reproducible builds)
+  supported_nips: ["01", "07"]               # Supported Nostr NIPs
+  min_allowed_version: "1.0.0"               # Minimum allowed version
+  variants:                                  # APK variant patterns
+    fdroid: ".*-fdroid-.*\\.apk$"
+    google: ".*-google-.*\\.apk$"
 
 EXAMPLES
   SIGN_WITH=nsec1... zsp                          # Wizard mode
@@ -238,28 +246,6 @@ func run() error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
-	}
-
-	// Check for missing repository (unless quiet/yes mode)
-	if cfg.Repository == "" && !*yesFlag {
-		ui.PrintWarning("No repository provided.")
-		isClosedSource, err := ui.Confirm("Is this application closed source?", false)
-		if err != nil {
-			return err
-		}
-		if !isClosedSource {
-			repoURL, err := ui.PromptDefault("Repository URL", "")
-			if err != nil {
-				return err
-			}
-			if repoURL != "" {
-				repoURL = normalizeRepoURL(repoURL)
-				if err := config.ValidateURL(repoURL); err != nil {
-					return fmt.Errorf("invalid repository URL: %w", err)
-				}
-				cfg.Repository = repoURL
-			}
-		}
 	}
 
 	// Validate config
@@ -494,7 +480,7 @@ func checkAPK() error {
 		if err != nil {
 			fail(err)
 		}
-		defer os.Remove(apkPath)
+		// APK is cached by Download() for reuse - don't delete
 	}
 
 	// Parse APK
@@ -649,23 +635,33 @@ func publish(ctx context.Context, cfg *config.Config) error {
 			ui.PrintSuccess("Using local APK file")
 		}
 	} else {
-		// Download to temp directory with progress indicator
-		var tracker *ui.DownloadTracker
-		var progressCallback source.DownloadProgress
-		if !*quietFlag {
-			tracker = ui.NewDownloadTracker(fmt.Sprintf("Downloading %s", selectedAsset.Name), selectedAsset.Size)
-			progressCallback = tracker.Callback()
-		}
+		// Check if APK is already cached
+		cachedPath := source.GetCachedDownload(selectedAsset.URL, selectedAsset.Name)
+		if cachedPath != "" {
+			apkPath = cachedPath
+			selectedAsset.LocalPath = cachedPath
+			if !*quietFlag {
+				ui.PrintSuccess("Using cached APK")
+			}
+		} else {
+			// Download to temp directory with progress indicator
+			var tracker *ui.DownloadTracker
+			var progressCallback source.DownloadProgress
+			if !*quietFlag {
+				tracker = ui.NewDownloadTracker(fmt.Sprintf("Downloading %s", selectedAsset.Name), selectedAsset.Size)
+				progressCallback = tracker.Callback()
+			}
 
-		var err error
-		apkPath, err = src.Download(ctx, selectedAsset, "", progressCallback)
-		if tracker != nil {
-			tracker.Done()
+			var err error
+			apkPath, err = src.Download(ctx, selectedAsset, "", progressCallback)
+			if tracker != nil {
+				tracker.Done()
+			}
+			if err != nil {
+				return fmt.Errorf("failed to download APK: %w", err)
+			}
+			// APK is cached by Download() for reuse - don't delete
 		}
-		if err != nil {
-			return fmt.Errorf("failed to download APK: %w", err)
-		}
-		defer os.Remove(apkPath) // Clean up temp file
 	}
 
 	// Parse APK
@@ -768,6 +764,7 @@ func publish(ctx context.Context, cfg *config.Config) error {
 				metaSpinner.Start()
 			}
 			fetcher := source.NewMetadataFetcherWithPackageID(cfg, apkInfo.PackageID)
+			fetcher.APKName = apkInfo.Label // APK name has priority over metadata sources
 			if err := fetcher.FetchMetadata(ctx, metadataSources); err != nil {
 				// Log warning but continue - metadata is optional
 				if metaSpinner != nil {
@@ -828,16 +825,22 @@ func publish(ctx context.Context, cfg *config.Config) error {
 	// Get relay URLs (needed for preview) - reuse publisher from earlier
 	relayURLs := publisher.RelayURLs()
 
-	// Determine changelog: use local file if specified, otherwise use remote release notes
-	changelog := release.Changelog
-	if cfg.Changelog != "" {
-		changelogPath := resolvePath(cfg.Changelog, cfg.BaseDir)
-		changelogData, err := os.ReadFile(changelogPath)
+	// Determine release notes: use config if specified, otherwise use remote release notes
+	// ReleaseNotes can be a local file path or URL
+	releaseNotes := release.Changelog
+	if cfg.ReleaseNotes != "" {
+		var err error
+		releaseNotes, err = source.FetchReleaseNotes(ctx, cfg.ReleaseNotes, apkInfo.VersionName, cfg.BaseDir)
 		if err != nil {
-			return fmt.Errorf("failed to read changelog file %s: %w", changelogPath, err)
+			return fmt.Errorf("failed to fetch release notes: %w", err)
 		}
-		changelog = string(changelogData)
 	}
+
+	// Determine commit hash for reproducible builds (only from config)
+	commit := cfg.Commit
+
+	// Determine variant from config variants map
+	variant := matchVariant(cfg.Variants, filepath.Base(apkInfo.FilePath))
 
 	// Pre-download remote icon and screenshots before preview
 	// This ensures preview shows the actual images and avoids re-downloading during upload
@@ -879,7 +882,7 @@ func publish(ctx context.Context, cfg *config.Config) error {
 				browserPort = nostr.DefaultPreviewPort
 			}
 
-			previewData := nostr.BuildPreviewDataFromAPK(apkInfo, cfg, changelog, blossomURL, relayURLs)
+			previewData := nostr.BuildPreviewDataFromAPK(apkInfo, cfg, releaseNotes, blossomURL, relayURLs)
 			// Override icon with pre-downloaded icon if available (e.g., from Play Store)
 			if preDownloaded != nil && preDownloaded.Icon != nil {
 				previewData.IconData = preDownloaded.Icon.Data
@@ -893,7 +896,7 @@ func publish(ctx context.Context, cfg *config.Config) error {
 					})
 				}
 			}
-			previewServer := nostr.NewPreviewServer(previewData, changelog, "", browserPort)
+			previewServer := nostr.NewPreviewServer(previewData, releaseNotes, "", browserPort)
 			url, err := previewServer.Start()
 			if err != nil {
 				return fmt.Errorf("failed to start preview server: %w", err)
@@ -1005,7 +1008,7 @@ func publish(ctx context.Context, cfg *config.Config) error {
 
 		if isBatchSigner {
 			// Batch signing mode: pre-collect all data, create ALL events (auth + main), sign once
-			events, err = uploadAndSignWithBatch(ctx, cfg, apkInfo, apkPath, release, blossomClient, blossomURL, batchSigner, signer.PublicKey(), relayHint, preDownloaded)
+			events, err = uploadAndSignWithBatch(ctx, cfg, apkInfo, apkPath, release, blossomClient, blossomURL, batchSigner, signer.PublicKey(), relayHint, preDownloaded, variant, commit)
 			if err != nil {
 				return err
 			}
@@ -1023,7 +1026,9 @@ func publish(ctx context.Context, cfg *config.Config) error {
 				BlossomURL: blossomURL,
 				IconURL:    iconURL,
 				ImageURLs:  imageURLs,
-				Changelog:  changelog,
+				Changelog:  releaseNotes,
+				Variant:    variant,
+				Commit:     commit,
 			})
 			if err := nostr.SignEventSet(ctx, signer, events, relayHint); err != nil {
 				return fmt.Errorf("failed to sign events: %w", err)
@@ -1047,7 +1052,9 @@ func publish(ctx context.Context, cfg *config.Config) error {
 			BlossomURL: blossomURL,
 			IconURL:    iconURL,
 			ImageURLs:  imageURLs,
-			Changelog:  changelog,
+			Changelog:  releaseNotes,
+			Variant:    variant,
+			Commit:     commit,
 		})
 		// Sign events (will use batch signing if available)
 		if err := nostr.SignEventSet(ctx, signer, events, relayHint); err != nil {
@@ -1076,7 +1083,8 @@ func publish(ctx context.Context, cfg *config.Config) error {
 
 	// Hash confirmation - user must confirm they're attesting to this hash
 	if !*yesFlag {
-		confirmed, err := confirmHash(apkInfo.SHA256)
+		isClosedSource := cfg.Repository == ""
+		confirmed, err := confirmHash(apkInfo.SHA256, isClosedSource)
 		if err != nil {
 			return fmt.Errorf("hash confirmation failed: %w", err)
 		}
@@ -1151,8 +1159,12 @@ func publish(ctx context.Context, cfg *config.Config) error {
 		fmt.Println(f)
 	}
 
-	// If publishing failed (even partially), clear the cache so we can retry
-	if !allSuccess {
+	// Commit or clear cache based on publish success
+	if allSuccess {
+		// Commit cache to disk so we skip this release next time
+		commitSourceCache(src)
+	} else {
+		// Clear cache so we can retry
 		clearSourceCache(src)
 		if *verboseFlag {
 			fmt.Println("  Cleared release cache for retry")
@@ -1280,7 +1292,8 @@ func truncateString(s string, maxLen int) string {
 
 // confirmHash asks the user to confirm the file hash they just signed.
 // This is a security step since the hash may have been fetched from an external source.
-func confirmHash(sha256Hash string) (bool, error) {
+// If isClosedSource is true, also warns that the app has no repository.
+func confirmHash(sha256Hash string, isClosedSource bool) (bool, error) {
 	fmt.Println()
 	ui.PrintWarning("You just signed an event attesting to this file hash (kind 3063):")
 	fmt.Println()
@@ -1292,6 +1305,11 @@ func confirmHash(sha256Hash string) (bool, error) {
 	fmt.Printf("    %s\n", ui.Dim("shasum -a 256 <path-to-apk>   # macOS"))
 	fmt.Printf("    %s\n", ui.Dim("sha256sum <path-to-apk>       # Linux"))
 	fmt.Println()
+
+	if isClosedSource {
+		ui.PrintWarning("This application has no repository (closed source).")
+		fmt.Println()
+	}
 
 	return ui.Confirm("Confirm hash is correct?", false)
 }
@@ -1560,6 +1578,14 @@ func clearSourceCache(src source.Source) {
 	}
 }
 
+// commitSourceCache commits pending cache data to disk on sources that support it.
+// This is called after successful publishing to persist ETags etc.
+func commitSourceCache(src source.Source) {
+	if cacheCommitter, ok := src.(source.CacheCommitter); ok {
+		_ = cacheCommitter.CommitCache() // Ignore errors, best-effort
+	}
+}
+
 // detectImageMimeType returns the MIME type based on file extension.
 func detectImageMimeType(path string) string {
 	ext := strings.ToLower(filepath.Ext(path))
@@ -1593,21 +1619,20 @@ type uploadItem struct {
 // uploadAndSignWithBatch handles uploads and signing when using a batch signer (e.g., NIP-07).
 // It pre-creates ALL events (blossom auth + main events), batch signs them once, then performs uploads.
 // preDownloaded contains images that were already downloaded before preview (to avoid re-downloading).
-func uploadAndSignWithBatch(ctx context.Context, cfg *config.Config, apkInfo *apk.APKInfo, apkPath string, release *source.Release, client *blossom.Client, blossomURL string, batchSigner nostr.BatchSigner, pubkey string, relayHint string, preDownloaded *preDownloadedImages) (*nostr.EventSet, error) {
+func uploadAndSignWithBatch(ctx context.Context, cfg *config.Config, apkInfo *apk.APKInfo, apkPath string, release *source.Release, client *blossom.Client, blossomURL string, batchSigner nostr.BatchSigner, pubkey string, relayHint string, preDownloaded *preDownloadedImages, variant string, commit string) (*nostr.EventSet, error) {
 	var uploads []uploadItem
 	var iconURL string
 	var imageURLs []string
 	expiration := time.Now().Add(blossom.AuthExpiration)
 
-	// Determine changelog: use local file if specified, otherwise use remote release notes
-	changelog := release.Changelog
-	if cfg.Changelog != "" {
-		changelogPath := resolvePath(cfg.Changelog, cfg.BaseDir)
-		changelogData, err := os.ReadFile(changelogPath)
+	// Determine release notes: use config if specified, otherwise use remote release notes
+	releaseNotes := release.Changelog
+	if cfg.ReleaseNotes != "" {
+		var err error
+		releaseNotes, err = source.FetchReleaseNotes(ctx, cfg.ReleaseNotes, apkInfo.VersionName, cfg.BaseDir)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read changelog file %s: %w", changelogPath, err)
+			return nil, fmt.Errorf("failed to fetch release notes: %w", err)
 		}
-		changelog = string(changelogData)
 	}
 
 	// Collect icon upload - prefer pre-downloaded icon
@@ -1772,7 +1797,9 @@ func uploadAndSignWithBatch(ctx context.Context, cfg *config.Config, apkInfo *ap
 		BlossomURL: blossomURL,
 		IconURL:    iconURL,
 		ImageURLs:  imageURLs,
-		Changelog:  changelog,
+		Changelog:  releaseNotes,
+		Variant:    variant,
+		Commit:     commit,
 	})
 
 	// For batch signing, we need to pre-compute the asset event IDs and add them to release
@@ -2168,4 +2195,24 @@ func selectAPKInteractive(ranked []picker.ScoredAsset) (*source.Asset, error) {
 	}
 
 	return ranked[idx].Asset, nil
+}
+
+// matchVariant matches an APK filename against the variants map and returns the variant name.
+// Returns empty string if no variant matches.
+func matchVariant(variants map[string]string, filename string) string {
+	if len(variants) == 0 {
+		return ""
+	}
+
+	for name, pattern := range variants {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			continue // Skip invalid patterns (should have been caught in validation)
+		}
+		if re.MatchString(filename) {
+			return name
+		}
+	}
+
+	return ""
 }

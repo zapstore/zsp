@@ -27,8 +27,10 @@ type AppMetadata struct {
 	Summary     string
 	Website     string
 	License     string
-	Repository  string
-	Tags        []string
+	Repository  string   // Repository URL (for display)
+	NIP34Repo   string   // NIP-34 repository pointer (a tag): "30617:pubkey:identifier"
+	NIP34Relay  string   // Relay hint for NIP-34 pointer
+	Tags        []string // Category tags
 	IconURL     string   // Blossom URL for icon
 	ImageURLs   []string // Screenshot URLs
 	Platforms   []string // Platform identifiers (e.g., "android-arm64-v8a")
@@ -39,7 +41,7 @@ type ReleaseMetadata struct {
 	PackageID      string
 	Version        string
 	VersionCode    int64
-	Changelog      string
+	Changelog      string   // Release notes (content field)
 	Channel        string   // Release channel: main, beta, nightly, dev
 	AssetEventIDs  []string // Event IDs of asset events (kind 3063)
 	AssetRelayHint string   // Optional relay hint for asset events
@@ -47,17 +49,23 @@ type ReleaseMetadata struct {
 
 // AssetMetadata contains Software Asset metadata (kind 3063).
 type AssetMetadata struct {
-	Identifier      string // Asset identifier (may differ from app identifier)
-	Version         string
-	VersionCode     int64
-	SHA256          string
-	Size            int64
-	URLs            []string // Download URLs (Blossom)
-	CertFingerprint string   // APK signing certificate SHA256
-	MinSDK          int32
-	TargetSDK       int32
-	Platforms       []string // Full platform identifiers (e.g., "android-arm64-v8a")
-	Filename        string   // Original filename (for variant detection)
+	Identifier            string // Asset identifier (may differ from app identifier)
+	Version               string
+	VersionCode           int64
+	SHA256                string
+	Size                  int64
+	URLs                  []string // Download URLs (Blossom)
+	CertFingerprint       string   // APK signing certificate SHA256
+	MinSDK                int32
+	TargetSDK             int32
+	Platforms             []string // Full platform identifiers (e.g., "android-arm64-v8a")
+	Filename              string   // Original filename (for variant detection)
+	Variant               string   // Explicit variant name (e.g., "fdroid", "google")
+	Commit                string   // Git commit hash for reproducible builds
+	Permissions           []string // Android permissions
+	SupportedNIPs         []string // Supported Nostr NIPs
+	MinAllowedVersion     string   // Minimum allowed version string
+	MinAllowedVersionCode int64    // Minimum allowed version code
 }
 
 // EventSet contains all events to be published for an app release.
@@ -91,6 +99,14 @@ func BuildAppMetadataEvent(meta *AppMetadata, pubkey string) *nostr.Event {
 	}
 	if meta.Repository != "" {
 		tags = append(tags, nostr.Tag{"repository", meta.Repository})
+	}
+	// NIP-34 repository pointer (a tag)
+	if meta.NIP34Repo != "" {
+		if meta.NIP34Relay != "" {
+			tags = append(tags, nostr.Tag{"a", meta.NIP34Repo, meta.NIP34Relay})
+		} else {
+			tags = append(tags, nostr.Tag{"a", meta.NIP34Repo})
+		}
 	}
 	// Platform identifiers (f tags) - REQUIRED per NIP-82
 	for _, platform := range meta.Platforms {
@@ -176,13 +192,41 @@ func BuildSoftwareAssetEvent(meta *AssetMetadata, pubkey string) *nostr.Event {
 		tags = append(tags, nostr.Tag{"target_platform_version", strconv.Itoa(int(meta.TargetSDK))})
 	}
 
-	// Filename for variant detection
+	// Filename for variant detection (fallback when no explicit variant)
 	if meta.Filename != "" {
 		tags = append(tags, nostr.Tag{"filename", meta.Filename})
 	}
 
+	// Explicit variant name
+	if meta.Variant != "" {
+		tags = append(tags, nostr.Tag{"variant", meta.Variant})
+	}
+
+	// Git commit hash for reproducible builds
+	if meta.Commit != "" {
+		tags = append(tags, nostr.Tag{"commit", meta.Commit})
+	}
+
+	// Android permissions
+	for _, perm := range meta.Permissions {
+		tags = append(tags, nostr.Tag{"permission", perm})
+	}
+
+	// Supported NIPs
+	for _, nip := range meta.SupportedNIPs {
+		tags = append(tags, nostr.Tag{"supported_nip", nip})
+	}
+
 	// Android-specific tags
 	tags = append(tags, nostr.Tag{"version_code", strconv.FormatInt(meta.VersionCode, 10)})
+
+	// Minimum allowed version
+	if meta.MinAllowedVersion != "" {
+		tags = append(tags, nostr.Tag{"min_allowed_version", meta.MinAllowedVersion})
+	}
+	if meta.MinAllowedVersionCode > 0 {
+		tags = append(tags, nostr.Tag{"min_allowed_version_code", strconv.FormatInt(meta.MinAllowedVersionCode, 10)})
+	}
 
 	// APK certificate hash - REQUIRED for Android per NIP-82
 	if meta.CertFingerprint != "" {
@@ -240,6 +284,8 @@ type BuildEventSetParams struct {
 	IconURL    string
 	ImageURLs  []string
 	Changelog  string // Release notes (from remote source or local file)
+	Variant    string // Explicit variant name (from config variants map)
+	Commit     string // Git commit hash for reproducible builds
 }
 
 // BuildEventSet creates all events for an APK release.
@@ -274,6 +320,16 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		platforms = []string{"android-arm64-v8a", "android-armeabi-v7a", "android-x86", "android-x86_64"}
 	}
 
+	// Build NIP-34 repository pointer if available
+	var nip34Repo, nip34Relay string
+	if cfg.NIP34Repo != nil {
+		// Format: "30617:pubkey:identifier"
+		nip34Repo = "30617:" + cfg.NIP34Repo.Pubkey + ":" + cfg.NIP34Repo.Identifier
+		if len(cfg.NIP34Repo.Relays) > 0 {
+			nip34Relay = cfg.NIP34Repo.Relays[0]
+		}
+	}
+
 	// Software Application event
 	appMeta := &AppMetadata{
 		PackageID:   apkInfo.PackageID,
@@ -283,10 +339,18 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		Website:     cfg.Website,
 		License:     cfg.License,
 		Repository:  cfg.Repository,
+		NIP34Repo:   nip34Repo,
+		NIP34Relay:  nip34Relay,
 		Tags:        cfg.Tags,
 		IconURL:     params.IconURL,
 		ImageURLs:   params.ImageURLs,
 		Platforms:   platforms,
+	}
+
+	// Determine release channel (default: main)
+	channel := cfg.ReleaseChannel
+	if channel == "" {
+		channel = "main"
 	}
 
 	// Software Release event
@@ -296,23 +360,29 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		Version:       apkInfo.VersionName,
 		VersionCode:   apkInfo.VersionCode,
 		Changelog:     params.Changelog,
-		Channel:       "main",
+		Channel:       channel,
 		AssetEventIDs: []string{}, // Populated after signing
 	}
 
 	// Software Asset event
 	assetMeta := &AssetMetadata{
-		Identifier:      apkInfo.PackageID, // Asset ID same as app ID for APKs
-		Version:         apkInfo.VersionName,
-		VersionCode:     apkInfo.VersionCode,
-		SHA256:          apkInfo.SHA256,
-		Size:            apkInfo.FileSize,
-		URLs:            []string{apkURL},
-		CertFingerprint: apkInfo.CertFingerprint,
-		MinSDK:          apkInfo.MinSDK,
-		TargetSDK:       apkInfo.TargetSDK,
-		Platforms:       platforms,
-		Filename:        filepath.Base(apkInfo.FilePath),
+		Identifier:            apkInfo.PackageID, // Asset ID same as app ID for APKs
+		Version:               apkInfo.VersionName,
+		VersionCode:           apkInfo.VersionCode,
+		SHA256:                apkInfo.SHA256,
+		Size:                  apkInfo.FileSize,
+		URLs:                  []string{apkURL},
+		CertFingerprint:       apkInfo.CertFingerprint,
+		MinSDK:                apkInfo.MinSDK,
+		TargetSDK:             apkInfo.TargetSDK,
+		Platforms:             platforms,
+		Filename:              filepath.Base(apkInfo.FilePath),
+		Variant:               params.Variant,
+		Commit:                params.Commit,
+		Permissions:           apkInfo.Permissions,
+		SupportedNIPs:         cfg.SupportedNIPs,
+		MinAllowedVersion:     cfg.MinAllowedVersion,
+		MinAllowedVersionCode: cfg.MinAllowedVersionCode,
 	}
 
 	return &EventSet{

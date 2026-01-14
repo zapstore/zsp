@@ -43,6 +43,9 @@ type APKInfo struct {
 	// Native architectures (e.g., ["arm64-v8a", "armeabi-v7a"])
 	Architectures []string
 
+	// Android permissions (e.g., ["android.permission.INTERNET", "android.permission.CAMERA"])
+	Permissions []string
+
 	// Certificate SHA-256 fingerprint (hex encoded, lowercase)
 	CertFingerprint string
 
@@ -96,6 +99,9 @@ func Parse(path string) (*APKInfo, error) {
 
 	// Extract native architectures from lib/ directory
 	info.Architectures = extractArchitectures(path)
+
+	// Extract permissions from manifest
+	info.Permissions = extractPermissions(manifest)
 
 	// Verify signature and extract certificate fingerprint
 	certFingerprint, err := verifyCertificate(path)
@@ -414,6 +420,22 @@ func extractArchitectures(path string) []string {
 		archs = append(archs, arch)
 	}
 	return archs
+}
+
+// extractPermissions extracts Android permissions from the manifest.
+func extractPermissions(manifest apk.Manifest) []string {
+	if len(manifest.UsesPermissions) == 0 {
+		return nil
+	}
+
+	permissions := make([]string, 0, len(manifest.UsesPermissions))
+	for _, perm := range manifest.UsesPermissions {
+		name := perm.Name.MustString()
+		if name != "" {
+			permissions = append(permissions, name)
+		}
+	}
+	return permissions
 }
 
 // verifyCertificate verifies the APK signature and returns the certificate fingerprint.

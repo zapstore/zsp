@@ -7,15 +7,21 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
+	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip19"
 	"gopkg.in/yaml.v3"
 )
 
 // Config represents the zapstore.yaml configuration file.
 type Config struct {
-	// Source code repository (for display)
+	// Source code repository (for display) - can be URL or NIP-34 naddr
 	Repository string `yaml:"repository,omitempty"`
+
+	// NIP34Repo is the parsed NIP-34 repository pointer (set when repository is an naddr)
+	NIP34Repo *NIP34RepoPointer `yaml:"-"`
 
 	// Release source (for APK fetching) - can be string or ReleaseSource
 	ReleaseSource    *ReleaseSource `yaml:"-"`
@@ -39,8 +45,33 @@ type Config struct {
 	Icon   string   `yaml:"icon,omitempty"`
 	Images []string `yaml:"images,omitempty"`
 
-	// Changelog file path (optional, if not set uses remote release notes)
+	// Release notes: local file path or URL (optional, if not set uses remote release notes)
+	// If URL, contents are fetched. If markdown follows Keep a Changelog format,
+	// only the section for this release is extracted.
+	ReleaseNotes string `yaml:"release_notes,omitempty"`
+
+	// Changelog is deprecated, use ReleaseNotes instead
 	Changelog string `yaml:"changelog,omitempty"`
+
+	// ReleaseChannel specifies the release channel: main (default), beta, nightly, dev
+	ReleaseChannel string `yaml:"release_channel,omitempty"`
+
+	// Commit is the git commit hash for reproducible builds
+	// If not set, can be prompted interactively (unless -y)
+	Commit string `yaml:"commit,omitempty"`
+
+	// SupportedNIPs lists Nostr NIPs supported by this application
+	SupportedNIPs []string `yaml:"supported_nips,omitempty"`
+
+	// MinAllowedVersion is the minimum allowed version string
+	MinAllowedVersion string `yaml:"min_allowed_version,omitempty"`
+
+	// MinAllowedVersionCode is the minimum allowed version code (Android)
+	MinAllowedVersionCode int64 `yaml:"min_allowed_version_code,omitempty"`
+
+	// Variants maps variant names to regex patterns for APK filename matching
+	// Example: { "fdroid": ".*-fdroid-.*\\.apk$", "google": ".*-google-.*\\.apk$" }
+	Variants map[string]string `yaml:"variants,omitempty"`
 
 	// MetadataSources specifies where to fetch additional metadata from.
 	// Supported values: "github", "gitlab", "fdroid", "playstore"
@@ -50,6 +81,13 @@ type Config struct {
 	// BaseDir is the directory containing the config file (for relative paths).
 	// Not parsed from YAML, set by Load().
 	BaseDir string `yaml:"-"`
+}
+
+// NIP34RepoPointer represents a parsed NIP-34 repository naddr.
+type NIP34RepoPointer struct {
+	Pubkey     string   // Repository owner's pubkey (hex)
+	Identifier string   // Repository identifier (d tag)
+	Relays     []string // Relay hints
 }
 
 // ReleaseSource represents a release source configuration.
@@ -169,7 +207,65 @@ func Parse(r io.Reader) (*Config, error) {
 		return nil, err
 	}
 
+	// Parse repository if it's an naddr
+	if err := cfg.parseRepository(); err != nil {
+		return nil, err
+	}
+
+	// Handle deprecated changelog field
+	if cfg.Changelog != "" && cfg.ReleaseNotes == "" {
+		cfg.ReleaseNotes = cfg.Changelog
+	}
+
 	return &cfg, nil
+}
+
+// parseRepository parses the repository field, which can be a URL or NIP-34 naddr.
+func (c *Config) parseRepository() error {
+	if c.Repository == "" {
+		return nil
+	}
+
+	// Check if it's an naddr
+	if strings.HasPrefix(c.Repository, "naddr1") {
+		pointer, err := ParseNaddr(c.Repository)
+		if err != nil {
+			return fmt.Errorf("invalid repository naddr: %w", err)
+		}
+		c.NIP34Repo = pointer
+	}
+
+	return nil
+}
+
+// ParseNaddr parses a NIP-34 repository naddr and validates it.
+// Returns the parsed pointer or an error if invalid.
+func ParseNaddr(naddrStr string) (*NIP34RepoPointer, error) {
+	prefix, data, err := nip19.Decode(naddrStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode naddr: %w", err)
+	}
+
+	if prefix != "naddr" {
+		return nil, fmt.Errorf("expected naddr prefix, got %s", prefix)
+	}
+
+	// nip19.Decode returns nostr.EntityPointer for naddr
+	ep, ok := data.(nostr.EntityPointer)
+	if !ok {
+		return nil, fmt.Errorf("unexpected naddr data type: %T", data)
+	}
+
+	// Validate kind 30617 (NIP-34 repository)
+	if ep.Kind != 30617 {
+		return nil, fmt.Errorf("expected kind 30617 (NIP-34 repository), got %d", ep.Kind)
+	}
+
+	return &NIP34RepoPointer{
+		Pubkey:     ep.PublicKey,
+		Identifier: ep.Identifier,
+		Relays:     ep.Relays,
+	}, nil
 }
 
 // parseReleaseSource handles the polymorphic release_source field.
@@ -181,11 +277,24 @@ func (c *Config) parseReleaseSource() error {
 	switch c.ReleaseSourceRaw.Kind {
 	case yaml.ScalarNode:
 		// Simple string URL
-		var url string
-		if err := c.ReleaseSourceRaw.Decode(&url); err != nil {
+		var urlStr string
+		if err := c.ReleaseSourceRaw.Decode(&urlStr); err != nil {
 			return fmt.Errorf("failed to parse release_source URL: %w", err)
 		}
-		c.ReleaseSource = &ReleaseSource{URL: url}
+
+		// If the URL is from an unknown source (not GitHub, GitLab, etc.),
+		// treat it as a web source with the URL as the asset_url.
+		// This allows: release_source: https://example.com/app.apk
+		// to be shorthand for: release_source: { asset_url: https://example.com/app.apk }
+		// Note: URL is left empty so we don't try to scrape a page - we use asset_url directly.
+		if DetectSourceType(urlStr) == SourceUnknown {
+			c.ReleaseSource = &ReleaseSource{
+				IsWebSource: true,
+				AssetURL:    urlStr,
+			}
+		} else {
+			c.ReleaseSource = &ReleaseSource{URL: urlStr}
+		}
 
 	case yaml.MappingNode:
 		// Complex release source config
@@ -217,8 +326,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("no source specified: need 'local', 'repository', or 'release_source'")
 	}
 
-	// Validate repository URL if provided
-	if c.Repository != "" {
+	// Validate repository URL if provided (skip if it's an naddr)
+	if c.Repository != "" && c.NIP34Repo == nil {
 		if err := ValidateURL(c.Repository); err != nil {
 			return fmt.Errorf("invalid repository URL: %w", err)
 		}
@@ -228,6 +337,21 @@ func (c *Config) Validate() error {
 	if c.ReleaseSource != nil && !c.ReleaseSource.IsWebSource && c.ReleaseSource.URL != "" {
 		if err := ValidateURL(c.ReleaseSource.URL); err != nil {
 			return fmt.Errorf("invalid release_source URL: %w", err)
+		}
+	}
+
+	// Validate release channel if specified
+	if c.ReleaseChannel != "" {
+		validChannels := map[string]bool{"main": true, "beta": true, "nightly": true, "dev": true}
+		if !validChannels[c.ReleaseChannel] {
+			return fmt.Errorf("invalid release_channel %q: must be one of main, beta, nightly, dev", c.ReleaseChannel)
+		}
+	}
+
+	// Validate variants regex patterns
+	for name, pattern := range c.Variants {
+		if _, err := regexp.Compile(pattern); err != nil {
+			return fmt.Errorf("invalid variant %q regex pattern %q: %w", name, pattern, err)
 		}
 	}
 

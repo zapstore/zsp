@@ -175,9 +175,16 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 }
 
 // Download downloads an asset from GitLab.
+// Uses a download cache to avoid re-downloading the same file.
 func (g *GitLab) Download(ctx context.Context, asset *Asset, destDir string, progress DownloadProgress) (string, error) {
 	if asset.URL == "" {
 		return "", fmt.Errorf("asset has no download URL")
+	}
+
+	// Check download cache first
+	if cachedPath := GetCachedDownload(asset.URL, asset.Name); cachedPath != "" {
+		asset.LocalPath = cachedPath
+		return cachedPath, nil
 	}
 
 	// Create destination directory if needed
@@ -233,6 +240,12 @@ func (g *GitLab) Download(ctx context.Context, asset *Asset, destDir string, pro
 	if err != nil {
 		os.Remove(destPath)
 		return "", fmt.Errorf("failed to write file: %w", err)
+	}
+
+	// Save to download cache (best-effort, ignore errors)
+	if cachedPath, err := SaveToDownloadCache(asset.URL, asset.Name, destPath); err == nil {
+		os.Remove(destPath)
+		destPath = cachedPath
 	}
 
 	asset.LocalPath = destPath

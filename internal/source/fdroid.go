@@ -50,31 +50,31 @@ type fdroidIndex struct {
 
 // fdroidPackageVersion represents a package version in the index.
 type fdroidPackageVersion struct {
-	VersionCode int64  `json:"versionCode"`
-	VersionName string `json:"versionName"`
-	ApkName     string `json:"apkName"`
-	Hash        string `json:"hash"`
-	Size        int64  `json:"size"`
-	MinSdkVersion int  `json:"minSdkVersion"`
-	TargetSdkVersion int `json:"targetSdkVersion"`
-	NativeCodes []string `json:"nativecode"`
+	VersionCode      int64    `json:"versionCode"`
+	VersionName      string   `json:"versionName"`
+	ApkName          string   `json:"apkName"`
+	Hash             string   `json:"hash"`
+	Size             int64    `json:"size"`
+	MinSdkVersion    int      `json:"minSdkVersion"`
+	TargetSdkVersion int      `json:"targetSdkVersion"`
+	NativeCodes      []string `json:"nativecode"`
 }
 
 // fdroidMetadata represents metadata from fdroiddata YAML files.
 type fdroidMetadata struct {
-	Categories    []string `yaml:"Categories"`
-	License       string   `yaml:"License"`
-	AuthorName    string   `yaml:"AuthorName"`
-	AuthorEmail   string   `yaml:"AuthorEmail"`
-	WebSite       string   `yaml:"WebSite"`
-	SourceCode    string   `yaml:"SourceCode"`
-	IssueTracker  string   `yaml:"IssueTracker"`
-	Changelog     string   `yaml:"Changelog"`
-	Donate        string   `yaml:"Donate"`
-	Name          string   `yaml:"Name"`
-	AutoName      string   `yaml:"AutoName"`
-	Summary       string   `yaml:"Summary"`
-	Description   string   `yaml:"Description"`
+	Categories   []string `yaml:"Categories"`
+	License      string   `yaml:"License"`
+	AuthorName   string   `yaml:"AuthorName"`
+	AuthorEmail  string   `yaml:"AuthorEmail"`
+	WebSite      string   `yaml:"WebSite"`
+	SourceCode   string   `yaml:"SourceCode"`
+	IssueTracker string   `yaml:"IssueTracker"`
+	Changelog    string   `yaml:"Changelog"`
+	Donate       string   `yaml:"Donate"`
+	Name         string   `yaml:"Name"`
+	AutoName     string   `yaml:"AutoName"`
+	Summary      string   `yaml:"Summary"`
+	Description  string   `yaml:"Description"`
 }
 
 // FetchLatestRelease fetches the latest release from an F-Droid compatible repository.
@@ -143,9 +143,16 @@ func (f *FDroid) fetchLatestVersion(ctx context.Context) (*fdroidPackageVersion,
 }
 
 // Download downloads an APK from F-Droid.
+// Uses a download cache to avoid re-downloading the same file.
 func (f *FDroid) Download(ctx context.Context, asset *Asset, destDir string, progress DownloadProgress) (string, error) {
 	if asset.URL == "" {
 		return "", fmt.Errorf("asset has no download URL")
+	}
+
+	// Check download cache first
+	if cachedPath := GetCachedDownload(asset.URL, asset.Name); cachedPath != "" {
+		asset.LocalPath = cachedPath
+		return cachedPath, nil
 	}
 
 	// Create destination directory if needed
@@ -156,7 +163,9 @@ func (f *FDroid) Download(ctx context.Context, asset *Asset, destDir string, pro
 		return "", fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	destPath := filepath.Join(destDir, asset.Name)
+	// Sanitize filename to prevent path traversal
+	safeName := filepath.Base(asset.Name)
+	destPath := filepath.Join(destDir, safeName)
 
 	// Download the file
 	req, err := http.NewRequestWithContext(ctx, "GET", asset.URL, nil)
@@ -201,6 +210,12 @@ func (f *FDroid) Download(ctx context.Context, asset *Asset, destDir string, pro
 	if err != nil {
 		os.Remove(destPath)
 		return "", fmt.Errorf("failed to write file: %w", err)
+	}
+
+	// Save to download cache (best-effort, ignore errors)
+	if cachedPath, err := SaveToDownloadCache(asset.URL, asset.Name, destPath); err == nil {
+		os.Remove(destPath)
+		destPath = cachedPath
 	}
 
 	asset.LocalPath = destPath

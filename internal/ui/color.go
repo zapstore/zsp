@@ -20,6 +20,7 @@ var (
 	DimStyle     lipgloss.Style
 	BoldStyle    lipgloss.Style
 	CodeStyle    lipgloss.Style
+	LogoStyle    lipgloss.Style
 )
 
 func init() {
@@ -42,6 +43,7 @@ func initStyles() {
 		DimStyle = lipgloss.NewStyle()
 		BoldStyle = lipgloss.NewStyle().Bold(true)
 		CodeStyle = lipgloss.NewStyle()
+		LogoStyle = lipgloss.NewStyle()
 		return
 	}
 
@@ -71,6 +73,9 @@ func initStyles() {
 		Background(lipgloss.Color("#1a1a1a")).
 		Foreground(lipgloss.Color("#c8c8c8")).
 		Padding(0, 1)
+
+	LogoStyle = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#5a5a6e")) // Subtle dusty violet
 }
 
 // SetNoColor enables or disables colored output.

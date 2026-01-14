@@ -147,6 +147,36 @@ release_source:
 			},
 		},
 		{
+			name: "release_source string URL from unknown source becomes web source",
+			yaml: `
+repository: https://github.com/user/app
+release_source: https://example.com/downloads/app.apk
+`,
+			check: func(c *Config) bool {
+				// Shorthand: release_source: URL is equivalent to { asset_url: URL }
+				// URL is empty so we don't scrape a page, we use asset_url directly
+				return c.ReleaseSource != nil &&
+					c.ReleaseSource.IsWebSource &&
+					c.ReleaseSource.URL == "" &&
+					c.ReleaseSource.AssetURL == "https://example.com/downloads/app.apk" &&
+					c.GetSourceType() == SourceWeb
+			},
+		},
+		{
+			name: "release_source string URL from known source stays normal",
+			yaml: `
+repository: https://gitlab.com/user/app
+release_source: https://github.com/other/releases
+`,
+			check: func(c *Config) bool {
+				return c.ReleaseSource != nil &&
+					!c.ReleaseSource.IsWebSource &&
+					c.ReleaseSource.URL == "https://github.com/other/releases" &&
+					c.ReleaseSource.AssetURL == "" &&
+					c.GetSourceType() == SourceGitHub
+			},
+		},
+		{
 			name: "full config",
 			yaml: `
 repository: https://github.com/user/app

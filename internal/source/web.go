@@ -24,6 +24,10 @@ type Web struct {
 	client    *http.Client
 	cacheDir  string
 	SkipCache bool // Set to true to bypass URL cache
+
+	// pendingURLs holds URLs from the last fetch, not yet committed to disk.
+	// Call CommitCache() after successful publishing to persist it.
+	pendingURLs []string
 }
 
 // webCache stores the last downloaded asset URLs for a web source.
@@ -58,8 +62,12 @@ func (w *Web) Type() config.SourceType {
 
 // cacheFilePath returns the file path for storing cached URL data.
 func (w *Web) cacheFilePath() string {
-	// Hash the source URL for a unique filename
-	h := sha256.Sum256([]byte(w.cfg.ReleaseSource.URL))
+	// Hash the source URL (or asset_url if no url) for a unique filename
+	cacheKey := w.cfg.ReleaseSource.URL
+	if cacheKey == "" {
+		cacheKey = w.cfg.ReleaseSource.AssetURL
+	}
+	h := sha256.Sum256([]byte(cacheKey))
 	return filepath.Join(w.cacheDir, hex.EncodeToString(h[:8])+".json")
 }
 
@@ -91,6 +99,7 @@ func (w *Web) saveCache(assetURLs []string) error {
 
 // ClearCache removes the cached URL data.
 func (w *Web) ClearCache() error {
+	w.pendingURLs = nil // Clear pending cache
 	cachePath := w.cacheFilePath()
 	err := os.Remove(cachePath)
 	if os.IsNotExist(err) {
@@ -99,26 +108,48 @@ func (w *Web) ClearCache() error {
 	return err
 }
 
+// CommitCache saves the pending cache to disk.
+// This should be called after successful publishing to persist the URLs.
+func (w *Web) CommitCache() error {
+	if len(w.pendingURLs) == 0 {
+		return nil // Nothing to commit
+	}
+	err := w.saveCache(w.pendingURLs)
+	if err == nil {
+		w.pendingURLs = nil // Clear pending after successful commit
+	}
+	return err
+}
+
 // FetchLatestRelease fetches the latest release via web scraping.
 // It finds URLs matching the asset_url pattern and returns them as assets.
 // Version is left empty - it will be extracted from the APK after download.
+//
+// If URL is empty, asset_url is used directly as the download URL (no page scraping).
+// If URL is set, the page is fetched and asset_url is used as a regex pattern to find APK URLs.
 func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	repo := w.cfg.ReleaseSource
 
-	// Compile asset URL pattern
-	pattern, err := regexp.Compile(repo.AssetURL)
-	if err != nil {
-		return nil, fmt.Errorf("invalid asset_url pattern: %w", err)
-	}
+	var matchedURLs []string
 
-	// Find all matching URLs
-	matchedURLs, err := w.findMatchingURLs(ctx, repo.URL, pattern)
-	if err != nil {
-		return nil, err
-	}
+	if repo.URL == "" {
+		// Direct mode: use asset_url as the download URL directly (no scraping)
+		matchedURLs = []string{repo.AssetURL}
+	} else {
+		// Scraping mode: fetch the page and find URLs matching the pattern
+		pattern, err := regexp.Compile(repo.AssetURL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid asset_url pattern: %w", err)
+		}
 
-	if len(matchedURLs) == 0 {
-		return nil, fmt.Errorf("no URLs matching pattern %q found", repo.AssetURL)
+		matchedURLs, err = w.findMatchingURLs(ctx, repo.URL, pattern)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(matchedURLs) == 0 {
+			return nil, fmt.Errorf("no URLs matching pattern %q found", repo.AssetURL)
+		}
 	}
 
 	// Check cache - if all matched URLs were already processed, skip
@@ -129,10 +160,9 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		}
 	}
 
-	// Save new URLs to cache
-	if err := w.saveCache(matchedURLs); err != nil {
-		// Non-fatal, just log
-	}
+	// Store URLs for later commit (after successful publish).
+	// Don't save to disk yet - call CommitCache() after successful publishing.
+	w.pendingURLs = matchedURLs
 
 	// Convert to assets
 	assets := make([]*Asset, 0, len(matchedURLs))
@@ -258,9 +288,16 @@ func urlsEqual(a, b []string) bool {
 }
 
 // Download downloads an APK from the web.
+// Uses a download cache to avoid re-downloading the same file.
 func (w *Web) Download(ctx context.Context, asset *Asset, destDir string, progress DownloadProgress) (string, error) {
 	if asset.URL == "" {
 		return "", fmt.Errorf("asset has no download URL")
+	}
+
+	// Check download cache first
+	if cachedPath := GetCachedDownload(asset.URL, asset.Name); cachedPath != "" {
+		asset.LocalPath = cachedPath
+		return cachedPath, nil
 	}
 
 	// Create destination directory if needed
@@ -318,6 +355,12 @@ func (w *Web) Download(ctx context.Context, asset *Asset, destDir string, progre
 	if err != nil {
 		os.Remove(destPath)
 		return "", fmt.Errorf("failed to write file: %w", err)
+	}
+
+	// Save to download cache (best-effort, ignore errors)
+	if cachedPath, err := SaveToDownloadCache(asset.URL, asset.Name, destPath); err == nil {
+		os.Remove(destPath)
+		destPath = cachedPath
 	}
 
 	asset.LocalPath = destPath

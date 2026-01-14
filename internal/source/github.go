@@ -23,6 +23,13 @@ type releaseCache struct {
 	Release *githubRelease `json:"release"`
 }
 
+// pendingCache stores cache data that hasn't been committed yet.
+// It's only saved to disk after successful publishing via CommitCache().
+type pendingCache struct {
+	ETag    string
+	Release *githubRelease
+}
+
 // GitHub implements Source for GitHub releases.
 type GitHub struct {
 	cfg       *config.Config
@@ -32,6 +39,10 @@ type GitHub struct {
 	client    *http.Client
 	cacheDir  string
 	SkipCache bool // Set to true to bypass ETag cache (--overwrite-release)
+
+	// pending holds cache data from the last fetch, not yet committed to disk.
+	// Call CommitCache() after successful publishing to persist it.
+	pending *pendingCache
 }
 
 // NewGitHub creates a new GitHub source.
@@ -116,10 +127,24 @@ func (g *GitHub) GetCachedRelease() *Release {
 // ClearCache removes the cached release data.
 // This should be called when publishing fails so the next run can retry.
 func (g *GitHub) ClearCache() error {
+	g.pending = nil // Clear pending cache
 	cachePath := g.cacheFilePath()
 	err := os.Remove(cachePath)
 	if os.IsNotExist(err) {
 		return nil // No cache to clear
+	}
+	return err
+}
+
+// CommitCache saves the pending cache to disk.
+// This should be called after successful publishing to persist the ETag.
+func (g *GitHub) CommitCache() error {
+	if g.pending == nil {
+		return nil // Nothing to commit
+	}
+	err := g.saveCache(g.pending.ETag, g.pending.Release)
+	if err == nil {
+		g.pending = nil // Clear pending after successful commit
 	}
 	return err
 }
@@ -201,9 +226,13 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		return nil, fmt.Errorf("failed to parse release: %w", err)
 	}
 
-	// Save ETag and release data for future conditional requests
+	// Store ETag and release data for later commit (after successful publish).
+	// Don't save to disk yet - call CommitCache() after successful publishing.
 	if etag := resp.Header.Get("ETag"); etag != "" {
-		_ = g.saveCache(etag, &ghRelease) // Ignore error, caching is best-effort
+		g.pending = &pendingCache{
+			ETag:    etag,
+			Release: &ghRelease,
+		}
 	}
 
 	return g.convertRelease(&ghRelease), nil
@@ -240,9 +269,16 @@ func (g *GitHub) convertRelease(ghRelease *githubRelease) *Release {
 }
 
 // Download downloads an asset from GitHub.
+// Uses a download cache to avoid re-downloading the same file.
 func (g *GitHub) Download(ctx context.Context, asset *Asset, destDir string, progress DownloadProgress) (string, error) {
 	if asset.URL == "" {
 		return "", fmt.Errorf("asset has no download URL")
+	}
+
+	// Check download cache first
+	if cachedPath := GetCachedDownload(asset.URL, asset.Name); cachedPath != "" {
+		asset.LocalPath = cachedPath
+		return cachedPath, nil
 	}
 
 	// Create destination directory if needed
@@ -305,6 +341,13 @@ func (g *GitHub) Download(ctx context.Context, asset *Asset, destDir string, pro
 	if err != nil {
 		os.Remove(destPath)
 		return "", fmt.Errorf("failed to write file: %w", err)
+	}
+
+	// Save to download cache (best-effort, ignore errors)
+	if cachedPath, err := SaveToDownloadCache(asset.URL, asset.Name, destPath); err == nil {
+		// Use cached path instead of temp path
+		os.Remove(destPath)
+		destPath = cachedPath
 	}
 
 	// Update asset with local path

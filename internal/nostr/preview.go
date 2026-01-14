@@ -369,7 +369,7 @@ func (s *PreviewServer) buildHTML() string {
 		}
 		assetsHTML += fmt.Sprintf(`
     <div class="section">
-      <h2>Software Asset%s</h2>
+      <h2>Asset%s</h2>
       <div class="asset-grid">
         <div class="asset-item">
           <div class="label">SHA256</div>
@@ -963,7 +963,6 @@ const previewHTML = `<!DOCTYPE html>
     </div>
     
     <div class="section">
-      <h2>Application</h2>
       <div class="app-header">
         %s
         <div class="app-title">

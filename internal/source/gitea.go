@@ -205,9 +205,16 @@ func (g *Gitea) convertRelease(gtRelease *giteaRelease) *Release {
 }
 
 // Download downloads an asset from a Gitea-compatible forge.
+// Uses a download cache to avoid re-downloading the same file.
 func (g *Gitea) Download(ctx context.Context, asset *Asset, destDir string, progress DownloadProgress) (string, error) {
 	if asset.URL == "" {
 		return "", fmt.Errorf("asset has no download URL")
+	}
+
+	// Check download cache first
+	if cachedPath := GetCachedDownload(asset.URL, asset.Name); cachedPath != "" {
+		asset.LocalPath = cachedPath
+		return cachedPath, nil
 	}
 
 	// Create destination directory if needed
@@ -269,6 +276,12 @@ func (g *Gitea) Download(ctx context.Context, asset *Asset, destDir string, prog
 	if err != nil {
 		os.Remove(destPath)
 		return "", fmt.Errorf("failed to write file: %w", err)
+	}
+
+	// Save to download cache (best-effort, ignore errors)
+	if cachedPath, err := SaveToDownloadCache(asset.URL, asset.Name, destPath); err == nil {
+		os.Remove(destPath)
+		destPath = cachedPath
 	}
 
 	// Update asset with local path

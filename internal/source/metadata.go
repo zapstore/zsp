@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -33,6 +34,7 @@ type MetadataFetcher struct {
 	cfg       *config.Config
 	client    *http.Client
 	PackageID string // App package ID (e.g., "com.example.app") - set from APK parsing
+	APKName   string // App name from APK - takes priority over metadata sources
 }
 
 // NewMetadataFetcher creates a new metadata fetcher.
@@ -98,7 +100,42 @@ func DefaultMetadataSources(cfg *config.Config) []string {
 	if len(sources) == 0 {
 		return nil
 	}
+
+	// Sort sources by priority: playstore has priority over github
+	// This ensures Play Store metadata (better descriptions/images) takes precedence
+	sortMetadataSourcesByPriority(sources)
+
 	return sources
+}
+
+// metadataSourcePriority defines the priority order for metadata sources.
+// Lower values = higher priority (processed first, wins for empty fields).
+var metadataSourcePriority = map[string]int{
+	"playstore": 1,
+	"fdroid":    2,
+	"gitlab":    3,
+	"github":    4,
+}
+
+// sortMetadataSourcesByPriority sorts metadata sources by priority.
+// Sources not in the priority map get lowest priority.
+func sortMetadataSourcesByPriority(sources []string) {
+	for i := 0; i < len(sources)-1; i++ {
+		for j := i + 1; j < len(sources); j++ {
+			pi := metadataSourcePriority[sources[i]]
+			pj := metadataSourcePriority[sources[j]]
+			// If not in map, use a high default priority (low precedence)
+			if pi == 0 {
+				pi = 100
+			}
+			if pj == 0 {
+				pj = 100
+			}
+			if pj < pi {
+				sources[i], sources[j] = sources[j], sources[i]
+			}
+		}
+	}
 }
 
 // FetchMetadata fetches metadata from the specified sources and merges into config.
@@ -577,13 +614,19 @@ func (f *MetadataFetcher) fetchPlayStoreMetadata(ctx context.Context) (*AppMetad
 }
 
 // mergeMetadata merges fetched metadata into config, only filling empty fields.
+// Name priority: YAML config > APK name > metadata sources.
 func (f *MetadataFetcher) mergeMetadata(meta *AppMetadata) {
 	if meta == nil {
 		return
 	}
 
-	if f.cfg.Name == "" && meta.Name != "" {
-		f.cfg.Name = meta.Name
+	// Name priority: YAML > APK > metadata sources
+	if f.cfg.Name == "" {
+		if f.APKName != "" {
+			f.cfg.Name = f.APKName
+		} else if meta.Name != "" {
+			f.cfg.Name = meta.Name
+		}
 	}
 	if f.cfg.Description == "" && meta.Description != "" {
 		f.cfg.Description = meta.Description
@@ -648,4 +691,123 @@ func extractFirstParagraph(markdown string) string {
 	}
 
 	return result
+}
+
+// FetchReleaseNotes fetches release notes from a URL or local file.
+// If the content follows the Keep a Changelog format and a version is provided,
+// only the section for that version is extracted.
+func FetchReleaseNotes(ctx context.Context, pathOrURL string, version string, baseDir string) (string, error) {
+	var content string
+
+	if strings.HasPrefix(pathOrURL, "http://") || strings.HasPrefix(pathOrURL, "https://") {
+		// Fetch from URL
+		req, err := http.NewRequestWithContext(ctx, "GET", pathOrURL, nil)
+		if err != nil {
+			return "", fmt.Errorf("failed to create request: %w", err)
+		}
+
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("failed to fetch release notes: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("failed to fetch release notes: status %d", resp.StatusCode)
+		}
+
+		// Limit to 10MB to prevent memory exhaustion
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
+		if err != nil {
+			return "", fmt.Errorf("failed to read release notes: %w", err)
+		}
+		content = string(data)
+	} else {
+		// Read from local file
+		path := pathOrURL
+		if baseDir != "" && !filepath.IsAbs(path) {
+			fullPath := filepath.Join(baseDir, path)
+			// Prevent path traversal
+			if !strings.HasPrefix(filepath.Clean(fullPath), filepath.Clean(baseDir)) {
+				return "", fmt.Errorf("invalid release notes path: traversal attempted")
+			}
+			path = fullPath
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("failed to read release notes file: %w", err)
+		}
+		content = string(data)
+	}
+
+	// If version is provided, try to extract just that section from Keep a Changelog format
+	if version != "" {
+		extracted := extractChangelogSection(content, version)
+		if extracted != "" {
+			return extracted, nil
+		}
+	}
+
+	return content, nil
+}
+
+// extractChangelogSection extracts a specific version's section from Keep a Changelog format.
+// Returns empty string if the version is not found or the format doesn't match.
+func extractChangelogSection(content string, version string) string {
+	lines := strings.Split(content, "\n")
+
+	// Normalize version (remove leading 'v' if present)
+	normalizedVersion := strings.TrimPrefix(version, "v")
+
+	var inSection bool
+	var sectionLines []string
+
+	for _, line := range lines {
+		// Check for version header: ## [1.2.3] or ## [v1.2.3] or ## 1.2.3
+		if strings.HasPrefix(line, "## ") {
+			headerVersion := extractVersionFromHeader(line)
+			if headerVersion == normalizedVersion || headerVersion == "v"+normalizedVersion {
+				inSection = true
+				continue // Skip the header line itself
+			} else if inSection {
+				// Hit the next version section, stop
+				break
+			}
+		} else if inSection {
+			sectionLines = append(sectionLines, line)
+		}
+	}
+
+	if len(sectionLines) == 0 {
+		return ""
+	}
+
+	// Trim leading/trailing empty lines
+	result := strings.TrimSpace(strings.Join(sectionLines, "\n"))
+	return result
+}
+
+// extractVersionFromHeader extracts the version from a Keep a Changelog header.
+// Handles formats like: "## [1.2.3]", "## [v1.2.3] - 2024-01-15", "## 1.2.3"
+func extractVersionFromHeader(header string) string {
+	// Remove "## " prefix
+	header = strings.TrimPrefix(header, "## ")
+
+	// Handle [version] format
+	if strings.HasPrefix(header, "[") {
+		end := strings.Index(header, "]")
+		if end > 1 {
+			version := header[1:end]
+			return strings.TrimPrefix(version, "v")
+		}
+	}
+
+	// Handle plain version format (## 1.2.3 - date)
+	parts := strings.Fields(header)
+	if len(parts) > 0 {
+		return strings.TrimPrefix(parts[0], "v")
+	}
+
+	return ""
 }

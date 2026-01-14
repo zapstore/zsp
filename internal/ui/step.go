@@ -7,6 +7,15 @@ import (
 	"strings"
 )
 
+// ASCII art logo for zapstore
+const zapstoreLogo = `
+ _____                _
+/ _  / __ _ _ __  ___| |_ ___  _ __ ___
+\// / / _` + "`" + ` | '_ \/ __| __/ _ \| '__/ _ \
+ / //\ (_| | |_) \__ \ || (_) | | |  __/
+/____/\__,_| .__/|___/\__\___/|_|  \___|
+           |_|`
+
 // StepTracker tracks progress through numbered steps in the CLI flow.
 type StepTracker struct {
 	current int
@@ -32,6 +41,11 @@ func (s *StepTracker) StartStep(name string) {
 
 // printStepHeader prints a formatted step header.
 func (s *StepTracker) printStepHeader(name string) {
+	// Print banner before the first step
+	if s.current == 1 {
+		s.printBanner()
+	}
+
 	// Create the step indicator
 	stepNum := fmt.Sprintf("%d/%d", s.current, s.total)
 
@@ -52,6 +66,16 @@ func (s *StepTracker) printStepHeader(name string) {
 		// Bottom line
 		fmt.Fprintln(s.writer, DimStyle.Render(line))
 	}
+}
+
+// printBanner prints the zapstore ASCII art logo.
+func (s *StepTracker) printBanner() {
+	if NoColor {
+		fmt.Fprintln(s.writer, "=== ZAPSTORE ===")
+		return
+	}
+	fmt.Fprint(s.writer, LogoStyle.Render(zapstoreLogo))
+	fmt.Fprintln(s.writer)
 }
 
 // SetTotal updates the total number of steps (useful when steps are conditional).

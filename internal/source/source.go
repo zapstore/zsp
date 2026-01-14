@@ -3,10 +3,13 @@ package source
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -115,6 +118,15 @@ type CacheClearer interface {
 	ClearCache() error
 }
 
+// CacheCommitter is an optional interface for sources that support deferred cache commits.
+// Sources like GitHub store cache data in memory during fetch, then commit to disk
+// only after successful publishing via CommitCache().
+type CacheCommitter interface {
+	// CommitCache persists the pending cache data to disk.
+	// Should be called after successful publishing.
+	CommitCache() error
+}
+
 // Downloader wraps an io.Reader to track download progress.
 type ProgressReader struct {
 	Reader     io.Reader
@@ -203,4 +215,66 @@ func HasUnsupportedArchitecture(filename string) bool {
 		return false
 	}
 	return unsupportedArchRegex.MatchString(filename)
+}
+
+// DownloadCacheDir returns the directory for caching downloaded APKs.
+func DownloadCacheDir() string {
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		cacheDir = os.TempDir()
+	}
+	return filepath.Join(cacheDir, "zsp", "downloads")
+}
+
+// DownloadCacheKey generates a cache key for a download URL.
+// The key is a hex-encoded SHA256 hash prefix of the URL.
+func DownloadCacheKey(downloadURL string) string {
+	h := sha256.Sum256([]byte(downloadURL))
+	return hex.EncodeToString(h[:16]) // 32 hex chars
+}
+
+// GetCachedDownload checks if a download is already cached.
+// Returns the path if cached and valid, empty string otherwise.
+func GetCachedDownload(downloadURL, filename string) string {
+	cacheDir := DownloadCacheDir()
+	cacheKey := DownloadCacheKey(downloadURL)
+	cachedPath := filepath.Join(cacheDir, cacheKey+"_"+filepath.Base(filename))
+
+	info, err := os.Stat(cachedPath)
+	if err != nil || info.Size() == 0 {
+		return "" // Not cached or invalid
+	}
+	return cachedPath
+}
+
+// SaveToDownloadCache saves a downloaded file to the cache.
+// Returns the cached path on success.
+func SaveToDownloadCache(downloadURL, filename, srcPath string) (string, error) {
+	cacheDir := DownloadCacheDir()
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return "", err
+	}
+
+	cacheKey := DownloadCacheKey(downloadURL)
+	cachedPath := filepath.Join(cacheDir, cacheKey+"_"+filepath.Base(filename))
+
+	// Copy file to cache
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return "", err
+	}
+	defer src.Close()
+
+	dst, err := os.Create(cachedPath)
+	if err != nil {
+		return "", err
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, src); err != nil {
+		os.Remove(cachedPath)
+		return "", err
+	}
+
+	return cachedPath, nil
 }
