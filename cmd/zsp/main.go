@@ -524,10 +524,10 @@ func normalizeRepoURL(url string) string {
 // publish runs the main publish flow.
 func publish(ctx context.Context, cfg *config.Config) error {
 	// Determine total steps based on mode
-	// Steps: 1=Fetch, 2=Prepare, 3=Metadata (optional), 4=Upload, 5=Publish
-	totalSteps := 5
+	// Steps: 1=Fetch Assets, 2=Metadata, 3=Upload, 4=Publish
+	totalSteps := 4
 	if *dryRunFlag {
-		totalSteps = 3 // Fetch, Prepare, Build (no upload/publish)
+		totalSteps = 2 // Fetch Assets, Metadata (no upload/publish)
 	}
 
 	var steps *ui.StepTracker
@@ -549,10 +549,10 @@ func publish(ctx context.Context, cfg *config.Config) error {
 	}
 
 	// ═══════════════════════════════════════════════════════════════════
-	// STEP 1: FETCH RELEASE
+	// STEP 1: FETCH ASSETS
 	// ═══════════════════════════════════════════════════════════════════
 	if steps != nil {
-		steps.StartStep("Fetch Release")
+		steps.StartStep("Fetch Assets")
 	}
 
 	var spinner *ui.Spinner
@@ -590,13 +590,6 @@ func publish(ctx context.Context, cfg *config.Config) error {
 		} else {
 			fmt.Printf("  Found %d assets (version will be extracted from APK)\n", len(release.Assets))
 		}
-	}
-
-	// ═══════════════════════════════════════════════════════════════════
-	// STEP 2: PREPARE APK
-	// ═══════════════════════════════════════════════════════════════════
-	if steps != nil {
-		steps.StartStep("Prepare APK")
 	}
 
 	// Filter to APKs only
@@ -736,7 +729,7 @@ func publish(ctx context.Context, cfg *config.Config) error {
 	}
 
 	// ═══════════════════════════════════════════════════════════════════
-	// STEP 3: GATHER METADATA
+	// STEP 2: GATHER METADATA
 	// ═══════════════════════════════════════════════════════════════════
 	if steps != nil {
 		steps.StartStep("Gather Metadata")
@@ -891,6 +884,15 @@ func publish(ctx context.Context, cfg *config.Config) error {
 			if preDownloaded != nil && preDownloaded.Icon != nil {
 				previewData.IconData = preDownloaded.Icon.Data
 			}
+			// Add pre-downloaded screenshots for local serving in preview
+			if preDownloaded != nil && len(preDownloaded.Images) > 0 {
+				for _, img := range preDownloaded.Images {
+					previewData.ImageData = append(previewData.ImageData, nostr.PreviewImageData{
+						Data:     img.Data,
+						MimeType: img.MimeType,
+					})
+				}
+			}
 			previewServer := nostr.NewPreviewServer(previewData, changelog, "", browserPort)
 			url, err := previewServer.Start()
 			if err != nil {
@@ -924,7 +926,7 @@ func publish(ctx context.Context, cfg *config.Config) error {
 	}
 
 	// ═══════════════════════════════════════════════════════════════════
-	// STEP 4: SIGN & UPLOAD
+	// STEP 3: SIGN & UPLOAD
 	// ═══════════════════════════════════════════════════════════════════
 	if steps != nil && !*dryRunFlag {
 		steps.StartStep("Sign & Upload")
@@ -951,6 +953,9 @@ func publish(ctx context.Context, cfg *config.Config) error {
 			}
 		}
 	}
+
+	// Dry run is active if flag is set OR if test nsec was selected from menu
+	isDryRun := *dryRunFlag || signWith == nostr.TestNsec
 
 	// For browser signer: if preview was shown, reuse that port
 	// Otherwise, prompt for port if not provided via flag
@@ -995,7 +1000,7 @@ func publish(ctx context.Context, cfg *config.Config) error {
 	batchSigner, isBatchSigner := signer.(nostr.BatchSigner)
 
 	// Upload to Blossom (unless dry run or npub signer)
-	if !*dryRunFlag && signer.Type() != nostr.SignerNpub {
+	if !isDryRun && signer.Type() != nostr.SignerNpub {
 		blossomClient := blossom.NewClient(blossomURL)
 
 		if isBatchSigner {
@@ -1051,7 +1056,7 @@ func publish(ctx context.Context, cfg *config.Config) error {
 	}
 
 	// Dry run - output events and exit
-	if *dryRunFlag {
+	if isDryRun {
 		outputEvents(events)
 		return nil
 	}
@@ -1083,7 +1088,7 @@ func publish(ctx context.Context, cfg *config.Config) error {
 	}
 
 	// ═══════════════════════════════════════════════════════════════════
-	// STEP 5: PUBLISH TO RELAYS
+	// STEP 4: PUBLISH TO RELAYS
 	// ═══════════════════════════════════════════════════════════════════
 	if steps != nil {
 		steps.StartStep("Publish")
@@ -2142,7 +2147,7 @@ func uploadWithIndividualSigning(ctx context.Context, cfg *config.Config, apkInf
 
 // selectAPKInteractive prompts the user to select an APK from a ranked list.
 func selectAPKInteractive(ranked []picker.ScoredAsset) (*source.Asset, error) {
-	ui.PrintSectionHeader(fmt.Sprintf("Multiple APKs Found (%d)", len(ranked)))
+	ui.PrintSectionHeader("Select APK")
 
 	// Build option list with size and recommendation
 	options := make([]string, len(ranked))
@@ -2157,7 +2162,7 @@ func selectAPKInteractive(ranked []picker.ScoredAsset) (*source.Asset, error) {
 	}
 
 	// Default to first (recommended) option
-	idx, err := ui.SelectOption("Select APK to publish:", options, 0)
+	idx, err := ui.SelectOption("", options, 0)
 	if err != nil {
 		return nil, err
 	}

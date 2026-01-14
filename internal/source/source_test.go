@@ -321,3 +321,89 @@ func (r *bytesReaderImpl) Read(p []byte) (int, error) {
 	r.pos += n
 	return n, nil
 }
+
+func TestHasUnsupportedArchitecture(t *testing.T) {
+	tests := []struct {
+		filename    string
+		unsupported bool
+	}{
+		// Unsupported architectures - should be filtered
+		{"app-x86_64.apk", true},
+		{"app-x86.apk", true},
+		{"bunny-6.0-804-x86_64.apk", true},
+		{"bunny-6.0-803-x86.apk", true},
+		{"app_x86_64_release.apk", true},
+		{"app.x86.release.apk", true},
+		{"app-i686.apk", true},
+		{"app-i386.apk", true},
+		{"app-amd64.apk", true},
+
+		// Unsupported 32-bit ARM - should be filtered
+		{"app-armeabi-v7a.apk", true},
+		{"app-armeabi.apk", true},
+		{"app-armeabi-v7a-release.apk", true},
+
+		// Supported architectures - should NOT be filtered (only arm64-v8a)
+		{"app-arm64-v8a.apk", false},
+		{"bunny-6.0-802-arm64-v8a.apk", false},
+		{"bunny-6.0-801-arm.apk", false},    // "arm" alone is ambiguous, don't filter
+		{"app-release.apk", false},          // no arch indicator
+		{"app.apk", false},                  // no arch indicator
+		{"app-universal.apk", false},        // universal
+		{"app-v1.0.0.apk", false},           // version, not arch
+		{"x86_64-app.apk", false},           // arch at start, not in middle
+		{"app-arm64-v8a-fdroid.apk", false}, // arm64 with fdroid suffix
+
+		// Non-APK files - should NOT be filtered
+		{"app-x86_64.zip", false},
+		{"app-x86.tar.gz", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.filename, func(t *testing.T) {
+			got := HasUnsupportedArchitecture(tt.filename)
+			if got != tt.unsupported {
+				t.Errorf("HasUnsupportedArchitecture(%q) = %v, want %v", tt.filename, got, tt.unsupported)
+			}
+		})
+	}
+}
+
+func TestFilterUnsupportedArchitectures(t *testing.T) {
+	assets := []*Asset{
+		{Name: "app-arm64-v8a.apk"},
+		{Name: "app-x86_64.apk"},
+		{Name: "app-armeabi-v7a.apk"},
+		{Name: "app-x86.apk"},
+		{Name: "app-universal.apk"},
+	}
+
+	filtered := FilterUnsupportedArchitectures(assets)
+
+	// Should keep only arm64-v8a and universal (armeabi-v7a is now filtered)
+	if len(filtered) != 2 {
+		t.Errorf("FilterUnsupportedArchitectures returned %d assets, want 2", len(filtered))
+	}
+
+	// Verify the right ones were kept
+	names := make(map[string]bool)
+	for _, a := range filtered {
+		names[a.Name] = true
+	}
+
+	if !names["app-arm64-v8a.apk"] {
+		t.Error("Expected app-arm64-v8a.apk to be kept")
+	}
+	if !names["app-universal.apk"] {
+		t.Error("Expected app-universal.apk to be kept")
+	}
+	if names["app-armeabi-v7a.apk"] {
+		t.Error("Expected app-armeabi-v7a.apk to be filtered out")
+	}
+	if names["app-x86_64.apk"] {
+		t.Error("Expected app-x86_64.apk to be filtered out")
+	}
+	if names["app-x86.apk"] {
+		t.Error("Expected app-x86.apk to be filtered out")
+	}
+}

@@ -7,10 +7,16 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
+	"strings"
 
 	"github.com/zapstore/zsp/internal/apk"
 	"github.com/zapstore/zsp/internal/config"
 )
+
+// unsupportedArchRegex matches APK filenames that explicitly indicate unsupported architectures.
+// We only want arm64-v8a. Filter out x86, x86_64 (Intel/AMD) and armeabi/armeabi-v7a (32-bit ARM).
+var unsupportedArchRegex = regexp.MustCompile(`(?i)[-_\.](x86_64|x86|i686|i386|amd64|armeabi-v7a|armeabi)[-_\.]`)
 
 // Asset represents a downloadable APK asset.
 type Asset struct {
@@ -174,4 +180,27 @@ func DownloadHTTP(ctx context.Context, client *http.Client, url, destPath string
 	}
 
 	return nil
+}
+
+// FilterUnsupportedArchitectures removes APK assets that explicitly indicate
+// unsupported architectures (x86, x86_64, etc.) in their filename.
+// Assets without architecture indicators or with supported architectures (arm64-v8a, armeabi-v7a) are kept.
+func FilterUnsupportedArchitectures(assets []*Asset) []*Asset {
+	filtered := make([]*Asset, 0, len(assets))
+	for _, asset := range assets {
+		if !HasUnsupportedArchitecture(asset.Name) {
+			filtered = append(filtered, asset)
+		}
+	}
+	return filtered
+}
+
+// HasUnsupportedArchitecture returns true if the filename explicitly indicates
+// an unsupported architecture (x86, x86_64, etc.).
+func HasUnsupportedArchitecture(filename string) bool {
+	// Only check APK files
+	if !strings.HasSuffix(strings.ToLower(filename), ".apk") {
+		return false
+	}
+	return unsupportedArchRegex.MatchString(filename)
 }

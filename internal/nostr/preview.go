@@ -34,6 +34,12 @@ type AssetPreviewData struct {
 	Platforms       []string // Platform identifiers for this specific asset
 }
 
+// PreviewImageData holds pre-downloaded image data for local serving.
+type PreviewImageData struct {
+	Data     []byte
+	MimeType string
+}
+
 // PreviewData contains all data needed to render the preview.
 type PreviewData struct {
 	// Software Application
@@ -45,10 +51,11 @@ type PreviewData struct {
 	Repository  string
 	License     string
 	Tags        []string
-	IconData    []byte   // Raw PNG icon data
-	IconURL     string   // URL if using remote icon
-	ImageURLs   []string // Screenshot URLs
-	Platforms   []string // All platforms (union of all assets)
+	IconData    []byte             // Raw PNG icon data
+	IconURL     string             // URL if using remote icon
+	ImageURLs   []string           // Screenshot URLs (remote or will be replaced with local)
+	ImageData   []PreviewImageData // Pre-downloaded screenshot data (served locally)
+	Platforms   []string           // All platforms (union of all assets)
 
 	// Software Release
 	Version     string
@@ -226,6 +233,7 @@ func (s *PreviewServer) Start() (string, error) {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/poll", s.handlePoll)
+	mux.HandleFunc("/images/", s.handleImage) // Serve pre-downloaded images
 
 	s.server = &http.Server{Handler: mux}
 	go s.server.Serve(listener)
@@ -239,6 +247,26 @@ func (s *PreviewServer) Start() (string, error) {
 	}
 
 	return url, nil
+}
+
+// handleImage serves pre-downloaded images by index.
+func (s *PreviewServer) handleImage(w http.ResponseWriter, r *http.Request) {
+	// Parse index from URL: /images/0, /images/1, etc.
+	path := strings.TrimPrefix(r.URL.Path, "/images/")
+	idx, err := strconv.Atoi(path)
+	if err != nil || idx < 0 || idx >= len(s.data.ImageData) {
+		http.NotFound(w, r)
+		return
+	}
+
+	img := s.data.ImageData[idx]
+	if img.MimeType != "" {
+		w.Header().Set("Content-Type", img.MimeType)
+	} else {
+		w.Header().Set("Content-Type", "image/png")
+	}
+	w.Header().Set("Cache-Control", "max-age=3600")
+	w.Write(img.Data)
 }
 
 // Close shuts down the preview server.
@@ -314,9 +342,17 @@ func (s *PreviewServer) buildHTML() string {
 		tagsHTML = fmt.Sprintf(`<div class="tags-container">%s</div>`, strings.Join(tagSpans, " "))
 	}
 
-	// Screenshots HTML
+	// Screenshots HTML - use local URLs for pre-downloaded images
 	screenshotsHTML := ""
-	if len(d.ImageURLs) > 0 {
+	if len(d.ImageData) > 0 {
+		// Use locally served pre-downloaded images
+		var imgs []string
+		for i := range d.ImageData {
+			imgs = append(imgs, fmt.Sprintf(`<img src="/images/%d" alt="Screenshot">`, i))
+		}
+		screenshotsHTML = fmt.Sprintf(`<div class="screenshots">%s</div>`, strings.Join(imgs, ""))
+	} else if len(d.ImageURLs) > 0 {
+		// Fallback to remote URLs
 		var imgs []string
 		for _, url := range d.ImageURLs {
 			imgs = append(imgs, fmt.Sprintf(`<img src="%s" alt="Screenshot">`, html.EscapeString(url)))

@@ -11,7 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PuerkitoBio/goquery"
 	"github.com/zapstore/zsp/internal/config"
+	"gopkg.in/yaml.v3"
 )
 
 // AppMetadata contains enriched app metadata from external sources.
@@ -355,53 +357,187 @@ func (f *MetadataFetcher) fetchGitLabReadme(ctx context.Context, encodedPath, br
 	return "", fmt.Errorf("no README found")
 }
 
-// fetchFDroidMetadata fetches metadata from F-Droid compatible repositories.
+// fetchFDroidMetadata fetches metadata from F-Droid by scraping the website.
+// This is much more efficient than downloading the huge index-v1.json file.
 func (f *MetadataFetcher) fetchFDroidMetadata(ctx context.Context) (*AppMetadata, error) {
-	// Get repo info from release_source
-	var repoInfo *config.FDroidRepoInfo
-	if f.cfg.ReleaseSource != nil {
-		repoInfo = config.GetFDroidRepoInfo(f.cfg.ReleaseSource.URL)
+	// Determine package ID
+	packageID := f.PackageID
+
+	// Try to get from release_source if not set
+	if packageID == "" && f.cfg.ReleaseSource != nil {
+		repoInfo := config.GetFDroidRepoInfo(f.cfg.ReleaseSource.URL)
+		if repoInfo != nil {
+			packageID = repoInfo.PackageID
+		}
 	}
 
-	if repoInfo == nil {
-		return nil, fmt.Errorf("no F-Droid package configured")
+	if packageID == "" {
+		return nil, fmt.Errorf("no F-Droid package configured and no package ID available")
 	}
 
-	// Create F-Droid source to fetch metadata
-	fdroidSrc := &FDroid{
-		repoInfo: repoInfo,
-		client:   f.client,
-	}
-
-	fdMeta, err := fdroidSrc.FetchMetadata(ctx)
+	// Scrape the F-Droid website for icon and screenshots
+	webMeta, err := f.scrapeFDroidWebsite(ctx, packageID)
 	if err != nil {
 		return nil, err
 	}
 
+	// Also fetch metadata from fdroiddata YAML for detailed description, categories, etc.
+	metadataURL := fmt.Sprintf("https://gitlab.com/fdroid/fdroiddata/-/raw/master/metadata/%s.yml", packageID)
+	fdMeta, yamlErr := f.fetchFDroidYAML(ctx, metadataURL)
+
 	meta := &AppMetadata{
-		Summary:     fdMeta.Summary,
-		Description: fdMeta.Description,
-		Website:     fdMeta.WebSite,
-		License:     fdMeta.License,
+		IconURL:   webMeta.IconURL,
+		ImageURLs: webMeta.ImageURLs,
 	}
 
-	// Use Name or AutoName
-	if fdMeta.Name != "" {
-		meta.Name = fdMeta.Name
-	} else if fdMeta.AutoName != "" {
-		meta.Name = fdMeta.AutoName
-	}
+	// Merge YAML metadata if available
+	if yamlErr == nil && fdMeta != nil {
+		meta.Summary = fdMeta.Summary
+		meta.Description = fdMeta.Description
+		meta.Website = fdMeta.WebSite
+		meta.License = fdMeta.License
 
-	// Convert categories to tags
-	for _, cat := range fdMeta.Categories {
-		meta.Tags = append(meta.Tags, strings.ToLower(cat))
-	}
+		if fdMeta.Name != "" {
+			meta.Name = fdMeta.Name
+		} else if fdMeta.AutoName != "" {
+			meta.Name = fdMeta.AutoName
+		}
 
-	// Construct F-Droid icon URL
-	// Format: {repoURL}/icons-640/{packageId}.png (high-res without version)
-	meta.IconURL = fmt.Sprintf("%s/icons-640/%s.png", repoInfo.RepoURL, repoInfo.PackageID)
+		for _, cat := range fdMeta.Categories {
+			meta.Tags = append(meta.Tags, strings.ToLower(cat))
+		}
+	}
 
 	return meta, nil
+}
+
+// fdroidWebMeta contains metadata scraped from the F-Droid website.
+type fdroidWebMeta struct {
+	IconURL   string
+	ImageURLs []string
+}
+
+// scrapeFDroidWebsite scrapes the F-Droid package page for icon and screenshots.
+func (f *MetadataFetcher) scrapeFDroidWebsite(ctx context.Context, packageID string) (*fdroidWebMeta, error) {
+	url := fmt.Sprintf("https://f-droid.org/en/packages/%s/", packageID)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch F-Droid page: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("package %s not found on F-Droid", packageID)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("F-Droid returned status %d", resp.StatusCode)
+	}
+
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse HTML: %w", err)
+	}
+
+	meta := &fdroidWebMeta{}
+
+	// Extract icon URL from the package header
+	// F-Droid uses: <img class="package-icon" src="...">
+	doc.Find("img.package-icon").First().Each(func(i int, s *goquery.Selection) {
+		if src, exists := s.Attr("src"); exists {
+			meta.IconURL = f.normalizeURL(src, "https://f-droid.org")
+		}
+	})
+
+	// Also try: header img inside .package-header
+	if meta.IconURL == "" {
+		doc.Find(".package-header img").First().Each(func(i int, s *goquery.Selection) {
+			if src, exists := s.Attr("src"); exists {
+				meta.IconURL = f.normalizeURL(src, "https://f-droid.org")
+			}
+		})
+	}
+
+	// Extract screenshot URLs from the screenshot gallery
+	// F-Droid uses: <li class="js_slide screenshot"><img src="..." />
+	// or: <div class="screenshots">...<img>
+	doc.Find(".screenshot img, .screenshots img, #screenshots img").Each(func(i int, s *goquery.Selection) {
+		src := ""
+		if imgSrc, exists := s.Attr("src"); exists {
+			src = imgSrc
+		}
+
+		if src != "" && strings.Contains(src, "/repo/") {
+			fullURL := f.normalizeURL(src, "https://f-droid.org")
+			// Avoid duplicates
+			found := false
+			for _, existing := range meta.ImageURLs {
+				if existing == fullURL {
+					found = true
+					break
+				}
+			}
+			if !found {
+				meta.ImageURLs = append(meta.ImageURLs, fullURL)
+			}
+		}
+	})
+
+	return meta, nil
+}
+
+// normalizeURL converts relative URLs to absolute URLs.
+func (f *MetadataFetcher) normalizeURL(urlStr, baseURL string) string {
+	if strings.HasPrefix(urlStr, "http://") || strings.HasPrefix(urlStr, "https://") {
+		return urlStr
+	}
+	if strings.HasPrefix(urlStr, "//") {
+		return "https:" + urlStr
+	}
+	if strings.HasPrefix(urlStr, "/") {
+		return baseURL + urlStr
+	}
+	return baseURL + "/" + urlStr
+}
+
+// fetchFDroidYAML fetches metadata from the fdroiddata YAML file.
+func (f *MetadataFetcher) fetchFDroidYAML(ctx context.Context, metadataURL string) (*fdroidMetadata, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", metadataURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch metadata: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("metadata not found (status %d)", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read metadata: %w", err)
+	}
+
+	var meta fdroidMetadata
+	if err := yaml.Unmarshal(data, &meta); err != nil {
+		return nil, fmt.Errorf("failed to parse metadata: %w", err)
+	}
+
+	return &meta, nil
 }
 
 // fetchPlayStoreMetadata fetches metadata from Google Play Store.

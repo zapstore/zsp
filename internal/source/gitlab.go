@@ -9,11 +9,15 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/zapstore/zsp/internal/config"
 )
+
+// gitlabArchRegex extracts architecture from GitLab asset names like "APK (arm64-v8a)"
+var gitlabArchRegex = regexp.MustCompile(`\((arm64-v8a|armeabi-v7a|arm|x86_64|x86)\)`)
 
 // GitLab implements Source for GitLab releases.
 // Supports both gitlab.com and self-hosted GitLab instances.
@@ -68,9 +72,10 @@ type gitlabRelease struct {
 
 // gitlabAssetLink represents a GitLab release asset link.
 type gitlabAssetLink struct {
-	Name     string `json:"name"`
-	URL      string `json:"url"`
-	LinkType string `json:"link_type"` // "other", "runbook", "image", "package"
+	Name           string `json:"name"`
+	URL            string `json:"url"`
+	DirectAssetURL string `json:"direct_asset_url"` // Contains the actual filename
+	LinkType       string `json:"link_type"`        // "other", "runbook", "image", "package"
 }
 
 // FetchLatestRelease fetches the latest release from GitLab.
@@ -114,11 +119,46 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	// Convert asset links to our Asset type
 	assets := make([]*Asset, 0, len(glRelease.Assets.Links))
 	for _, link := range glRelease.Assets.Links {
+		// Prefer direct_asset_url as it contains the actual filename
+		downloadURL := link.DirectAssetURL
+		if downloadURL == "" {
+			downloadURL = link.URL
+		}
+
+		// Extract the actual filename from the URL
+		assetName := link.Name
+		if downloadURL != "" {
+			if idx := strings.LastIndex(downloadURL, "/"); idx >= 0 {
+				filename := downloadURL[idx+1:]
+				if filename != "" && strings.HasSuffix(filename, ".apk") {
+					// Extract architecture from link.Name (e.g., "APK (arm64-v8a)")
+					// and append to filename if not already present
+					if match := gitlabArchRegex.FindStringSubmatch(link.Name); len(match) > 1 {
+						arch := match[1]
+						// Check if filename already contains this architecture
+						if !strings.Contains(filename, arch) {
+							// Insert architecture before .apk extension
+							assetName = strings.TrimSuffix(filename, ".apk") + "-" + arch + ".apk"
+						} else {
+							assetName = filename
+						}
+					} else {
+						assetName = filename
+					}
+				} else if filename != "" && (strings.HasSuffix(filename, ".zip") || strings.HasSuffix(filename, ".tar.gz")) {
+					assetName = filename
+				}
+			}
+		}
+
 		assets = append(assets, &Asset{
-			Name: link.Name,
-			URL:  link.URL,
+			Name: assetName,
+			URL:  downloadURL,
 		})
 	}
+
+	// Filter out APKs with unsupported architectures (x86, x86_64, etc.)
+	assets = FilterUnsupportedArchitectures(assets)
 
 	// Extract version from tag name
 	version := glRelease.TagName

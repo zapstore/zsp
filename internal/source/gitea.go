@@ -177,14 +177,17 @@ func (g *Gitea) fetchLatestFromList(ctx context.Context) (*Release, error) {
 
 // convertRelease converts a Gitea release to our Release type.
 func (g *Gitea) convertRelease(gtRelease *giteaRelease) *Release {
-	assets := make([]*Asset, len(gtRelease.Assets))
-	for i, a := range gtRelease.Assets {
-		assets[i] = &Asset{
+	assets := make([]*Asset, 0, len(gtRelease.Assets))
+	for _, a := range gtRelease.Assets {
+		assets = append(assets, &Asset{
 			Name: a.Name,
 			URL:  a.BrowserDownloadURL,
 			Size: a.Size,
-		}
+		})
 	}
+
+	// Filter out APKs with unsupported architectures (x86, x86_64, etc.)
+	assets = FilterUnsupportedArchitectures(assets)
 
 	// Extract version from tag name (strip leading 'v' if present)
 	version := gtRelease.TagName

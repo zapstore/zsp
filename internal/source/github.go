@@ -211,15 +211,18 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 
 // convertRelease converts a GitHub release to our Release type.
 func (g *GitHub) convertRelease(ghRelease *githubRelease) *Release {
-	assets := make([]*Asset, len(ghRelease.Assets))
-	for i, a := range ghRelease.Assets {
-		assets[i] = &Asset{
+	assets := make([]*Asset, 0, len(ghRelease.Assets))
+	for _, a := range ghRelease.Assets {
+		assets = append(assets, &Asset{
 			Name:        a.Name,
 			URL:         a.BrowserDownloadURL,
 			Size:        a.Size,
 			ContentType: a.ContentType,
-		}
+		})
 	}
+
+	// Filter out APKs with unsupported architectures (x86, x86_64, etc.)
+	assets = FilterUnsupportedArchitectures(assets)
 
 	// Extract version from tag name (strip leading 'v' if present)
 	version := ghRelease.TagName

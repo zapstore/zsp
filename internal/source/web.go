@@ -135,13 +135,16 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	}
 
 	// Convert to assets
-	assets := make([]*Asset, len(matchedURLs))
-	for i, u := range matchedURLs {
-		assets[i] = &Asset{
+	assets := make([]*Asset, 0, len(matchedURLs))
+	for _, u := range matchedURLs {
+		assets = append(assets, &Asset{
 			Name: filepath.Base(u),
 			URL:  u,
-		}
+		})
 	}
+
+	// Filter out APKs with unsupported architectures (x86, x86_64, etc.)
+	assets = FilterUnsupportedArchitectures(assets)
 
 	return &Release{
 		Version: "", // Will be filled from APK after download
