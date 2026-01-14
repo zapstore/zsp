@@ -184,8 +184,11 @@ type BunkerSigner struct {
 
 // NewBunkerSigner creates a signer from a bunker:// URL.
 func NewBunkerSigner(ctx context.Context, bunkerURL string) (*BunkerSigner, error) {
-	// Parse bunker URL
-	bunker, err := nip46.ConnectBunker(ctx, "", bunkerURL, nil, func(s string) {
+	// Generate an ephemeral client secret key for bunker communication
+	clientSecretKey := nostr.GeneratePrivateKey()
+
+	// Connect to bunker
+	bunker, err := nip46.ConnectBunker(ctx, clientSecretKey, bunkerURL, nil, func(s string) {
 		// This is called when user needs to approve the connection
 		fmt.Printf("Bunker connection request: %s\n", s)
 	})
