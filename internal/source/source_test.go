@@ -78,14 +78,13 @@ func TestNewSourceFromConfig(t *testing.T) {
 			wantErr:  false,
 		},
 		{
-			name: "web source with html extractor",
+			name: "web source with asset_url pattern",
 			cfg: &config.Config{
 				Repository: "https://github.com/AntennaPod/AntennaPod",
 				ReleaseSource: &config.ReleaseSource{
 					URL:         "https://f-droid.org/packages/de.danoeh.antennapod/",
 					IsWebSource: true,
-					AssetURL:    "https://f-droid.org/repo/de.danoeh.antennapod_$version.apk",
-					HTML:        &config.HTMLExtractor{Selector: ".package-version-header a[name]:nth-child(2)"},
+					AssetURL:    "https://f-droid\\.org/repo/de\\.danoeh\\.antennapod_[0-9]+\\.apk",
 				},
 			},
 			wantType: config.SourceWeb,

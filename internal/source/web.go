@@ -2,10 +2,13 @@ package source
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,8 +20,15 @@ import (
 
 // Web implements Source for web scraping.
 type Web struct {
-	cfg    *config.Config
-	client *http.Client
+	cfg       *config.Config
+	client    *http.Client
+	cacheDir  string
+	SkipCache bool // Set to true to bypass URL cache
+}
+
+// webCache stores the last downloaded asset URLs for a web source.
+type webCache struct {
+	AssetURLs []string `json:"asset_urls"`
 }
 
 // NewWeb creates a new web scraping source.
@@ -27,9 +37,17 @@ func NewWeb(cfg *config.Config) (*Web, error) {
 		return nil, fmt.Errorf("invalid web source configuration")
 	}
 
+	// Set up cache directory
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		cacheDir = os.TempDir()
+	}
+	cacheDir = filepath.Join(cacheDir, "zsp", "web")
+
 	return &Web{
-		cfg:    cfg,
-		client: &http.Client{Timeout: 30 * time.Second},
+		cfg:      cfg,
+		client:   &http.Client{Timeout: 30 * time.Second},
+		cacheDir: cacheDir,
 	}, nil
 }
 
@@ -38,277 +56,202 @@ func (w *Web) Type() config.SourceType {
 	return config.SourceWeb
 }
 
+// cacheFilePath returns the file path for storing cached URL data.
+func (w *Web) cacheFilePath() string {
+	// Hash the source URL for a unique filename
+	h := sha256.Sum256([]byte(w.cfg.ReleaseSource.URL))
+	return filepath.Join(w.cacheDir, hex.EncodeToString(h[:8])+".json")
+}
+
+// loadCache reads the cached URL data from disk.
+func (w *Web) loadCache() *webCache {
+	data, err := os.ReadFile(w.cacheFilePath())
+	if err != nil {
+		return nil
+	}
+	var cache webCache
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return nil
+	}
+	return &cache
+}
+
+// saveCache writes the asset URLs to disk.
+func (w *Web) saveCache(assetURLs []string) error {
+	if err := os.MkdirAll(w.cacheDir, 0755); err != nil {
+		return err
+	}
+	cache := webCache{AssetURLs: assetURLs}
+	data, err := json.Marshal(&cache)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(w.cacheFilePath(), data, 0644)
+}
+
+// ClearCache removes the cached URL data.
+func (w *Web) ClearCache() error {
+	cachePath := w.cacheFilePath()
+	err := os.Remove(cachePath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
 // FetchLatestRelease fetches the latest release via web scraping.
+// It finds URLs matching the asset_url pattern and returns them as assets.
+// Version is left empty - it will be extracted from the APK after download.
 func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	repo := w.cfg.ReleaseSource
 
-	// Extract version using the configured method
-	version, err := w.extractVersion(ctx, repo)
+	// Compile asset URL pattern
+	pattern, err := regexp.Compile(repo.AssetURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to extract version: %w", err)
+		return nil, fmt.Errorf("invalid asset_url pattern: %w", err)
 	}
 
-	// Build asset URL by replacing $version placeholder
-	assetURL := strings.ReplaceAll(repo.AssetURL, "$version", version)
-	assetName := filepath.Base(assetURL)
+	// Find all matching URLs
+	matchedURLs, err := w.findMatchingURLs(ctx, repo.URL, pattern)
+	if err != nil {
+		return nil, err
+	}
 
-	assets := []*Asset{
-		{
-			Name: assetName,
-			URL:  assetURL,
-		},
+	if len(matchedURLs) == 0 {
+		return nil, fmt.Errorf("no URLs matching pattern %q found", repo.AssetURL)
+	}
+
+	// Check cache - if all matched URLs were already processed, skip
+	if !w.SkipCache {
+		cache := w.loadCache()
+		if cache != nil && urlsEqual(matchedURLs, cache.AssetURLs) {
+			return nil, ErrNotModified
+		}
+	}
+
+	// Save new URLs to cache
+	if err := w.saveCache(matchedURLs); err != nil {
+		// Non-fatal, just log
+	}
+
+	// Convert to assets
+	assets := make([]*Asset, len(matchedURLs))
+	for i, u := range matchedURLs {
+		assets[i] = &Asset{
+			Name: filepath.Base(u),
+			URL:  u,
+		}
 	}
 
 	return &Release{
-		Version: version,
+		Version: "", // Will be filled from APK after download
 		Assets:  assets,
 	}, nil
 }
 
-// extractVersion extracts the version using the configured method.
-func (w *Web) extractVersion(ctx context.Context, repo *config.ReleaseSource) (string, error) {
-	if repo.HTML != nil {
-		return w.extractVersionHTML(ctx, repo.URL, repo.HTML)
-	}
-	if repo.JSON != nil {
-		return w.extractVersionJSON(ctx, repo.URL, repo.JSON)
-	}
-	if repo.Redirect != nil {
-		return w.extractVersionRedirect(ctx, repo.URL, repo.Redirect)
-	}
-
-	return "", fmt.Errorf("no extraction method configured")
-}
-
-// extractVersionHTML extracts version from HTML using CSS selector.
-func (w *Web) extractVersionHTML(ctx context.Context, url string, extractor *config.HTMLExtractor) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return "", err
-	}
-
-	resp, err := w.client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch page: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("page fetch failed with status %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read page: %w", err)
-	}
-
-	// Simple HTML extraction without a full parser
-	// This is a basic implementation - for complex selectors, consider using goquery
-	content := string(body)
-
-	// Try to find content matching the selector pattern
-	// This is a simplified approach - real CSS selector parsing would need goquery
-	var value string
-
-	// Handle simple class selectors like ".version-badge"
-	if strings.HasPrefix(extractor.Selector, ".") {
-		className := extractor.Selector[1:]
-		// Look for class="className" or class='className'
-		pattern := fmt.Sprintf(`class=["']?[^"']*%s[^"']*["']?[^>]*>([^<]+)<`, regexp.QuoteMeta(className))
-		re := regexp.MustCompile(pattern)
-		matches := re.FindStringSubmatch(content)
-		if len(matches) > 1 {
-			value = strings.TrimSpace(matches[1])
-		}
-	}
-
-	// Handle attribute extraction if specified
-	if extractor.Attribute != "" && extractor.Attribute != "text" {
-		// Look for the attribute value
-		pattern := fmt.Sprintf(`%s=["']([^"']+)["']`, regexp.QuoteMeta(extractor.Attribute))
-		re := regexp.MustCompile(pattern)
-		matches := re.FindStringSubmatch(content)
-		if len(matches) > 1 {
-			value = strings.TrimSpace(matches[1])
-		}
-	}
-
-	if value == "" {
-		return "", fmt.Errorf("could not extract value using selector %q", extractor.Selector)
-	}
-
-	// Apply match pattern if specified
-	if extractor.Match != "" {
-		re, err := regexp.Compile(extractor.Match)
-		if err != nil {
-			return "", fmt.Errorf("invalid match pattern: %w", err)
-		}
-		matches := re.FindStringSubmatch(value)
-		if len(matches) > 1 {
-			value = matches[1]
-		} else if len(matches) == 1 {
-			value = matches[0]
-		}
-	}
-
-	return value, nil
-}
-
-// extractVersionJSON extracts version from JSON using JSONPath.
-func (w *Web) extractVersionJSON(ctx context.Context, url string, extractor *config.JSONExtractor) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return "", err
-	}
-
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := w.client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch JSON: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("JSON fetch failed with status %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read JSON: %w", err)
-	}
-
-	// Parse JSON
-	var data interface{}
-	if err := json.Unmarshal(body, &data); err != nil {
-		return "", fmt.Errorf("failed to parse JSON: %w", err)
-	}
-
-	// Simple JSONPath implementation
-	// Supports basic paths like "$.latest.version" or "$.tag_name"
-	value, err := extractJSONPath(data, extractor.Path)
-	if err != nil {
-		return "", err
-	}
-
-	// Apply match pattern if specified
-	if extractor.Match != "" {
-		re, err := regexp.Compile(extractor.Match)
-		if err != nil {
-			return "", fmt.Errorf("invalid match pattern: %w", err)
-		}
-		matches := re.FindStringSubmatch(value)
-		if len(matches) > 1 {
-			value = matches[1]
-		}
-	}
-
-	return value, nil
-}
-
-// extractVersionRedirect extracts version from HTTP redirect header.
-func (w *Web) extractVersionRedirect(ctx context.Context, url string, extractor *config.RedirectExtractor) (string, error) {
-	// Create client that doesn't follow redirects
+// findMatchingURLs searches for URLs matching the pattern in headers and body.
+func (w *Web) findMatchingURLs(ctx context.Context, pageURL string, pattern *regexp.Regexp) ([]string, error) {
+	// Track redirects
+	var redirectURLs []string
 	client := &http.Client{
 		Timeout: 30 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
+			redirectURLs = append(redirectURLs, req.URL.String())
+			return nil
 		},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", pageURL, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch redirect: %w", err)
+		return nil, fmt.Errorf("failed to fetch page: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Get the header value
-	headerValue := resp.Header.Get(extractor.Header)
-	if headerValue == "" {
-		return "", fmt.Errorf("header %q not found in response", extractor.Header)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("page fetch failed with status %d", resp.StatusCode)
 	}
 
-	// Apply match pattern
-	if extractor.Match == "" {
-		return "", fmt.Errorf("match pattern is required for redirect extraction")
+	var matches []string
+	seen := make(map[string]bool)
+
+	addMatch := func(u string) {
+		resolved := resolveAssetURL(pageURL, u)
+		if !seen[resolved] {
+			seen[resolved] = true
+			matches = append(matches, resolved)
+		}
 	}
 
-	re, err := regexp.Compile(extractor.Match)
+	// 1. Check redirect chain
+	for _, u := range redirectURLs {
+		if pattern.MatchString(u) {
+			addMatch(u)
+		}
+	}
+
+	// 2. Check final URL
+	if pattern.MatchString(resp.Request.URL.String()) {
+		addMatch(resp.Request.URL.String())
+	}
+
+	// 3. Check Location header (for non-followed redirects)
+	if loc := resp.Header.Get("Location"); loc != "" && pattern.MatchString(loc) {
+		addMatch(loc)
+	}
+
+	// 4. Search body
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("invalid match pattern: %w", err)
+		return nil, fmt.Errorf("failed to read page: %w", err)
 	}
 
-	matches := re.FindStringSubmatch(headerValue)
-	if len(matches) < 2 {
-		return "", fmt.Errorf("pattern did not match header value")
+	bodyMatches := pattern.FindAllString(string(body), -1)
+	for _, m := range bodyMatches {
+		addMatch(m)
 	}
 
-	return matches[1], nil
+	return matches, nil
 }
 
-// extractJSONPath extracts a value from JSON using a simple JSONPath expression.
-func extractJSONPath(data interface{}, path string) (string, error) {
-	// Remove leading "$." if present
-	path = strings.TrimPrefix(path, "$.")
-	path = strings.TrimPrefix(path, "$")
-
-	parts := strings.Split(path, ".")
-	current := data
-
-	for _, part := range parts {
-		if part == "" {
-			continue
-		}
-
-		switch v := current.(type) {
-		case map[string]interface{}:
-			var ok bool
-			current, ok = v[part]
-			if !ok {
-				return "", fmt.Errorf("key %q not found", part)
-			}
-		case []interface{}:
-			// Handle array index (e.g., "[0]")
-			if strings.HasPrefix(part, "[") && strings.HasSuffix(part, "]") {
-				// Parse index
-				return "", fmt.Errorf("array indexing not yet supported")
-			}
-			// If it's an array and we're looking for a key, use first element
-			if len(v) > 0 {
-				if m, ok := v[0].(map[string]interface{}); ok {
-					current, ok = m[part]
-					if !ok {
-						return "", fmt.Errorf("key %q not found in array element", part)
-					}
-				} else {
-					return "", fmt.Errorf("expected object in array")
-				}
-			} else {
-				return "", fmt.Errorf("empty array")
-			}
-		default:
-			return "", fmt.Errorf("cannot navigate into %T", current)
-		}
+// resolveAssetURL resolves a potentially relative URL against a base URL.
+func resolveAssetURL(baseURL, matchedURL string) string {
+	// If already absolute, use as-is
+	if strings.HasPrefix(matchedURL, "http://") || strings.HasPrefix(matchedURL, "https://") {
+		return matchedURL
 	}
 
-	// Convert to string
-	switch v := current.(type) {
-	case string:
-		return v, nil
-	case float64:
-		return fmt.Sprintf("%v", v), nil
-	case int:
-		return fmt.Sprintf("%d", v), nil
-	case bool:
-		return fmt.Sprintf("%v", v), nil
-	default:
-		return "", fmt.Errorf("cannot convert %T to string", current)
+	// Resolve relative to base URL
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return matchedURL
 	}
+	ref, err := url.Parse(matchedURL)
+	if err != nil {
+		return matchedURL
+	}
+	return base.ResolveReference(ref).String()
+}
+
+// urlsEqual checks if two URL slices contain the same URLs (order-independent).
+func urlsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	aSet := make(map[string]bool)
+	for _, u := range a {
+		aSet[u] = true
+	}
+	for _, u := range b {
+		if !aSet[u] {
+			return false
+		}
+	}
+	return true
 }
 
 // Download downloads an APK from the web.

@@ -125,40 +125,147 @@ func updateImageDimensions(url string) string {
 	return url
 }
 
-// htmlToMarkdown converts simple HTML to Markdown.
-// This is a basic implementation handling common elements.
+// htmlToMarkdown converts HTML to Markdown using goquery for proper parsing.
+// It preserves paragraph breaks, line breaks, and converts formatting tags.
 func htmlToMarkdown(html string) string {
-	// Remove excessive whitespace
 	html = strings.TrimSpace(html)
+	if html == "" {
+		return ""
+	}
 
+	// Parse HTML with goquery
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader("<div>" + html + "</div>"))
+	if err != nil {
+		// Fallback to basic text extraction
+		return stripHTMLTags(html)
+	}
+
+	// Process the HTML tree recursively
+	var result strings.Builder
+	processNode(doc.Find("body > div").First(), &result)
+
+	text := result.String()
+
+	// Clean up excessive newlines (more than 2 consecutive)
+	text = regexp.MustCompile(`\n{3,}`).ReplaceAllString(text, "\n\n")
+
+	// Clean up spaces before newlines
+	text = regexp.MustCompile(` +\n`).ReplaceAllString(text, "\n")
+
+	// Clean up multiple spaces
+	text = regexp.MustCompile(`  +`).ReplaceAllString(text, " ")
+
+	return strings.TrimSpace(text)
+}
+
+// processNode recursively processes HTML nodes and builds markdown output.
+func processNode(s *goquery.Selection, result *strings.Builder) {
+	s.Contents().Each(func(i int, child *goquery.Selection) {
+		// Check if this is a text node
+		if goquery.NodeName(child) == "#text" {
+			text := child.Text()
+			// Preserve meaningful whitespace but normalize multiple spaces
+			if strings.TrimSpace(text) != "" {
+				result.WriteString(text)
+			} else if len(text) > 0 && result.Len() > 0 {
+				// Preserve single space between inline elements
+				lastChar := result.String()[result.Len()-1]
+				if lastChar != ' ' && lastChar != '\n' {
+					result.WriteString(" ")
+				}
+			}
+			return
+		}
+
+		nodeName := goquery.NodeName(child)
+
+		switch nodeName {
+		case "br":
+			result.WriteString("\n")
+
+		case "p", "div":
+			// Add newline before block elements if there's content
+			if result.Len() > 0 {
+				str := result.String()
+				if !strings.HasSuffix(str, "\n\n") {
+					if strings.HasSuffix(str, "\n") {
+						result.WriteString("\n")
+					} else {
+						result.WriteString("\n\n")
+					}
+				}
+			}
+			processNode(child, result)
+			// Add newline after block elements
+			if result.Len() > 0 && !strings.HasSuffix(result.String(), "\n") {
+				result.WriteString("\n")
+			}
+
+		case "b", "strong":
+			result.WriteString("**")
+			processNode(child, result)
+			result.WriteString("**")
+
+		case "i", "em":
+			result.WriteString("_")
+			processNode(child, result)
+			result.WriteString("_")
+
+		case "ul", "ol":
+			if result.Len() > 0 && !strings.HasSuffix(result.String(), "\n") {
+				result.WriteString("\n")
+			}
+			processNode(child, result)
+
+		case "li":
+			result.WriteString("- ")
+			processNode(child, result)
+			if !strings.HasSuffix(result.String(), "\n") {
+				result.WriteString("\n")
+			}
+
+		case "a":
+			href, exists := child.Attr("href")
+			text := strings.TrimSpace(child.Text())
+			if exists && text != "" {
+				result.WriteString("[")
+				result.WriteString(text)
+				result.WriteString("](")
+				result.WriteString(href)
+				result.WriteString(")")
+			} else {
+				processNode(child, result)
+			}
+
+		case "h1", "h2", "h3", "h4", "h5", "h6":
+			if result.Len() > 0 && !strings.HasSuffix(result.String(), "\n") {
+				result.WriteString("\n\n")
+			}
+			level := int(nodeName[1] - '0')
+			result.WriteString(strings.Repeat("#", level))
+			result.WriteString(" ")
+			processNode(child, result)
+			result.WriteString("\n")
+
+		default:
+			// For other elements, just process children
+			processNode(child, result)
+		}
+	})
+}
+
+// stripHTMLTags is a fallback for when goquery parsing fails.
+func stripHTMLTags(html string) string {
 	// Convert <br> tags to newlines
 	html = regexp.MustCompile(`<br\s*/?>|</br>`).ReplaceAllString(html, "\n")
 
-	// Convert bold tags
-	html = regexp.MustCompile(`<b>|<strong>`).ReplaceAllString(html, "**")
-	html = regexp.MustCompile(`</b>|</strong>`).ReplaceAllString(html, "**")
+	// Convert block elements to newlines
+	html = regexp.MustCompile(`</?(p|div)>`).ReplaceAllString(html, "\n")
 
-	// Convert italic tags
-	html = regexp.MustCompile(`<i>|<em>`).ReplaceAllString(html, "_")
-	html = regexp.MustCompile(`</i>|</em>`).ReplaceAllString(html, "_")
-
-	// Convert lists
-	html = regexp.MustCompile(`<li>`).ReplaceAllString(html, "- ")
-	html = regexp.MustCompile(`</li>`).ReplaceAllString(html, "\n")
-	html = regexp.MustCompile(`<ul>|</ul>|<ol>|</ol>`).ReplaceAllString(html, "\n")
-
-	// Convert paragraphs to double newlines
-	html = regexp.MustCompile(`<p>`).ReplaceAllString(html, "")
-	html = regexp.MustCompile(`</p>`).ReplaceAllString(html, "\n\n")
-
-	// Convert links: <a href="url">text</a> -> [text](url)
-	linkRegex := regexp.MustCompile(`<a[^>]*href=["']([^"']+)["'][^>]*>([^<]*)</a>`)
-	html = linkRegex.ReplaceAllString(html, "[$2]($1)")
-
-	// Remove any remaining HTML tags
+	// Remove remaining tags
 	html = regexp.MustCompile(`<[^>]+>`).ReplaceAllString(html, "")
 
-	// Decode common HTML entities
+	// Decode HTML entities
 	html = strings.ReplaceAll(html, "&amp;", "&")
 	html = strings.ReplaceAll(html, "&lt;", "<")
 	html = strings.ReplaceAll(html, "&gt;", ">")
@@ -166,11 +273,7 @@ func htmlToMarkdown(html string) string {
 	html = strings.ReplaceAll(html, "&#39;", "'")
 	html = strings.ReplaceAll(html, "&nbsp;", " ")
 
-	// Clean up excessive newlines
-	html = regexp.MustCompile(`\n{3,}`).ReplaceAllString(html, "\n\n")
-	html = strings.TrimSpace(html)
-
-	return html
+	return strings.TrimSpace(html)
 }
 
 // GetPlayStorePackageID extracts the package ID from a Play Store URL.
@@ -223,4 +326,3 @@ func FetchPlayStoreMetadata(ctx context.Context, packageID string) (*AppMetadata
 func (p *PlayStore) Type() config.SourceType {
 	return config.SourcePlayStore
 }
-

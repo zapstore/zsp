@@ -131,64 +131,18 @@ release_source:
 			},
 		},
 		{
-			name: "release_source web html",
+			name: "release_source web with asset_url pattern",
 			yaml: `
 repository: https://github.com/user/app
 release_source:
   url: https://example.com/releases
-  asset_url: https://example.com/app_$version.apk
-  html:
-    selector: ".version"
-    attribute: text
-    match: "v([0-9.]+)"
+  asset_url: https://example\.com/app_[0-9.]+\.apk
 `,
 			check: func(c *Config) bool {
 				return c.ReleaseSource != nil &&
 					c.ReleaseSource.IsWebSource &&
 					c.ReleaseSource.URL == "https://example.com/releases" &&
-					c.ReleaseSource.AssetURL == "https://example.com/app_$version.apk" &&
-					c.ReleaseSource.HTML != nil &&
-					c.ReleaseSource.HTML.Selector == ".version" &&
-					c.ReleaseSource.HTML.Attribute == "text" &&
-					c.ReleaseSource.HTML.Match == "v([0-9.]+)" &&
-					c.GetSourceType() == SourceWeb
-			},
-		},
-		{
-			name: "release_source web json",
-			yaml: `
-repository: https://github.com/user/app
-release_source:
-  url: https://api.example.com/releases
-  asset_url: https://cdn.example.com/app_$version.apk
-  json:
-    path: "$.tag_name"
-    match: "v([0-9.]+)"
-`,
-			check: func(c *Config) bool {
-				return c.ReleaseSource != nil &&
-					c.ReleaseSource.IsWebSource &&
-					c.ReleaseSource.JSON != nil &&
-					c.ReleaseSource.JSON.Path == "$.tag_name" &&
-					c.GetSourceType() == SourceWeb
-			},
-		},
-		{
-			name: "release_source web redirect",
-			yaml: `
-repository: https://github.com/user/app
-release_source:
-  url: https://example.com/latest
-  asset_url: https://example.com/v$version/app.apk
-  redirect:
-    header: location
-    match: "/v([0-9.]+)/"
-`,
-			check: func(c *Config) bool {
-				return c.ReleaseSource != nil &&
-					c.ReleaseSource.IsWebSource &&
-					c.ReleaseSource.Redirect != nil &&
-					c.ReleaseSource.Redirect.Header == "location" &&
+					c.ReleaseSource.AssetURL == "https://example\\.com/app_[0-9.]+\\.apk" &&
 					c.GetSourceType() == SourceWeb
 			},
 		},
@@ -252,16 +206,12 @@ func TestParseErrors(t *testing.T) {
 		yaml string
 	}{
 		{
-			name: "multiple extractors",
+			name: "release_source as list",
 			yaml: `
 repository: https://github.com/user/app
 release_source:
-  url: https://example.com/releases
-  asset_url: https://example.com/app.apk
-  html:
-    selector: ".version"
-  json:
-    path: "$.version"
+  - https://example1.com
+  - https://example2.com
 `,
 		},
 	}
@@ -831,63 +781,6 @@ func TestParseErrorCases(t *testing.T) {
 			yaml: `
 repository: [invalid
   nested: bad
-`,
-		},
-		{
-			name: "html and json extractors together",
-			yaml: `
-repository: https://github.com/user/app
-release_source:
-  url: https://example.com
-  asset_url: https://example.com/app.apk
-  html:
-    selector: ".version"
-  json:
-    path: "$.version"
-`,
-		},
-		{
-			name: "html and redirect extractors together",
-			yaml: `
-repository: https://github.com/user/app
-release_source:
-  url: https://example.com
-  asset_url: https://example.com/app.apk
-  html:
-    selector: ".version"
-  redirect:
-    header: location
-    match: "v(.*)"
-`,
-		},
-		{
-			name: "json and redirect extractors together",
-			yaml: `
-repository: https://github.com/user/app
-release_source:
-  url: https://example.com
-  asset_url: https://example.com/app.apk
-  json:
-    path: "$.version"
-  redirect:
-    header: location
-    match: "v(.*)"
-`,
-		},
-		{
-			name: "all three extractors together",
-			yaml: `
-repository: https://github.com/user/app
-release_source:
-  url: https://example.com
-  asset_url: https://example.com/app.apk
-  html:
-    selector: ".version"
-  json:
-    path: "$.version"
-  redirect:
-    header: location
-    match: "v(.*)"
 `,
 		},
 		{

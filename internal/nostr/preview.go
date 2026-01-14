@@ -72,48 +72,84 @@ type PreviewData struct {
 // BuildPreviewDataFromAPK creates preview data from APK info and config (before signing).
 // This is used for the pre-signing preview where events are not yet available.
 func BuildPreviewDataFromAPK(apkInfo *apk.APKInfo, cfg *config.Config, changelog string, blossomURL string, relayURLs []string) *PreviewData {
+	return BuildPreviewDataFromAPKs([]*apk.APKInfo{apkInfo}, cfg, changelog, blossomURL, relayURLs)
+}
+
+// BuildPreviewDataFromAPKs creates preview data from multiple APK infos and config (before signing).
+// This is used for the pre-signing preview where events are not yet available.
+func BuildPreviewDataFromAPKs(apkInfos []*apk.APKInfo, cfg *config.Config, changelog string, blossomURL string, relayURLs []string) *PreviewData {
+	if len(apkInfos) == 0 {
+		return nil
+	}
+
+	// Use first APK for app-level info
+	firstAPK := apkInfos[0]
+
 	// Determine app name
 	name := cfg.Name
 	if name == "" {
-		name = apkInfo.Label
+		name = firstAPK.Label
 	}
 	if name == "" {
-		name = apkInfo.PackageID
+		name = firstAPK.PackageID
 	}
 
-	// Convert architectures to platform identifiers
-	platforms := make([]string, 0, len(apkInfo.Architectures))
-	for _, arch := range apkInfo.Architectures {
-		platforms = append(platforms, archToPlatform(arch))
+	// Build assets and collect all platforms
+	var assets []AssetPreviewData
+	platformSet := make(map[string]bool)
+
+	for _, apkInfo := range apkInfos {
+		// Convert architectures to platform identifiers for this asset
+		assetPlatforms := make([]string, 0, len(apkInfo.Architectures))
+		for _, arch := range apkInfo.Architectures {
+			p := archToPlatform(arch)
+			assetPlatforms = append(assetPlatforms, p)
+			platformSet[p] = true
+		}
+		if len(assetPlatforms) == 0 {
+			// Architecture-independent
+			for _, p := range []string{"android-arm64-v8a", "android-armeabi-v7a", "android-x86", "android-x86_64"} {
+				assetPlatforms = append(assetPlatforms, p)
+				platformSet[p] = true
+			}
+		}
+
+		assets = append(assets, AssetPreviewData{
+			SHA256:          apkInfo.SHA256,
+			FileSize:        apkInfo.FileSize,
+			Filename:        apkInfo.FilePath,
+			CertFingerprint: apkInfo.CertFingerprint,
+			MinSDK:          apkInfo.MinSDK,
+			TargetSDK:       apkInfo.TargetSDK,
+			Platforms:       assetPlatforms,
+		})
 	}
-	if len(platforms) == 0 {
-		platforms = []string{"android-arm64-v8a", "android-armeabi-v7a", "android-x86", "android-x86_64"}
+
+	// Collect all platforms
+	var platforms []string
+	for p := range platformSet {
+		platforms = append(platforms, p)
 	}
 
 	return &PreviewData{
-		AppName:         name,
-		PackageID:       apkInfo.PackageID,
-		Summary:         cfg.Summary,
-		Description:     cfg.Description,
-		Website:         cfg.Website,
-		Repository:      cfg.Repository,
-		License:         cfg.License,
-		Tags:            cfg.Tags,
-		IconData:        apkInfo.Icon,
-		ImageURLs:       cfg.Images,
-		Platforms:       platforms,
-		Version:         apkInfo.VersionName,
-		VersionCode:     apkInfo.VersionCode,
-		Channel:         "main",
-		Changelog:       changelog,
-		SHA256:          apkInfo.SHA256,
-		FileSize:        apkInfo.FileSize,
-		Filename:        apkInfo.FilePath,
-		CertFingerprint: apkInfo.CertFingerprint,
-		MinSDK:          apkInfo.MinSDK,
-		TargetSDK:       apkInfo.TargetSDK,
-		BlossomServer:   blossomURL,
-		RelayURLs:       relayURLs,
+		AppName:       name,
+		PackageID:     firstAPK.PackageID,
+		Summary:       cfg.Summary,
+		Description:   cfg.Description,
+		Website:       cfg.Website,
+		Repository:    cfg.Repository,
+		License:       cfg.License,
+		Tags:          cfg.Tags,
+		IconData:      firstAPK.Icon,
+		ImageURLs:     cfg.Images,
+		Platforms:     platforms,
+		Version:       firstAPK.VersionName,
+		VersionCode:   firstAPK.VersionCode,
+		Channel:       "main",
+		Changelog:     changelog,
+		Assets:        assets,
+		BlossomServer: blossomURL,
+		RelayURLs:     relayURLs,
 	}
 }
 
@@ -124,7 +160,19 @@ func BuildPreviewData(apkInfo *apk.APKInfo, cfg *config.Config, events *EventSet
 	if events != nil {
 		data.AppMetadataEvent = events.AppMetadata
 		data.ReleaseEvent = events.Release
-		data.SoftwareAssetEvent = events.SoftwareAsset
+		data.SoftwareAssetEvents = events.SoftwareAssets
+	}
+	return data
+}
+
+// BuildPreviewDataFromEvents creates preview data from multiple APKs, config, and events.
+// Use this after signing when events are available.
+func BuildPreviewDataFromEvents(apkInfos []*apk.APKInfo, cfg *config.Config, events *EventSet, changelog string, blossomURL string, relayURLs []string) *PreviewData {
+	data := BuildPreviewDataFromAPKs(apkInfos, cfg, changelog, blossomURL, relayURLs)
+	if events != nil {
+		data.AppMetadataEvent = events.AppMetadata
+		data.ReleaseEvent = events.Release
+		data.SoftwareAssetEvents = events.SoftwareAssets
 	}
 	return data
 }
@@ -221,7 +269,7 @@ func (s *PreviewServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	events := map[string]any{
 		"softwareApplication": s.data.AppMetadataEvent,
 		"softwareRelease":     s.data.ReleaseEvent,
-		"softwareAsset":       s.data.SoftwareAssetEvent,
+		"softwareAssets":      s.data.SoftwareAssetEvents,
 	}
 	json.NewEncoder(w).Encode(events)
 }
@@ -276,8 +324,47 @@ func (s *PreviewServer) buildHTML() string {
 		screenshotsHTML = fmt.Sprintf(`<div class="screenshots">%s</div>`, strings.Join(imgs, ""))
 	}
 
-	// Format file size
-	fileSizeStr := formatBytes(d.FileSize)
+	// Build assets HTML
+	assetsHTML := ""
+	for i, asset := range d.Assets {
+		assetNum := ""
+		if len(d.Assets) > 1 {
+			assetNum = fmt.Sprintf(" %d", i+1)
+		}
+		assetsHTML += fmt.Sprintf(`
+    <div class="section">
+      <h2>Software Asset%s</h2>
+      <div class="asset-grid">
+        <div class="asset-item">
+          <div class="label">SHA256</div>
+          <div class="value">%s</div>
+        </div>
+        <div class="asset-item">
+          <div class="label">File Size</div>
+          <div class="value">%s</div>
+        </div>
+        <div class="asset-item">
+          <div class="label">Min SDK</div>
+          <div class="value">%s</div>
+        </div>
+        <div class="asset-item">
+          <div class="label">Target SDK</div>
+          <div class="value">%s</div>
+        </div>
+        <div class="asset-item" style="grid-column: 1 / -1;">
+          <div class="label">APK Certificate Hash</div>
+          <div class="value">%s</div>
+        </div>
+      </div>
+    </div>`,
+			assetNum,
+			html.EscapeString(asset.SHA256),
+			formatBytes(asset.FileSize),
+			strconv.Itoa(int(asset.MinSDK)),
+			strconv.Itoa(int(asset.TargetSDK)),
+			html.EscapeString(asset.CertFingerprint),
+		)
+	}
 
 	// Relay URLs HTML
 	relayURLsHTML := ""
@@ -354,12 +441,8 @@ func (s *PreviewServer) buildHTML() string {
 		screenshotsHTML,
 		// Release section (built conditionally)
 		releaseSectionHTML,
-		// Asset info
-		html.EscapeString(d.SHA256),
-		fileSizeStr,
-		strconv.Itoa(int(d.MinSDK)),
-		strconv.Itoa(int(d.TargetSDK)),
-		html.EscapeString(d.CertFingerprint),
+		// Assets section (built dynamically)
+		assetsHTML,
 		// Publish targets
 		html.EscapeString(d.BlossomServer),
 		relayURLsHTML,
@@ -409,24 +492,31 @@ func simpleMarkdownToHTML(text string) string {
 			continue
 		}
 
-		// List items
-		if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
-			result = append(result, "<li>"+strings.TrimPrefix(strings.TrimPrefix(trimmed, "- "), "* ")+"</li>")
+		// List items (markdown style and bullet character)
+		if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") || strings.HasPrefix(trimmed, "• ") {
+			content := strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(trimmed, "- "), "* "), "• ")
+			result = append(result, "<li>"+content+"</li>")
 			continue
 		}
 
-		// Empty lines become paragraph breaks
+		// Empty lines become paragraph breaks (double <br> for visual spacing)
 		if trimmed == "" {
-			result = append(result, "<br>")
+			result = append(result, "<br><br>")
 			continue
 		}
 
-		// Regular text - apply inline formatting
+		// Regular text - apply inline formatting and add line break
 		line = applyInlineMarkdown(line)
-		result = append(result, line)
+		result = append(result, line+"<br>")
 	}
 
-	return strings.Join(result, "\n")
+	// Join without newlines since we're using <br> tags
+	output := strings.Join(result, "")
+	// Clean up trailing <br> tags
+	output = strings.TrimSuffix(output, "<br>")
+	// Clean up excessive <br> tags (more than 2 consecutive)
+	output = regexp.MustCompile(`(<br>){3,}`).ReplaceAllString(output, "<br><br>")
+	return output
 }
 
 // applyInlineMarkdown applies inline markdown formatting (bold, italic, code, links).
@@ -854,31 +944,7 @@ const previewHTML = `<!DOCTYPE html>
     
     %s
     
-    <div class="section">
-      <h2>Asset</h2>
-      <div class="asset-grid">
-        <div class="asset-item">
-          <div class="label">SHA256</div>
-          <div class="value">%s</div>
-        </div>
-        <div class="asset-item">
-          <div class="label">File Size</div>
-          <div class="value">%s</div>
-        </div>
-        <div class="asset-item">
-          <div class="label">Min SDK</div>
-          <div class="value">%s</div>
-        </div>
-        <div class="asset-item">
-          <div class="label">Target SDK</div>
-          <div class="value">%s</div>
-        </div>
-        <div class="asset-item" style="grid-column: 1 / -1;">
-          <div class="label">APK Certificate Hash</div>
-          <div class="value">%s</div>
-        </div>
-      </div>
-    </div>
+    %s
     
     <div class="section">
       <h2>Publish To</h2>

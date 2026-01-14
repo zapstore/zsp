@@ -229,25 +229,26 @@ type BatchSigner interface {
 }
 
 // SignEventSet signs all events in an event set.
-// It signs the Software Asset first to get its ID, adds the reference to Software Release,
+// It signs the Software Assets first to get their IDs, adds the references to Software Release,
 // then signs Software Release and Software Application.
 func SignEventSet(ctx context.Context, signer Signer, events *EventSet, relayHint string) error {
 	// Use batch signing if available (e.g., NIP-07 browser signer)
-	// For batch signing, we need to pre-compute the asset ID before signing
+	// For batch signing, we need to pre-compute the asset IDs before signing
 	if batchSigner, ok := signer.(BatchSigner); ok {
 		return signEventSetBatch(ctx, batchSigner, events, relayHint)
 	}
 
-	// Sequential signing: sign asset first, add reference to release, then sign rest
-	// 1. Sign the Software Asset first to get its event ID
-	if err := signer.Sign(ctx, events.SoftwareAsset); err != nil {
-		return fmt.Errorf("failed to sign Software Asset event: %w", err)
+	// Sequential signing: sign assets first, add references to release, then sign rest
+	// 1. Sign all Software Assets first to get their event IDs
+	for i, asset := range events.SoftwareAssets {
+		if err := signer.Sign(ctx, asset); err != nil {
+			return fmt.Errorf("failed to sign Software Asset event %d: %w", i+1, err)
+		}
+		// 2. Add the asset event ID reference to the Software Release event
+		events.AddAssetReference(asset.ID, relayHint)
 	}
 
-	// 2. Add the asset event ID reference to the Software Release event
-	events.AddAssetReference(events.SoftwareAsset.ID, relayHint)
-
-	// 3. Sign the Software Release event (now with asset reference)
+	// 3. Sign the Software Release event (now with asset references)
 	if err := signer.Sign(ctx, events.Release); err != nil {
 		return fmt.Errorf("failed to sign Software Release event: %w", err)
 	}
@@ -263,19 +264,21 @@ func SignEventSet(ctx context.Context, signer Signer, events *EventSet, relayHin
 // signEventSetBatch handles batch signing for signers like NIP-07.
 // For batch signing, we need a different approach since all events are signed at once.
 func signEventSetBatch(ctx context.Context, batchSigner BatchSigner, events *EventSet, relayHint string) error {
-	// For batch signing, we can't sign Software Asset first and then update Software Release.
-	// Instead, we pre-compute what the Software Asset event ID will be.
+	// For batch signing, we can't sign Software Assets first and then update Software Release.
+	// Instead, we pre-compute what the Software Asset event IDs will be.
 	// The ID is SHA256 of the serialized event, so we can compute it before signing.
 
-	// Compute what the Software Asset event ID will be (based on unsigned content)
-	events.SoftwareAsset.PubKey = events.Release.PubKey // Ensure pubkey is set
-	assetID := events.SoftwareAsset.GetID()
-
-	// Add the asset reference to Software Release before batch signing
-	events.AddAssetReference(assetID, relayHint)
+	// Compute what each Software Asset event ID will be (based on unsigned content)
+	for _, asset := range events.SoftwareAssets {
+		asset.PubKey = events.Release.PubKey // Ensure pubkey is set
+		assetID := asset.GetID()
+		// Add the asset reference to Software Release before batch signing
+		events.AddAssetReference(assetID, relayHint)
+	}
 
 	// Now batch sign all events
-	allEvents := []*nostr.Event{events.AppMetadata, events.Release, events.SoftwareAsset}
+	allEvents := []*nostr.Event{events.AppMetadata, events.Release}
+	allEvents = append(allEvents, events.SoftwareAssets...)
 	if err := batchSigner.SignBatch(ctx, allEvents); err != nil {
 		return fmt.Errorf("failed to batch sign events: %w", err)
 	}
@@ -287,8 +290,19 @@ func signEventSetBatch(ctx context.Context, batchSigner BatchSigner, events *Eve
 func EventsToJSON(events *EventSet) ([]byte, error) {
 	var result []byte
 
-	for _, event := range []*nostr.Event{events.AppMetadata, events.Release, events.SoftwareAsset} {
+	// Add app metadata and release
+	for _, event := range []*nostr.Event{events.AppMetadata, events.Release} {
 		data, err := json.Marshal(event)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, data...)
+		result = append(result, '\n')
+	}
+
+	// Add all software assets
+	for _, asset := range events.SoftwareAssets {
+		data, err := json.Marshal(asset)
 		if err != nil {
 			return nil, err
 		}

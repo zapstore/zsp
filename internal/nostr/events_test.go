@@ -275,8 +275,8 @@ func TestBuildEventSet(t *testing.T) {
 	if events.Release == nil {
 		t.Error("Release event is nil")
 	}
-	if events.SoftwareAsset == nil {
-		t.Error("SoftwareAsset event is nil")
+	if len(events.SoftwareAssets) == 0 {
+		t.Error("SoftwareAssets is empty")
 	}
 
 	// Check that config name overrides APK label
@@ -301,7 +301,7 @@ func TestBuildEventSet(t *testing.T) {
 	}
 
 	// Check asset has i tag
-	iTag := events.SoftwareAsset.Tags.GetFirst([]string{"i"})
+	iTag := events.SoftwareAssets[0].Tags.GetFirst([]string{"i"})
 	if iTag == nil || (*iTag)[1] != "com.example.app" {
 		t.Errorf("expected i tag 'com.example.app', got %v", iTag)
 	}

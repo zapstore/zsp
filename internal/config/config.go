@@ -53,7 +53,7 @@ type Config struct {
 }
 
 // ReleaseSource represents a release source configuration.
-// It can be a simple URL string or a complex web scraping config.
+// It can be a simple URL string or a web source config with asset_url pattern.
 type ReleaseSource struct {
 	// Simple URL mode (GitHub, GitLab, Gitea, F-Droid)
 	URL string
@@ -63,41 +63,17 @@ type ReleaseSource struct {
 	// Useful for self-hosted GitLab/Gitea/Forgejo instances
 	Type string
 
-	// Web scraping mode
+	// Web source mode - AssetURL is a regex pattern to find APK URLs
+	// in the response (headers, body). Version is extracted from downloaded APK.
 	IsWebSource bool
-	AssetURL    string             `yaml:"asset_url,omitempty"`
-	HTML        *HTMLExtractor     `yaml:"html,omitempty"`
-	JSON        *JSONExtractor     `yaml:"json,omitempty"`
-	Redirect    *RedirectExtractor `yaml:"redirect,omitempty"`
-}
-
-// HTMLExtractor configures HTML scraping for version extraction.
-type HTMLExtractor struct {
-	Selector  string `yaml:"selector"`
-	Attribute string `yaml:"attribute,omitempty"` // defaults to "text"
-	Match     string `yaml:"match,omitempty"`     // optional regex
-}
-
-// JSONExtractor configures JSON API parsing for version extraction.
-type JSONExtractor struct {
-	Path  string `yaml:"path"`            // JSONPath expression
-	Match string `yaml:"match,omitempty"` // optional regex
-}
-
-// RedirectExtractor configures HTTP redirect header parsing.
-type RedirectExtractor struct {
-	Header string `yaml:"header"` // e.g., "location"
-	Match  string `yaml:"match"`  // regex to extract version
+	AssetURL    string `yaml:"asset_url,omitempty"` // Regex pattern to match APK URL
 }
 
 // webReleaseSource is used for YAML unmarshaling of complex release_source.
 type webReleaseSource struct {
-	URL      string             `yaml:"url"`
-	Type     string             `yaml:"type,omitempty"` // Explicit source type override
-	AssetURL string             `yaml:"asset_url"`
-	HTML     *HTMLExtractor     `yaml:"html,omitempty"`
-	JSON     *JSONExtractor     `yaml:"json,omitempty"`
-	Redirect *RedirectExtractor `yaml:"redirect,omitempty"`
+	URL      string `yaml:"url"`
+	Type     string `yaml:"type,omitempty"`      // Explicit source type override
+	AssetURL string `yaml:"asset_url,omitempty"` // Regex pattern for APK URL
 }
 
 // SourceType represents the type of source for APK fetching.
@@ -212,39 +188,20 @@ func (c *Config) parseReleaseSource() error {
 		c.ReleaseSource = &ReleaseSource{URL: url}
 
 	case yaml.MappingNode:
-		// Complex web scraping config
+		// Complex release source config
 		var web webReleaseSource
 		if err := c.ReleaseSourceRaw.Decode(&web); err != nil {
 			return fmt.Errorf("failed to parse release_source config: %w", err)
 		}
 
-		// Validate: only one extractor allowed
-		extractorCount := 0
-		if web.HTML != nil {
-			extractorCount++
-		}
-		if web.JSON != nil {
-			extractorCount++
-		}
-		if web.Redirect != nil {
-			extractorCount++
-		}
-		if extractorCount > 1 {
-			return fmt.Errorf("release_source: only one of html, json, or redirect can be specified")
-		}
-
-		// Determine if this is a web scraping config or just URL with explicit type
-		hasExtractor := web.HTML != nil || web.JSON != nil || web.Redirect != nil
-		isWebSource := hasExtractor || web.AssetURL != ""
+		// Web source mode requires asset_url (regex pattern for APK URL)
+		isWebSource := web.AssetURL != ""
 
 		c.ReleaseSource = &ReleaseSource{
 			URL:         web.URL,
 			Type:        web.Type,
 			IsWebSource: isWebSource,
 			AssetURL:    web.AssetURL,
-			HTML:        web.HTML,
-			JSON:        web.JSON,
-			Redirect:    web.Redirect,
 		}
 
 	default:

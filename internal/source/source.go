@@ -87,7 +87,12 @@ func NewWithOptions(cfg *config.Config, opts Options) (Source, error) {
 	case config.SourceFDroid:
 		return NewFDroid(cfg)
 	case config.SourceWeb:
-		return NewWeb(cfg)
+		web, err := NewWeb(cfg)
+		if err != nil {
+			return nil, err
+		}
+		web.SkipCache = opts.SkipCache
+		return web, nil
 	default:
 		return nil, fmt.Errorf("unsupported source type: %s", sourceType)
 	}

@@ -23,6 +23,7 @@ type AppMetadata struct {
 	License     string
 	Tags        []string
 	ImageURLs   []string
+	IconURL     string // URL to app icon (from Play Store or F-Droid)
 }
 
 // MetadataFetcher fetches metadata from external sources.
@@ -275,15 +276,15 @@ func (f *MetadataFetcher) fetchGitLabMetadata(ctx context.Context) (*AppMetadata
 	}
 
 	var projectInfo struct {
-		Name             string   `json:"name"`
-		Description      string   `json:"description"`
-		WebURL           string   `json:"web_url"`
-		Topics           []string `json:"topics"`
-		DefaultBranch    string   `json:"default_branch"`
-		ReadmeURL        string   `json:"readme_url"`
-		ForksCount       int      `json:"forks_count"`
-		StarCount        int      `json:"star_count"`
-		License          *struct {
+		Name          string   `json:"name"`
+		Description   string   `json:"description"`
+		WebURL        string   `json:"web_url"`
+		Topics        []string `json:"topics"`
+		DefaultBranch string   `json:"default_branch"`
+		ReadmeURL     string   `json:"readme_url"`
+		ForksCount    int      `json:"forks_count"`
+		StarCount     int      `json:"star_count"`
+		License       *struct {
 			Key      string `json:"key"`
 			Name     string `json:"name"`
 			Nickname string `json:"nickname"`
@@ -396,6 +397,10 @@ func (f *MetadataFetcher) fetchFDroidMetadata(ctx context.Context) (*AppMetadata
 		meta.Tags = append(meta.Tags, strings.ToLower(cat))
 	}
 
+	// Construct F-Droid icon URL
+	// Format: {repoURL}/icons-640/{packageId}.png (high-res without version)
+	meta.IconURL = fmt.Sprintf("%s/icons-640/%s.png", repoInfo.RepoURL, repoInfo.PackageID)
+
 	return meta, nil
 }
 
@@ -429,6 +434,7 @@ func (f *MetadataFetcher) fetchPlayStoreMetadata(ctx context.Context) (*AppMetad
 		Name:        psMeta.Name,
 		Description: psMeta.Description,
 		ImageURLs:   psMeta.ImageURLs,
+		IconURL:     psMeta.IconURL,
 	}
 
 	return meta, nil
@@ -460,6 +466,9 @@ func (f *MetadataFetcher) mergeMetadata(meta *AppMetadata) {
 	}
 	if len(f.cfg.Images) == 0 && len(meta.ImageURLs) > 0 {
 		f.cfg.Images = meta.ImageURLs
+	}
+	if f.cfg.Icon == "" && meta.IconURL != "" {
+		f.cfg.Icon = meta.IconURL
 	}
 }
 
@@ -504,4 +513,3 @@ func extractFirstParagraph(markdown string) string {
 
 	return result
 }
-

@@ -94,18 +94,19 @@ func (p *Publisher) publishToRelay(ctx context.Context, url string, event *nostr
 func (p *Publisher) PublishEventSet(ctx context.Context, events *EventSet) (map[string][]PublishResult, error) {
 	results := make(map[string][]PublishResult)
 
-	// Publish in order: Software Application, Software Release, Software Asset
-	eventList := []struct {
-		name  string
-		event *nostr.Event
-	}{
-		{"software_application", events.AppMetadata},
-		{"software_release", events.Release},
-		{"software_asset", events.SoftwareAsset},
-	}
+	// Publish Software Application
+	results["software_application"] = p.Publish(ctx, events.AppMetadata)
 
-	for _, item := range eventList {
-		results[item.name] = p.Publish(ctx, item.event)
+	// Publish Software Release
+	results["software_release"] = p.Publish(ctx, events.Release)
+
+	// Publish all Software Assets
+	for i, asset := range events.SoftwareAssets {
+		key := "software_asset"
+		if len(events.SoftwareAssets) > 1 {
+			key = fmt.Sprintf("software_asset_%d", i+1)
+		}
+		results[key] = p.Publish(ctx, asset)
 	}
 
 	return results, nil

@@ -1,13 +1,10 @@
-# Fountain - Podcast app with redirect-based version detection
-# The /apk URL redirects to the actual APK, version extracted from redirect location
+# Fountain - Podcast app with redirect-based APK discovery
+# The /apk URL redirects to the actual APK, pattern matches the redirect location
 name: Fountain
 
 release_source:
   url: https://fountain.fm/apk
-  asset_url: https://storage.googleapis.com/fountain-fm-builds/android/fountain-$version.apk
-  redirect:
-    header: location
-    match: "/android/fountain-([0-9.-]+)\\.apk"
+  asset_url: https://storage\.googleapis\.com/fountain-fm-builds/android/fountain-[0-9.-]+\.apk
 
 metadata_sources:
   - playstore

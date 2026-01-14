@@ -577,11 +577,19 @@ func publish(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("failed to fetch release: %w", err)
 	}
 	if spinner != nil {
-		spinner.StopWithSuccess(fmt.Sprintf("Found release %s with %d assets", release.Version, len(release.Assets)))
+		if release.Version != "" {
+			spinner.StopWithSuccess(fmt.Sprintf("Found release %s with %d assets", release.Version, len(release.Assets)))
+		} else {
+			spinner.StopWithSuccess(fmt.Sprintf("Found %d assets (version from APK)", len(release.Assets)))
+		}
 	}
 
 	if *verboseFlag {
-		fmt.Printf("  Found release: %s with %d assets\n", release.Version, len(release.Assets))
+		if release.Version != "" {
+			fmt.Printf("  Found release: %s with %d assets\n", release.Version, len(release.Assets))
+		} else {
+			fmt.Printf("  Found %d assets (version will be extracted from APK)\n", len(release.Assets))
+		}
 	}
 
 	// ═══════════════════════════════════════════════════════════════════
@@ -692,13 +700,18 @@ func publish(ctx context.Context, cfg *config.Config) error {
 		parseSpinner.StopWithSuccess("Parsed and verified APK")
 	}
 
+	// Backfill version from APK if not known from release (web sources)
+	if release.Version == "" {
+		release.Version = apkInfo.VersionName
+	}
+
 	// Display APK summary
 	if !*quietFlag {
 		ui.PrintSectionHeader("APK Summary")
-		ui.PrintKeyValue("Package", apkInfo.PackageID)
+		ui.PrintKeyValue("Name", apkInfo.Label)
+		ui.PrintKeyValue("App ID", apkInfo.PackageID)
 		ui.PrintKeyValue("Version", fmt.Sprintf("%s (%d)", apkInfo.VersionName, apkInfo.VersionCode))
-		ui.PrintKeyValue("Label", apkInfo.Label)
-		ui.PrintKeyValue("Certificate", apkInfo.CertFingerprint)
+		ui.PrintKeyValue("Certificate hash", apkInfo.CertFingerprint)
 		ui.PrintKeyValue("Size", fmt.Sprintf("%.2f MB", float64(apkInfo.FileSize)/(1024*1024)))
 	}
 
@@ -833,6 +846,17 @@ func publish(ctx context.Context, cfg *config.Config) error {
 		changelog = string(changelogData)
 	}
 
+	// Pre-download remote icon and screenshots before preview
+	// This ensures preview shows the actual images and avoids re-downloading during upload
+	var preDownloaded *preDownloadedImages
+	if cfg.Icon != "" && isRemoteURL(cfg.Icon) || hasRemoteImages(cfg.Images) {
+		var err error
+		preDownloaded, err = preDownloadImages(ctx, cfg, *quietFlag)
+		if err != nil {
+			return fmt.Errorf("failed to download images: %w", err)
+		}
+	}
+
 	// Track port used for browser operations (preview and/or signing)
 	browserPort := *portFlag
 	previewWasShown := false
@@ -863,6 +887,10 @@ func publish(ctx context.Context, cfg *config.Config) error {
 			}
 
 			previewData := nostr.BuildPreviewDataFromAPK(apkInfo, cfg, changelog, blossomURL, relayURLs)
+			// Override icon with pre-downloaded icon if available (e.g., from Play Store)
+			if preDownloaded != nil && preDownloaded.Icon != nil {
+				previewData.IconData = preDownloaded.Icon.Data
+			}
 			previewServer := nostr.NewPreviewServer(previewData, changelog, "", browserPort)
 			url, err := previewServer.Start()
 			if err != nil {
@@ -972,13 +1000,13 @@ func publish(ctx context.Context, cfg *config.Config) error {
 
 		if isBatchSigner {
 			// Batch signing mode: pre-collect all data, create ALL events (auth + main), sign once
-			events, err = uploadAndSignWithBatch(ctx, cfg, apkInfo, apkPath, release, blossomClient, blossomURL, batchSigner, signer.PublicKey(), relayHint)
+			events, err = uploadAndSignWithBatch(ctx, cfg, apkInfo, apkPath, release, blossomClient, blossomURL, batchSigner, signer.PublicKey(), relayHint, preDownloaded)
 			if err != nil {
 				return err
 			}
 		} else {
 			// Regular signing mode: sign each upload auth event individually
-			iconURL, imageURLs, err = uploadWithIndividualSigning(ctx, cfg, apkInfo, apkPath, blossomClient, signer)
+			iconURL, imageURLs, err = uploadWithIndividualSigning(ctx, cfg, apkInfo, apkPath, blossomClient, signer, preDownloaded)
 			if err != nil {
 				return err
 			}
@@ -1144,7 +1172,9 @@ func outputEvents(events *nostr.EventSet) {
 	enc := json.NewEncoder(os.Stdout)
 	enc.Encode(events.AppMetadata)
 	enc.Encode(events.Release)
-	enc.Encode(events.SoftwareAsset)
+	for _, asset := range events.SoftwareAssets {
+		enc.Encode(asset)
+	}
 }
 
 // previewEvents displays signed events in a human-readable format.
@@ -1181,17 +1211,23 @@ func previewEvents(events *nostr.EventSet) {
 	}
 	fmt.Printf("    Sig: %s...\n", events.Release.Sig[:32])
 
-	// Software Asset (kind 3063)
-	fmt.Println()
-	fmt.Printf("  %s\n", ui.Bold("Kind 3063 (Software Asset)"))
-	fmt.Printf("    ID: %s\n", events.SoftwareAsset.ID)
-	fmt.Printf("    pubkey: %s...\n", events.SoftwareAsset.PubKey[:16])
-	fmt.Printf("    Created: %s\n", events.SoftwareAsset.CreatedAt.Time().Format("2006-01-02 15:04:05"))
-	fmt.Println("    Tags:")
-	for _, tag := range events.SoftwareAsset.Tags {
-		fmt.Printf("      %v\n", tag)
+	// Software Assets (kind 3063)
+	for i, asset := range events.SoftwareAssets {
+		fmt.Println()
+		assetLabel := "Kind 3063 (Software Asset)"
+		if len(events.SoftwareAssets) > 1 {
+			assetLabel = fmt.Sprintf("Kind 3063 (Software Asset %d)", i+1)
+		}
+		fmt.Printf("  %s\n", ui.Bold(assetLabel))
+		fmt.Printf("    ID: %s\n", asset.ID)
+		fmt.Printf("    pubkey: %s...\n", asset.PubKey[:16])
+		fmt.Printf("    Created: %s\n", asset.CreatedAt.Time().Format("2006-01-02 15:04:05"))
+		fmt.Println("    Tags:")
+		for _, tag := range asset.Tags {
+			fmt.Printf("      %v\n", tag)
+		}
+		fmt.Printf("    Sig: %s...\n", asset.Sig[:32])
 	}
-	fmt.Printf("    Sig: %s...\n", events.SoftwareAsset.Sig[:32])
 	fmt.Println()
 }
 
@@ -1208,9 +1244,15 @@ func previewEventsJSON(events *nostr.EventSet) {
 	printColorizedJSON(events.Release)
 	fmt.Println()
 
-	fmt.Printf("  %s\n", ui.Bold("Kind 3063 (Software Asset):"))
-	printColorizedJSON(events.SoftwareAsset)
-	fmt.Println()
+	for i, asset := range events.SoftwareAssets {
+		assetLabel := "Kind 3063 (Software Asset):"
+		if len(events.SoftwareAssets) > 1 {
+			assetLabel = fmt.Sprintf("Kind 3063 (Software Asset %d):", i+1)
+		}
+		fmt.Printf("  %s\n", ui.Bold(assetLabel))
+		printColorizedJSON(asset)
+		fmt.Println()
+	}
 }
 
 // printColorizedJSON prints a value as colorized JSON.
@@ -1301,6 +1343,124 @@ func confirmPublish(events *nostr.EventSet, relayURLs []string) (bool, error) {
 // isRemoteURL returns true if the path is a remote URL (http/https).
 func isRemoteURL(path string) bool {
 	return strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://")
+}
+
+// hasRemoteImages returns true if any of the images are remote URLs.
+func hasRemoteImages(images []string) bool {
+	for _, img := range images {
+		if isRemoteURL(img) {
+			return true
+		}
+	}
+	return false
+}
+
+// findPreDownloadedImage finds a pre-downloaded image by its original URL.
+func findPreDownloadedImage(images []*downloadedImage, url string) *downloadedImage {
+	for _, img := range images {
+		if img.URL == url {
+			return img
+		}
+	}
+	return nil
+}
+
+// downloadedImage holds pre-downloaded image data.
+type downloadedImage struct {
+	URL      string // Original URL
+	Data     []byte // Image bytes
+	Hash     string // SHA256 hash (hex)
+	MimeType string // MIME type
+}
+
+// preDownloadedImages holds all pre-downloaded images for a release.
+type preDownloadedImages struct {
+	Icon   *downloadedImage   // Icon (from cfg.Icon if remote URL)
+	Images []*downloadedImage // Screenshots (from cfg.Images if remote URLs)
+}
+
+// preDownloadImages downloads cfg.Icon and cfg.Images if they are remote URLs.
+// Returns the downloaded data that can be used for preview and later upload.
+func preDownloadImages(ctx context.Context, cfg *config.Config, quiet bool) (*preDownloadedImages, error) {
+	result := &preDownloadedImages{}
+
+	// Download icon if it's a remote URL
+	if cfg.Icon != "" && isRemoteURL(cfg.Icon) {
+		var spinner *ui.Spinner
+		if !quiet {
+			spinner = ui.NewSpinner("Downloading icon...")
+			spinner.Start()
+		}
+
+		data, hash, mimeType, err := downloadRemoteImage(ctx, cfg.Icon)
+		if err != nil {
+			if spinner != nil {
+				spinner.StopWithError("Failed to download icon")
+			}
+			return nil, fmt.Errorf("failed to download icon from %s: %w", cfg.Icon, err)
+		}
+
+		result.Icon = &downloadedImage{
+			URL:      cfg.Icon,
+			Data:     data,
+			Hash:     hash,
+			MimeType: mimeType,
+		}
+
+		if spinner != nil {
+			spinner.StopWithSuccess("Downloaded icon")
+		}
+	}
+
+	// Download screenshots if they are remote URLs
+	remoteImages := 0
+	for _, img := range cfg.Images {
+		if isRemoteURL(img) {
+			remoteImages++
+		}
+	}
+
+	if remoteImages > 0 {
+		var spinner *ui.Spinner
+		if !quiet {
+			spinner = ui.NewSpinner(fmt.Sprintf("Downloading 0/%d screenshots...", remoteImages))
+			spinner.Start()
+		}
+
+		downloaded := 0
+		for _, img := range cfg.Images {
+			if !isRemoteURL(img) {
+				continue
+			}
+
+			data, hash, mimeType, err := downloadRemoteImage(ctx, img)
+			if err != nil {
+				if spinner != nil {
+					spinner.StopWithWarning(fmt.Sprintf("Failed to download screenshot: %v", err))
+				}
+				// Continue with other images - don't fail completely
+				continue
+			}
+
+			downloaded++
+			if spinner != nil {
+				spinner.UpdateMessage(fmt.Sprintf("Downloading %d/%d screenshots...", downloaded, remoteImages))
+			}
+
+			result.Images = append(result.Images, &downloadedImage{
+				URL:      img,
+				Data:     data,
+				Hash:     hash,
+				MimeType: mimeType,
+			})
+		}
+
+		if spinner != nil {
+			spinner.StopWithSuccess(fmt.Sprintf("Downloaded %d screenshots", len(result.Images)))
+		}
+	}
+
+	return result, nil
 }
 
 // isBlossomURL checks if a URL is already hosted on the target Blossom server.
@@ -1427,7 +1587,8 @@ type uploadItem struct {
 
 // uploadAndSignWithBatch handles uploads and signing when using a batch signer (e.g., NIP-07).
 // It pre-creates ALL events (blossom auth + main events), batch signs them once, then performs uploads.
-func uploadAndSignWithBatch(ctx context.Context, cfg *config.Config, apkInfo *apk.APKInfo, apkPath string, release *source.Release, client *blossom.Client, blossomURL string, batchSigner nostr.BatchSigner, pubkey string, relayHint string) (*nostr.EventSet, error) {
+// preDownloaded contains images that were already downloaded before preview (to avoid re-downloading).
+func uploadAndSignWithBatch(ctx context.Context, cfg *config.Config, apkInfo *apk.APKInfo, apkPath string, release *source.Release, client *blossom.Client, blossomURL string, batchSigner nostr.BatchSigner, pubkey string, relayHint string, preDownloaded *preDownloadedImages) (*nostr.EventSet, error) {
 	var uploads []uploadItem
 	var iconURL string
 	var imageURLs []string
@@ -1444,14 +1605,24 @@ func uploadAndSignWithBatch(ctx context.Context, cfg *config.Config, apkInfo *ap
 		changelog = string(changelogData)
 	}
 
-	// Collect icon upload
-	if cfg.Icon != "" {
+	// Collect icon upload - prefer pre-downloaded icon
+	if preDownloaded != nil && preDownloaded.Icon != nil {
+		// Use pre-downloaded icon (from Play Store, F-Droid, etc.)
+		iconURL = fmt.Sprintf("%s/%s", client.ServerURL(), preDownloaded.Icon.Hash)
+		uploads = append(uploads, uploadItem{
+			data:       preDownloaded.Icon.Data,
+			hash:       preDownloaded.Icon.Hash,
+			mimeType:   preDownloaded.Icon.MimeType,
+			authEvent:  nostr.BuildBlossomAuthEvent(preDownloaded.Icon.Hash, pubkey, expiration),
+			uploadType: "icon",
+		})
+	} else if cfg.Icon != "" {
 		if isRemoteURL(cfg.Icon) {
 			// Check if already on Blossom server - if so, keep it
 			if isBlossomURL(cfg.Icon, client.ServerURL()) {
 				iconURL = cfg.Icon
 			} else {
-				// Download from remote URL and prepare for upload to Blossom
+				// Download from remote URL and prepare for upload to Blossom (fallback)
 				var iconSpinner *ui.Spinner
 				if !*quietFlag {
 					iconSpinner = ui.NewSpinner("Fetching icon...")
@@ -1506,14 +1677,33 @@ func uploadAndSignWithBatch(ctx context.Context, cfg *config.Config, apkInfo *ap
 		})
 	}
 
-	// Collect image uploads
+	// Collect pre-downloaded image uploads first
+	if preDownloaded != nil && len(preDownloaded.Images) > 0 {
+		for _, img := range preDownloaded.Images {
+			imageURLs = append(imageURLs, fmt.Sprintf("%s/%s", client.ServerURL(), img.Hash))
+			uploads = append(uploads, uploadItem{
+				data:       img.Data,
+				hash:       img.Hash,
+				mimeType:   img.MimeType,
+				authEvent:  nostr.BuildBlossomAuthEvent(img.Hash, pubkey, expiration),
+				uploadType: "screenshot",
+			})
+		}
+	}
+
+	// Collect remaining image uploads (non-remote or not pre-downloaded)
 	for i, img := range cfg.Images {
+		// Skip remote images that were already handled via pre-download
+		if isRemoteURL(img) && preDownloaded != nil && findPreDownloadedImage(preDownloaded.Images, img) != nil {
+			continue
+		}
+
 		if isRemoteURL(img) {
 			// Check if already on Blossom server - if so, keep it
 			if isBlossomURL(img, client.ServerURL()) {
 				imageURLs = append(imageURLs, img)
 			} else {
-				// Download from remote URL and prepare for upload to Blossom
+				// Download from remote URL and prepare for upload to Blossom (fallback)
 				var imgSpinner *ui.Spinner
 				if !*quietFlag {
 					imgSpinner = ui.NewSpinner(fmt.Sprintf("Fetching screenshot (%d/%d)...", i+1, len(cfg.Images)))
@@ -1580,18 +1770,21 @@ func uploadAndSignWithBatch(ctx context.Context, cfg *config.Config, apkInfo *ap
 		Changelog:  changelog,
 	})
 
-	// For batch signing, we need to pre-compute the asset event ID and add it to release
+	// For batch signing, we need to pre-compute the asset event IDs and add them to release
 	// before signing. The ID is computed from the event content.
-	events.SoftwareAsset.PubKey = pubkey
-	assetID := events.SoftwareAsset.GetID()
-	events.AddAssetReference(assetID, relayHint)
+	for _, asset := range events.SoftwareAssets {
+		asset.PubKey = pubkey
+		assetID := asset.GetID()
+		events.AddAssetReference(assetID, relayHint)
+	}
 
 	// Collect ALL events to sign: auth events + main events
-	allEvents := make([]*gonostr.Event, 0, len(uploads)+3)
+	allEvents := make([]*gonostr.Event, 0, len(uploads)+2+len(events.SoftwareAssets))
 	for _, u := range uploads {
 		allEvents = append(allEvents, u.authEvent)
 	}
-	allEvents = append(allEvents, events.AppMetadata, events.Release, events.SoftwareAsset)
+	allEvents = append(allEvents, events.AppMetadata, events.Release)
+	allEvents = append(allEvents, events.SoftwareAssets...)
 
 	// Pre-check existence for non-APK uploads in parallel (4 concurrent HEAD requests)
 	var nonAPKHashes []string
@@ -1695,15 +1888,38 @@ func uploadAndSignWithBatch(ctx context.Context, cfg *config.Config, apkInfo *ap
 
 // uploadWithIndividualSigning handles uploads with regular signers (nsec, bunker).
 // Each auth event is signed individually before its corresponding upload.
-func uploadWithIndividualSigning(ctx context.Context, cfg *config.Config, apkInfo *apk.APKInfo, apkPath string, client *blossom.Client, signer nostr.Signer) (iconURL string, imageURLs []string, err error) {
-	// Process icon: from config or APK
-	if cfg.Icon != "" {
+// preDownloaded contains images that were already downloaded before preview (to avoid re-downloading).
+func uploadWithIndividualSigning(ctx context.Context, cfg *config.Config, apkInfo *apk.APKInfo, apkPath string, client *blossom.Client, signer nostr.Signer, preDownloaded *preDownloadedImages) (iconURL string, imageURLs []string, err error) {
+	// Process icon: use pre-downloaded, config path, or APK
+	if preDownloaded != nil && preDownloaded.Icon != nil {
+		// Use pre-downloaded icon (from Play Store, F-Droid, etc.)
+		var iconSpinner *ui.Spinner
+		if !*quietFlag {
+			iconSpinner = ui.NewSpinner("Uploading icon...")
+			iconSpinner.Start()
+		}
+		result, err := client.UploadBytes(ctx, preDownloaded.Icon.Data, preDownloaded.Icon.Hash, preDownloaded.Icon.MimeType, signer)
+		if err != nil {
+			if iconSpinner != nil {
+				iconSpinner.StopWithError("Failed to upload icon")
+			}
+			return "", nil, fmt.Errorf("failed to upload icon: %w", err)
+		}
+		if iconSpinner != nil {
+			if result.Existed {
+				iconSpinner.StopWithSuccess(fmt.Sprintf("Icon already exists (%s)", result.URL))
+			} else {
+				iconSpinner.StopWithSuccess("Uploaded icon")
+			}
+		}
+		iconURL = result.URL
+	} else if cfg.Icon != "" {
 		if isRemoteURL(cfg.Icon) {
 			// Check if already on Blossom server - if so, keep it
 			if isBlossomURL(cfg.Icon, client.ServerURL()) {
 				iconURL = cfg.Icon
 			} else {
-				// Download from remote URL and upload to Blossom
+				// Download from remote URL and upload to Blossom (fallback if not pre-downloaded)
 				var iconSpinner *ui.Spinner
 				if !*quietFlag {
 					iconSpinner = ui.NewSpinner("Fetching icon...")
@@ -1790,14 +2006,45 @@ func uploadWithIndividualSigning(ctx context.Context, cfg *config.Config, apkInf
 		iconURL = result.URL
 	}
 
-	// Process images from config
+	// Upload pre-downloaded images first
+	if preDownloaded != nil && len(preDownloaded.Images) > 0 {
+		for i, img := range preDownloaded.Images {
+			var imgSpinner *ui.Spinner
+			if !*quietFlag {
+				imgSpinner = ui.NewSpinner(fmt.Sprintf("Uploading screenshot (%d/%d)...", i+1, len(preDownloaded.Images)))
+				imgSpinner.Start()
+			}
+			result, err := client.UploadBytes(ctx, img.Data, img.Hash, img.MimeType, signer)
+			if err != nil {
+				if imgSpinner != nil {
+					imgSpinner.StopWithError(fmt.Sprintf("Failed to upload screenshot %d", i+1))
+				}
+				return "", nil, fmt.Errorf("failed to upload screenshot: %w", err)
+			}
+			if imgSpinner != nil {
+				if result.Existed {
+					imgSpinner.StopWithSuccess(fmt.Sprintf("Screenshot (%d/%d) already exists (%s)", i+1, len(preDownloaded.Images), result.URL))
+				} else {
+					imgSpinner.StopWithSuccess(fmt.Sprintf("Uploaded screenshot (%d/%d)", i+1, len(preDownloaded.Images)))
+				}
+			}
+			imageURLs = append(imageURLs, result.URL)
+		}
+	}
+
+	// Process remaining images from config (non-remote or not pre-downloaded)
 	for i, img := range cfg.Images {
+		// Skip remote images that were already handled via pre-download
+		if isRemoteURL(img) && preDownloaded != nil && findPreDownloadedImage(preDownloaded.Images, img) != nil {
+			continue
+		}
+
 		if isRemoteURL(img) {
 			// Check if already on Blossom server - if so, keep it
 			if isBlossomURL(img, client.ServerURL()) {
 				imageURLs = append(imageURLs, img)
 			} else {
-				// Download from remote URL and upload to Blossom
+				// Download from remote URL and upload to Blossom (fallback if not pre-downloaded)
 				var imgSpinner *ui.Spinner
 				if !*quietFlag {
 					imgSpinner = ui.NewSpinner(fmt.Sprintf("Fetching screenshot (%d/%d)...", i+1, len(cfg.Images)))
