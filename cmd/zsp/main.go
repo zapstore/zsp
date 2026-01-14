@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -429,14 +428,20 @@ func checkAPK() error {
 		os.Exit(130)
 	}()
 
+	// Helper to exit with error on stderr
+	fail := func(err error) {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
 	// Load configuration
 	cfg, err := loadConfig()
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		fail(err)
 	}
 
 	if err := cfg.Validate(); err != nil {
-		return fmt.Errorf("invalid configuration: %w", err)
+		fail(err)
 	}
 
 	// Create source
@@ -445,40 +450,29 @@ func checkAPK() error {
 		SkipCache: true, // Always fetch fresh for checking
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create source: %w", err)
-	}
-
-	if *verboseFlag {
-		fmt.Printf("Source type: %s\n", src.Type())
+		fail(err)
 	}
 
 	// Fetch latest release
-	if !*quietFlag {
-		fmt.Println("Fetching release info...")
-	}
 	release, err := src.FetchLatestRelease(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to fetch release: %w", err)
-	}
-
-	if *verboseFlag {
-		fmt.Printf("Found release: %s with %d assets\n", release.Version, len(release.Assets))
+		fail(err)
 	}
 
 	// Filter to APKs only
 	apkAssets := picker.FilterAPKs(release.Assets)
 	if len(apkAssets) == 0 {
-		return fmt.Errorf("no APK files found in release")
+		fail(fmt.Errorf("no APK files found in release"))
 	}
 
 	// Apply match filter if specified
 	if cfg.Match != "" {
 		apkAssets, err = picker.FilterByMatch(apkAssets, cfg.Match)
 		if err != nil {
-			return err
+			fail(err)
 		}
 		if len(apkAssets) == 0 {
-			return fmt.Errorf("no APK files match pattern: %s", cfg.Match)
+			fail(fmt.Errorf("no APK files match pattern: %s", cfg.Match))
 		}
 	}
 
@@ -488,17 +482,7 @@ func checkAPK() error {
 		selectedAsset = apkAssets[0]
 	} else {
 		ranked := picker.DefaultModel.RankAssets(apkAssets)
-		if *verboseFlag {
-			fmt.Println("Ranked APKs:")
-			for i, sa := range ranked {
-				fmt.Printf("  %d. %s (score: %.2f)\n", i+1, sa.Asset.Name, sa.Score)
-			}
-		}
 		selectedAsset = ranked[0].Asset
-	}
-
-	if !*quietFlag {
-		fmt.Printf("Selected: %s\n", selectedAsset.Name)
 	}
 
 	// Download APK if needed
@@ -506,12 +490,9 @@ func checkAPK() error {
 	if selectedAsset.LocalPath != "" {
 		apkPath = selectedAsset.LocalPath
 	} else {
-		if !*quietFlag {
-			fmt.Printf("Downloading %s...\n", selectedAsset.Name)
-		}
 		apkPath, err = src.Download(ctx, selectedAsset, "", nil)
 		if err != nil {
-			return fmt.Errorf("failed to download APK: %w", err)
+			fail(err)
 		}
 		defer os.Remove(apkPath)
 	}
@@ -519,24 +500,16 @@ func checkAPK() error {
 	// Parse APK
 	apkInfo, err := apk.Parse(apkPath)
 	if err != nil {
-		return fmt.Errorf("failed to parse APK: %w", err)
+		fail(err)
 	}
 
 	// Verify arm64 support
 	if !apkInfo.IsArm64() {
-		return fmt.Errorf("APK does not support arm64-v8a architecture (found: %v)", apkInfo.Architectures)
+		fail(fmt.Errorf("APK does not support arm64-v8a architecture (found: %v)", apkInfo.Architectures))
 	}
 
-	// Success - print summary
-	if !*quietFlag {
-		fmt.Println()
-		fmt.Println("✓ APK check passed")
-		fmt.Printf("  Package:  %s\n", apkInfo.PackageID)
-		fmt.Printf("  Version:  %s (%d)\n", apkInfo.VersionName, apkInfo.VersionCode)
-		fmt.Printf("  Arch:     %v\n", apkInfo.Architectures)
-		fmt.Printf("  SHA256:   %s\n", apkInfo.SHA256)
-	}
-
+	// Success - print app ID only
+	fmt.Println(apkInfo.PackageID)
 	return nil
 }
 
@@ -690,34 +663,19 @@ func publish(ctx context.Context, cfg *config.Config) error {
 	relaysEnv := os.Getenv("RELAY_URLS")
 	publisher := nostr.NewPublisherFromEnv(relaysEnv)
 	if !*overwriteReleaseFlag && !*dryRunFlag {
-		var checkSpinner *ui.Spinner
-		if !*quietFlag {
-			checkSpinner = ui.NewSpinner("Checking relays for existing asset...")
-			checkSpinner.Start()
-		}
 		existingAsset, err := publisher.CheckExistingAsset(ctx, apkInfo.PackageID, apkInfo.VersionName)
 		if err != nil {
 			// Log warning but continue - relay might be unavailable
-			if checkSpinner != nil {
-				checkSpinner.StopWithWarning("Could not check relays (continuing)")
-			}
 			if *verboseFlag {
-				fmt.Printf("  %v\n", err)
+				fmt.Printf("Could not check relays: %v\n", err)
 			}
 		} else if existingAsset != nil {
-			if checkSpinner != nil {
-				checkSpinner.StopWithSuccess("Found existing asset on relay")
-			}
 			if !*quietFlag {
 				fmt.Printf("Asset %s@%s already exists on %s\n",
 					apkInfo.PackageID, apkInfo.VersionName, existingAsset.RelayURL)
 				fmt.Println("Use --overwrite-release to publish anyway.")
 			}
 			return nil
-		} else {
-			if checkSpinner != nil {
-				checkSpinner.StopWithSuccess("No existing asset found")
-			}
 		}
 	}
 
@@ -782,32 +740,17 @@ func publish(ctx context.Context, cfg *config.Config) error {
 		showPreview := *previewFlag
 
 		if !showPreview {
-			// Combined prompt: Y/n to preview, or enter a port number
 			defaultPort := nostr.DefaultPreviewPort
 			if browserPort != 0 {
 				defaultPort = browserPort
 			}
 
-			response, err := ui.Prompt(fmt.Sprintf("Preview the release in a web browser at port %d? [Y/n/port]: ", defaultPort))
+			confirmed, port, err := ui.ConfirmWithPort("Preview release in browser?", defaultPort)
 			if err != nil {
 				return fmt.Errorf("prompt failed: %w", err)
 			}
-
-			response = strings.ToLower(strings.TrimSpace(response))
-			if response == "n" || response == "no" {
-				showPreview = false
-			} else if response == "" || response == "y" || response == "yes" {
-				showPreview = true
-				if browserPort == 0 {
-					browserPort = defaultPort
-				}
-			} else {
-				// Try to parse as port number
-				port, err := strconv.Atoi(response)
-				if err != nil || port < 1 || port > 65535 {
-					return fmt.Errorf("invalid port: %s (enter Y, n, or a port number 1-65535)", response)
-				}
-				showPreview = true
+			showPreview = confirmed
+			if confirmed {
 				browserPort = port
 			}
 		}
@@ -883,21 +826,11 @@ func publish(ctx context.Context, cfg *config.Config) error {
 	signerPort := browserPort
 	if signWith == "browser" && !previewWasShown && signerPort == 0 && !*quietFlag && !*yesFlag {
 		defaultPort := nostr.DefaultNIP07Port
-		response, err := ui.Prompt(fmt.Sprintf("Browser signing at port %d? [Y/port]: ", defaultPort))
+		port, err := ui.ConfirmWithPortYesOnly("Browser signing port?", defaultPort)
 		if err != nil {
 			return fmt.Errorf("prompt failed: %w", err)
 		}
-
-		response = strings.TrimSpace(response)
-		if response == "" || strings.ToLower(response) == "y" || strings.ToLower(response) == "yes" {
-			signerPort = defaultPort
-		} else {
-			port, err := strconv.Atoi(response)
-			if err != nil || port < 1 || port > 65535 {
-				return fmt.Errorf("invalid port: %s (enter Y or a port number 1-65535)", response)
-			}
-			signerPort = port
-		}
+		signerPort = port
 	}
 
 	// Create signer (pass port for browser signer)
@@ -1078,9 +1011,9 @@ func outputEvents(events *nostr.EventSet) {
 func previewEvents(events *nostr.EventSet) {
 	ui.PrintHeader("Signed Events Preview")
 
-	// App metadata (kind 32267)
+	// Software Application (kind 32267)
 	fmt.Println()
-	fmt.Println(ui.Bold("Kind 32267 (App Metadata)"))
+	fmt.Println(ui.Bold("Kind 32267 (Software Application)"))
 	fmt.Printf("  ID: %s\n", events.AppMetadata.ID)
 	fmt.Printf("  pubkey: %s\n", events.AppMetadata.PubKey)
 	fmt.Printf("  Created: %s\n", events.AppMetadata.CreatedAt.Time().Format("2006-01-02 15:04:05"))
@@ -1093,9 +1026,9 @@ func previewEvents(events *nostr.EventSet) {
 	}
 	fmt.Printf("  Sig: %s\n", events.AppMetadata.Sig)
 
-	// Release (kind 30063)
+	// Software Release (kind 30063)
 	fmt.Println()
-	fmt.Println(ui.Bold("Kind 30063 (Release)"))
+	fmt.Println(ui.Bold("Kind 30063 (Software Release)"))
 	fmt.Printf("  ID: %s\n", events.Release.ID)
 	fmt.Printf("  pubkey: %s\n", events.Release.PubKey)
 	fmt.Printf("  Created: %s\n", events.Release.CreatedAt.Time().Format("2006-01-02 15:04:05"))
@@ -1108,7 +1041,7 @@ func previewEvents(events *nostr.EventSet) {
 	}
 	fmt.Printf("  Sig: %s\n", events.Release.Sig)
 
-	// Software asset (kind 3063)
+	// Software Asset (kind 3063)
 	fmt.Println()
 	fmt.Println(ui.Bold("Kind 3063 (Software Asset)"))
 	fmt.Printf("  ID: %s\n", events.SoftwareAsset.ID)
@@ -1122,25 +1055,32 @@ func previewEvents(events *nostr.EventSet) {
 	fmt.Println()
 }
 
-// previewEventsJSON outputs events as formatted JSON.
+// previewEventsJSON outputs events as formatted JSON with syntax highlighting.
 func previewEventsJSON(events *nostr.EventSet) {
 	ui.PrintHeader("Signed Events (JSON)")
 	fmt.Println()
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-
-	fmt.Println(ui.Bold("Kind 32267 (App Metadata):"))
-	enc.Encode(events.AppMetadata)
+	fmt.Println(ui.Bold("Kind 32267 (Software Application):"))
+	printColorizedJSON(events.AppMetadata)
 	fmt.Println()
 
-	fmt.Println(ui.Bold("Kind 30063 (Release):"))
-	enc.Encode(events.Release)
+	fmt.Println(ui.Bold("Kind 30063 (Software Release):"))
+	printColorizedJSON(events.Release)
 	fmt.Println()
 
 	fmt.Println(ui.Bold("Kind 3063 (Software Asset):"))
-	enc.Encode(events.SoftwareAsset)
+	printColorizedJSON(events.SoftwareAsset)
 	fmt.Println()
+}
+
+// printColorizedJSON prints a value as colorized JSON.
+func printColorizedJSON(v any) {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	fmt.Println(ui.ColorizeJSON(string(data)))
 }
 
 // truncateString truncates a string to maxLen characters, adding "..." if truncated.
@@ -1170,9 +1110,9 @@ func confirmPublish(events *nostr.EventSet, relayURLs []string) (bool, error) {
 
 	ui.PrintHeader("Ready to Publish")
 	fmt.Printf("  App: %s v%s\n", packageID, version)
-	fmt.Printf("  Kind 32267 (App metadata)\n")
-	fmt.Printf("  Kind 30063 (Release)\n")
-	fmt.Printf("  Kind 3063 (Software asset) x1\n")
+	fmt.Printf("  Kind 32267 (Software Application)\n")
+	fmt.Printf("  Kind 30063 (Software Release)\n")
+	fmt.Printf("  Kind 3063 (Software Asset) x1\n")
 	fmt.Println()
 
 	for {

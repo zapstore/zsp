@@ -59,83 +59,16 @@ func Confirm(message string, defaultYes bool) (bool, error) {
 	return input == "y" || input == "yes", nil
 }
 
-// SelectOption presents a list of options and returns the selected index.
+// SelectOption presents a list of options with arrow-key navigation.
+// Returns the selected index (0-based).
 func SelectOption(message string, options []string, recommended int) (int, error) {
-	fmt.Println(message)
-
-	for i, opt := range options {
-		prefix := "  "
-		suffix := ""
-		if i == recommended {
-			suffix = " " + Dim("[recommended]")
-		}
-		fmt.Printf("%s%d. %s%s\n", prefix, i+1, opt, suffix)
-	}
-
-	for {
-		input, err := Prompt("> ")
-		if err != nil {
-			return -1, err
-		}
-
-		// Parse selection
-		idx, err := strconv.Atoi(input)
-		if err != nil || idx < 1 || idx > len(options) {
-			fmt.Printf("Please enter a number between 1 and %d\n", len(options))
-			continue
-		}
-
-		return idx - 1, nil
-	}
+	return Select(message, options, recommended)
 }
 
-// SelectMultiple presents a list of options for multiple selection.
+// SelectMultiple presents a list of options for multiple selection with arrow keys.
+// Space toggles selection, Enter confirms.
 func SelectMultiple(message string, options []string) ([]int, error) {
-	fmt.Println(message)
-	fmt.Println(Dim("(Enter numbers separated by spaces, or 'all' for all options)"))
-
-	for i, opt := range options {
-		fmt.Printf("  %d. %s\n", i+1, opt)
-	}
-
-	for {
-		input, err := Prompt("> ")
-		if err != nil {
-			return nil, err
-		}
-
-		input = strings.TrimSpace(input)
-		if input == "" {
-			return []int{}, nil
-		}
-
-		if strings.ToLower(input) == "all" {
-			result := make([]int, len(options))
-			for i := range options {
-				result[i] = i
-			}
-			return result, nil
-		}
-
-		// Parse selections
-		parts := strings.Fields(input)
-		result := make([]int, 0, len(parts))
-		valid := true
-
-		for _, part := range parts {
-			idx, err := strconv.Atoi(part)
-			if err != nil || idx < 1 || idx > len(options) {
-				fmt.Printf("Invalid selection: %s\n", part)
-				valid = false
-				break
-			}
-			result = append(result, idx-1)
-		}
-
-		if valid {
-			return result, nil
-		}
-	}
+	return SelectMultipleWithArrows(message, options)
 }
 
 // PromptSecret asks for secret input (like passwords or keys).
@@ -211,4 +144,3 @@ func PrintInfo(message string) {
 func PrintKeyValue(key, value string) {
 	fmt.Printf("  %s: %s\n", Bold(key), value)
 }
-
