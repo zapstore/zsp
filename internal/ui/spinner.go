@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -286,19 +287,39 @@ func (dt *DownloadTracker) Done() {
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
 
-	if dt.total > 0 {
-		barView := dt.bar.ViewAs(1.0)
-		totalMB := float64(dt.total) / (1024 * 1024)
-		fmt.Fprintf(dt.writer, "\r\033[K%s %s 100%% (%.1f MB)\n", dt.message, barView, totalMB)
-	} else if dt.downloaded > 0 {
-		checkmark := "✓"
-		if NoColor {
-			checkmark = "[OK]"
-		}
-		fmt.Fprintf(dt.writer, "\r\033[K%s %s %s\n", Success(checkmark), dt.message, formatBytes(dt.downloaded))
+	checkmark := "✓"
+	if NoColor {
+		checkmark = "[OK]"
+	}
+
+	// Convert "Downloading X" to "Downloaded X" for completion message
+	completionMsg := strings.Replace(dt.message, "Downloading ", "Downloaded ", 1)
+	completionMsg = strings.Replace(completionMsg, "Uploading ", "Uploaded ", 1)
+
+	// Include size in completion message
+	size := dt.total
+	if size == 0 {
+		size = dt.downloaded
+	}
+
+	if size > 0 {
+		fmt.Fprintf(dt.writer, "\r\033[K%s %s (%s)\n", Success(checkmark), completionMsg, formatBytes(size))
 	} else {
 		fmt.Fprintf(dt.writer, "\r\033[K\n")
 	}
+}
+
+// DoneWithMessage marks the download as complete with a custom message.
+func (dt *DownloadTracker) DoneWithMessage(message string) {
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+
+	checkmark := "✓"
+	if NoColor {
+		checkmark = "[OK]"
+	}
+
+	fmt.Fprintf(dt.writer, "\r\033[K%s %s\n", Success(checkmark), message)
 }
 
 // formatBytes formats bytes into human-readable form.

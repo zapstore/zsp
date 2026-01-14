@@ -50,38 +50,52 @@ func NewMetadataFetcherWithPackageID(cfg *config.Config, packageID string) *Meta
 }
 
 // DefaultMetadataSources returns the metadata sources to use.
-// If metadata_sources is specified in config, those are used.
-// Otherwise, defaults are inferred from release_source or repository.
+// The base source type (github, gitlab, fdroid) is always included automatically.
+// Any additional sources from metadata_sources config are appended.
 // Returns nil if no metadata source applies.
 func DefaultMetadataSources(cfg *config.Config) []string {
-	// If explicitly configured, use those
-	if len(cfg.MetadataSources) > 0 {
-		return cfg.MetadataSources
+	var sources []string
+	seen := make(map[string]bool)
+
+	// Helper to add source without duplicates
+	addSource := func(s string) {
+		if s != "" && !seen[s] {
+			seen[s] = true
+			sources = append(sources, s)
+		}
 	}
 
-	// Otherwise, infer from source type
+	// Always include the base source type's metadata source
 	sourceType := cfg.GetSourceType()
-
 	switch sourceType {
 	case config.SourceGitHub:
-		return []string{"github"}
+		addSource("github")
 	case config.SourceGitLab:
-		return []string{"gitlab"}
+		addSource("gitlab")
 	case config.SourceFDroid:
-		return []string{"fdroid"}
+		addSource("fdroid")
 	default:
-		// For local, web, or unknown sources, check repository URL for metadata
+		// For local, web, or unknown sources, check repository URL for base metadata
 		if cfg.Repository != "" {
 			repoType := config.DetectSourceType(cfg.Repository)
 			switch repoType {
 			case config.SourceGitHub:
-				return []string{"github"}
+				addSource("github")
 			case config.SourceGitLab:
-				return []string{"gitlab"}
+				addSource("gitlab")
 			}
 		}
+	}
+
+	// Add any explicitly configured metadata sources
+	for _, s := range cfg.MetadataSources {
+		addSource(strings.ToLower(strings.TrimSpace(s)))
+	}
+
+	if len(sources) == 0 {
 		return nil
 	}
+	return sources
 }
 
 // FetchMetadata fetches metadata from the specified sources and merges into config.

@@ -185,3 +185,39 @@ func (p *Publisher) queryRelay(ctx context.Context, url string, filter nostr.Fil
 
 	return nil, nil
 }
+
+// ExistingApp contains information about an existing app on relays.
+type ExistingApp struct {
+	Event    *nostr.Event
+	RelayURL string
+}
+
+// CheckExistingApp queries all relays to check if an App Metadata event already exists.
+// It searches for kind 32267 events with a matching `d` tag (identifier).
+// Returns the first existing App found, or nil if none exists.
+func (p *Publisher) CheckExistingApp(ctx context.Context, identifier string) (*ExistingApp, error) {
+	filter := nostr.Filter{
+		Kinds: []int{KindAppMetadata},
+		Tags: nostr.TagMap{
+			"d": []string{identifier},
+		},
+		Limit: 1,
+	}
+
+	// Query each relay until we find an existing app
+	for _, url := range p.relayURLs {
+		event, err := p.queryRelay(ctx, url, filter)
+		if err != nil {
+			// Log error but continue to other relays
+			continue
+		}
+		if event != nil {
+			return &ExistingApp{
+				Event:    event,
+				RelayURL: url,
+			}, nil
+		}
+	}
+
+	return nil, nil
+}

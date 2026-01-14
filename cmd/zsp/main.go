@@ -45,6 +45,7 @@ var (
 	previewFlag          = flag.Bool("preview", false, "Show HTML preview in browser before publishing")
 	portFlag             = flag.Int("port", 0, "Custom port for browser preview/signing (default: 17007 for signing, 17008 for preview)")
 	overwriteReleaseFlag = flag.Bool("overwrite-release", false, "Bypass cache and re-publish even if release unchanged")
+	overwriteAppFlag     = flag.Bool("overwrite-app", false, "Re-fetch metadata even if app already exists on relays")
 	wizardFlag           = flag.Bool("wizard", false, "Run interactive wizard (uses existing config as defaults)")
 	versionFlag          = flag.Bool("v", false, "Print version and exit")
 	helpFlag             = flag.Bool("h", false, "Show help")
@@ -124,6 +125,7 @@ FLAGS
   --preview       Show HTML preview in browser before publishing
   --port <port>   Custom port for browser preview/signing (default: 17007/17008)
   --overwrite-release  Bypass cache and re-publish even if release unchanged
+  --overwrite-app      Re-fetch metadata even if app already exists on relays
   --dry-run       Parse & build events, but don't upload/publish
   --quiet         Minimal output, no prompts (implies -y)
   --verbose       Debug output (show scores, API responses)
@@ -238,6 +240,28 @@ func run() error {
 		return err
 	}
 
+	// Check for missing repository (unless quiet/yes mode)
+	if cfg.Repository == "" && !*yesFlag {
+		ui.PrintWarning("No repository provided.")
+		isClosedSource, err := ui.Confirm("Is this application closed source?", false)
+		if err != nil {
+			return err
+		}
+		if !isClosedSource {
+			repoURL, err := ui.PromptDefault("Repository URL", "")
+			if err != nil {
+				return err
+			}
+			if repoURL != "" {
+				repoURL = normalizeRepoURL(repoURL)
+				if err := config.ValidateURL(repoURL); err != nil {
+					return fmt.Errorf("invalid repository URL: %w", err)
+				}
+				cfg.Repository = repoURL
+			}
+		}
+	}
+
 	// Validate config
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
@@ -344,30 +368,6 @@ func loadAPKConfig(apkPath string) (*config.Config, error) {
 			return nil, fmt.Errorf("invalid -s URL: %w", err)
 		}
 		cfg.ReleaseSource = &config.ReleaseSource{URL: sourceURL}
-	}
-
-	// If -r was provided (with or without -s), return the config
-	if *repoFlag != "" {
-		return cfg, nil
-	}
-
-	// No repository provided - warn and confirm
-	if !*quietFlag {
-		ui.PrintWarning("No repository provided. The app is likely open source - consider using -r to link to the source.")
-	}
-
-	// If --yes or --quiet, proceed without prompting
-	if *yesFlag {
-		return cfg, nil
-	}
-
-	// Prompt for confirmation
-	proceed, err := ui.Confirm("Proceed anyway?", true)
-	if err != nil {
-		return nil, err
-	}
-	if !proceed {
-		return nil, fmt.Errorf("aborted by user")
 	}
 
 	return cfg, nil
@@ -523,6 +523,18 @@ func normalizeRepoURL(url string) string {
 
 // publish runs the main publish flow.
 func publish(ctx context.Context, cfg *config.Config) error {
+	// Determine total steps based on mode
+	// Steps: 1=Fetch, 2=Prepare, 3=Metadata (optional), 4=Upload, 5=Publish
+	totalSteps := 5
+	if *dryRunFlag {
+		totalSteps = 3 // Fetch, Prepare, Build (no upload/publish)
+	}
+
+	var steps *ui.StepTracker
+	if !*quietFlag {
+		steps = ui.NewStepTracker(totalSteps)
+	}
+
 	// Create source with base directory for relative paths
 	src, err := source.NewWithOptions(cfg, source.Options{
 		BaseDir:   cfg.BaseDir,
@@ -536,7 +548,13 @@ func publish(ctx context.Context, cfg *config.Config) error {
 		fmt.Printf("Source type: %s\n", src.Type())
 	}
 
-	// Fetch latest release
+	// ═══════════════════════════════════════════════════════════════════
+	// STEP 1: FETCH RELEASE
+	// ═══════════════════════════════════════════════════════════════════
+	if steps != nil {
+		steps.StartStep("Fetch Release")
+	}
+
 	var spinner *ui.Spinner
 	if !*quietFlag {
 		spinner = ui.NewSpinner("Fetching release info...")
@@ -548,7 +566,7 @@ func publish(ctx context.Context, cfg *config.Config) error {
 			spinner.StopWithSuccess("Release unchanged, nothing to do")
 		}
 		if !*quietFlag {
-			fmt.Println("Release has not changed since last publish. Use --overwrite-release to publish anyway.")
+			fmt.Println("  Release has not changed since last publish. Use --overwrite-release to publish anyway.")
 		}
 		return nil
 	}
@@ -559,11 +577,18 @@ func publish(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("failed to fetch release: %w", err)
 	}
 	if spinner != nil {
-		spinner.StopWithSuccess("Fetched release info")
+		spinner.StopWithSuccess(fmt.Sprintf("Found release %s with %d assets", release.Version, len(release.Assets)))
 	}
 
 	if *verboseFlag {
-		fmt.Printf("Found release: %s with %d assets\n", release.Version, len(release.Assets))
+		fmt.Printf("  Found release: %s with %d assets\n", release.Version, len(release.Assets))
+	}
+
+	// ═══════════════════════════════════════════════════════════════════
+	// STEP 2: PREPARE APK
+	// ═══════════════════════════════════════════════════════════════════
+	if steps != nil {
+		steps.StartStep("Prepare APK")
 	}
 
 	// Filter to APKs only
@@ -587,14 +612,17 @@ func publish(ctx context.Context, cfg *config.Config) error {
 	var selectedAsset *source.Asset
 	if len(apkAssets) == 1 {
 		selectedAsset = apkAssets[0]
+		if !*quietFlag {
+			ui.PrintSuccess(fmt.Sprintf("Selected %s", selectedAsset.Name))
+		}
 	} else {
 		// Rank and select
 		ranked := picker.DefaultModel.RankAssets(apkAssets)
 
 		if *verboseFlag {
-			fmt.Println("Ranked APKs:")
+			fmt.Println("  Ranked APKs:")
 			for i, sa := range ranked {
-				fmt.Printf("  %d. %s (score: %.2f)\n", i+1, sa.Asset.Name, sa.Score)
+				fmt.Printf("    %d. %s (score: %.2f)\n", i+1, sa.Asset.Name, sa.Score)
 			}
 		}
 
@@ -607,7 +635,7 @@ func publish(ctx context.Context, cfg *config.Config) error {
 		} else {
 			selectedAsset = ranked[0].Asset
 			if !*quietFlag {
-				fmt.Printf("Selected: %s\n", selectedAsset.Name)
+				ui.PrintSuccess(fmt.Sprintf("Selected %s (best match)", selectedAsset.Name))
 			}
 		}
 	}
@@ -616,6 +644,9 @@ func publish(ctx context.Context, cfg *config.Config) error {
 	var apkPath string
 	if selectedAsset.LocalPath != "" {
 		apkPath = selectedAsset.LocalPath
+		if !*quietFlag {
+			ui.PrintSuccess("Using local APK file")
+		}
 	} else {
 		// Download to temp directory with progress indicator
 		var tracker *ui.DownloadTracker
@@ -637,26 +668,38 @@ func publish(ctx context.Context, cfg *config.Config) error {
 	}
 
 	// Parse APK
+	var parseSpinner *ui.Spinner
+	if !*quietFlag {
+		parseSpinner = ui.NewSpinner("Parsing APK...")
+		parseSpinner.Start()
+	}
 	apkInfo, err := apk.Parse(apkPath)
 	if err != nil {
+		if parseSpinner != nil {
+			parseSpinner.StopWithError("Failed to parse APK")
+		}
 		return fmt.Errorf("failed to parse APK: %w", err)
 	}
 
 	// Verify arm64 support
 	if !apkInfo.IsArm64() {
+		if parseSpinner != nil {
+			parseSpinner.StopWithError("APK architecture not supported")
+		}
 		return fmt.Errorf("APK does not support arm64-v8a architecture (found: %v)", apkInfo.Architectures)
 	}
+	if parseSpinner != nil {
+		parseSpinner.StopWithSuccess("Parsed and verified APK")
+	}
 
-	// Display summary
+	// Display APK summary
 	if !*quietFlag {
-		ui.PrintHeader("APK Summary")
+		ui.PrintSectionHeader("APK Summary")
 		ui.PrintKeyValue("Package", apkInfo.PackageID)
 		ui.PrintKeyValue("Version", fmt.Sprintf("%s (%d)", apkInfo.VersionName, apkInfo.VersionCode))
 		ui.PrintKeyValue("Label", apkInfo.Label)
 		ui.PrintKeyValue("Certificate", apkInfo.CertFingerprint)
 		ui.PrintKeyValue("Size", fmt.Sprintf("%.2f MB", float64(apkInfo.FileSize)/(1024*1024)))
-		ui.PrintKeyValue("SHA256", apkInfo.SHA256)
-		fmt.Println()
 	}
 
 	// Check if asset already exists on relays (unless --overwrite-release is set)
@@ -667,46 +710,105 @@ func publish(ctx context.Context, cfg *config.Config) error {
 		if err != nil {
 			// Log warning but continue - relay might be unavailable
 			if *verboseFlag {
-				fmt.Printf("Could not check relays: %v\n", err)
+				fmt.Printf("  Could not check relays: %v\n", err)
 			}
 		} else if existingAsset != nil {
 			if !*quietFlag {
-				fmt.Printf("Asset %s@%s already exists on %s\n",
-					apkInfo.PackageID, apkInfo.VersionName, existingAsset.RelayURL)
-				fmt.Println("Use --overwrite-release to publish anyway.")
+				ui.PrintWarning(fmt.Sprintf("Asset %s@%s already exists on %s",
+					apkInfo.PackageID, apkInfo.VersionName, existingAsset.RelayURL))
+				fmt.Println("  Use --overwrite-release to publish anyway.")
 			}
 			return nil
 		}
 	}
 
-	// Fetch metadata from external sources
-	// Use -m flags if provided, otherwise auto-detect based on source type
-	metadataSources := fetchMetadataFlag
-	if len(metadataSources) == 0 {
-		metadataSources = source.DefaultMetadataSources(cfg)
+	// ═══════════════════════════════════════════════════════════════════
+	// STEP 3: GATHER METADATA
+	// ═══════════════════════════════════════════════════════════════════
+	if steps != nil {
+		steps.StartStep("Gather Metadata")
 	}
-	if len(metadataSources) > 0 {
-		var metaSpinner *ui.Spinner
-		if !*quietFlag {
-			metaSpinner = ui.NewSpinner("Fetching metadata...")
-			metaSpinner.Start()
-		}
-		fetcher := source.NewMetadataFetcherWithPackageID(cfg, apkInfo.PackageID)
-		if err := fetcher.FetchMetadata(ctx, metadataSources); err != nil {
-			// Log warning but continue - metadata is optional
-			if metaSpinner != nil {
-				metaSpinner.StopWithWarning("Metadata fetch failed (continuing)")
-			}
+
+	// Check if app already exists on relays (skip metadata fetch if so, unless --overwrite-app)
+	skipMetadataFetch := false
+	if !*overwriteAppFlag && !*dryRunFlag {
+		existingApp, err := publisher.CheckExistingApp(ctx, apkInfo.PackageID)
+		if err != nil {
+			// Log warning but continue - relay might be unavailable
 			if *verboseFlag {
-				fmt.Printf("  %v\n", err)
+				fmt.Printf("  Could not check for existing app: %v\n", err)
+			}
+		} else if existingApp != nil {
+			skipMetadataFetch = true
+			if !*quietFlag {
+				ui.PrintInfo(fmt.Sprintf("App %s already exists on %s, skipping metadata fetch",
+					apkInfo.PackageID, existingApp.RelayURL))
+				fmt.Println("  Use --overwrite-app to re-fetch metadata from sources.")
+			}
+		}
+	}
+
+	// Fetch metadata from external sources (unless app already exists)
+	// Use -m flags if provided, otherwise auto-detect based on source type
+	if !skipMetadataFetch {
+		metadataSources := fetchMetadataFlag
+		if len(metadataSources) == 0 {
+			metadataSources = source.DefaultMetadataSources(cfg)
+		}
+		if len(metadataSources) > 0 {
+			var metaSpinner *ui.Spinner
+			if !*quietFlag {
+				metaSpinner = ui.NewSpinner("Fetching metadata from external sources...")
+				metaSpinner.Start()
+			}
+			fetcher := source.NewMetadataFetcherWithPackageID(cfg, apkInfo.PackageID)
+			if err := fetcher.FetchMetadata(ctx, metadataSources); err != nil {
+				// Log warning but continue - metadata is optional
+				if metaSpinner != nil {
+					metaSpinner.StopWithWarning("Metadata fetch failed (continuing)")
+				}
+				if *verboseFlag {
+					fmt.Printf("    %v\n", err)
+				}
+			} else {
+				if metaSpinner != nil {
+					metaSpinner.StopWithSuccess(fmt.Sprintf("Fetched metadata from %s", strings.Join(metadataSources, ", ")))
+				}
+				if *verboseFlag {
+					fmt.Printf("    name=%q, description=%d chars, tags=%v\n",
+						cfg.Name, len(cfg.Description), cfg.Tags)
+				}
 			}
 		} else {
-			if metaSpinner != nil {
-				metaSpinner.StopWithSuccess("Fetched metadata")
+			if !*quietFlag {
+				ui.PrintInfo("No external metadata sources configured")
 			}
-			if *verboseFlag {
-				fmt.Printf("  name=%q, description=%d chars, tags=%v\n",
-					cfg.Name, len(cfg.Description), cfg.Tags)
+		}
+
+		// Fetch screenshots from Play Store if none configured yet
+		if len(cfg.Images) == 0 && apkInfo.PackageID != "" {
+			var screenshotSpinner *ui.Spinner
+			if !*quietFlag {
+				screenshotSpinner = ui.NewSpinner("Fetching screenshots from Play Store...")
+				screenshotSpinner.Start()
+			}
+			psMeta, err := source.FetchPlayStoreMetadata(ctx, apkInfo.PackageID)
+			if err != nil {
+				if screenshotSpinner != nil {
+					screenshotSpinner.StopWithWarning("Screenshots not available")
+				}
+				if *verboseFlag {
+					fmt.Printf("    %v\n", err)
+				}
+			} else if len(psMeta.ImageURLs) > 0 {
+				cfg.Images = psMeta.ImageURLs
+				if screenshotSpinner != nil {
+					screenshotSpinner.StopWithSuccess(fmt.Sprintf("Fetched %d screenshots from Play Store", len(psMeta.ImageURLs)))
+				}
+			} else {
+				if screenshotSpinner != nil {
+					screenshotSpinner.StopWithWarning("No screenshots found on Play Store")
+				}
 			}
 		}
 	}
@@ -802,22 +904,32 @@ func publish(ctx context.Context, cfg *config.Config) error {
 		}
 	}
 
-	// Check for SIGN_WITH (from environment or .env file)
-	signWith := config.GetSignWith()
-	if signWith == "" {
-		if *dryRunFlag {
-			// Use test key (nsec for private key = 1) for dry run
-			signWith = nostr.TestNsec
-		} else if !*quietFlag {
-			// Interactive prompt for signing method
-			ui.PrintHeader("Signing Setup")
-			var err error
-			signWith, err = config.PromptSignWith()
-			if err != nil {
-				return fmt.Errorf("signing setup failed: %w", err)
+	// ═══════════════════════════════════════════════════════════════════
+	// STEP 4: SIGN & UPLOAD
+	// ═══════════════════════════════════════════════════════════════════
+	if steps != nil && !*dryRunFlag {
+		steps.StartStep("Sign & Upload")
+	}
+
+	// In dry run mode, always use test key - skip SIGN_WITH entirely
+	var signWith string
+	if *dryRunFlag {
+		signWith = nostr.TestNsec
+	} else {
+		// Check for SIGN_WITH (from environment or .env file)
+		signWith = config.GetSignWith()
+		if signWith == "" {
+			if !*quietFlag {
+				// Interactive prompt for signing method
+				ui.PrintSectionHeader("Signing Setup")
+				var err error
+				signWith, err = config.PromptSignWith()
+				if err != nil {
+					return fmt.Errorf("signing setup failed: %w", err)
+				}
+			} else {
+				return fmt.Errorf("SIGN_WITH environment variable is required")
 			}
-		} else {
-			return fmt.Errorf("SIGN_WITH environment variable is required")
 		}
 	}
 
@@ -927,8 +1039,35 @@ func publish(ctx context.Context, cfg *config.Config) error {
 
 	// For npub signer, output unsigned events
 	if signer.Type() == nostr.SignerNpub {
+		if !*quietFlag {
+			fmt.Println()
+			ui.PrintInfo("npub mode - outputting unsigned events for external signing")
+		}
 		outputEvents(events)
+		if !*quietFlag {
+			ui.PrintCompletionSummary(true, "Unsigned events generated - sign externally before publishing")
+		}
 		return nil
+	}
+
+	// Hash confirmation - user must confirm they're attesting to this hash
+	if !*yesFlag {
+		confirmed, err := confirmHash(apkInfo.SHA256)
+		if err != nil {
+			return fmt.Errorf("hash confirmation failed: %w", err)
+		}
+		if !confirmed {
+			fmt.Println("  Aborted. No events were published.")
+			clearSourceCache(src)
+			return nil
+		}
+	}
+
+	// ═══════════════════════════════════════════════════════════════════
+	// STEP 5: PUBLISH TO RELAYS
+	// ═══════════════════════════════════════════════════════════════════
+	if steps != nil {
+		steps.StartStep("Publish")
 	}
 
 	// Publish to relays (publisher was created above for relay check)
@@ -940,7 +1079,7 @@ func publish(ctx context.Context, cfg *config.Config) error {
 			return fmt.Errorf("confirmation failed: %w", err)
 		}
 		if !confirmed {
-			fmt.Println("Aborted. No events were published.")
+			fmt.Println("  Aborted. No events were published.")
 			// Clear cache so next run can retry
 			clearSourceCache(src)
 			return nil
@@ -967,10 +1106,10 @@ func publish(ctx context.Context, cfg *config.Config) error {
 		for _, r := range eventResults {
 			if r.Success {
 				if *verboseFlag {
-					failures = append(failures, fmt.Sprintf("  %s -> %s: OK", eventType, r.RelayURL))
+					failures = append(failures, fmt.Sprintf("    %s -> %s: OK", eventType, r.RelayURL))
 				}
 			} else {
-				failures = append(failures, fmt.Sprintf("  %s -> %s: FAILED (%v)", eventType, r.RelayURL, r.Error))
+				failures = append(failures, fmt.Sprintf("    %s -> %s: FAILED (%v)", eventType, r.RelayURL, r.Error))
 				allSuccess = false
 			}
 		}
@@ -992,7 +1131,17 @@ func publish(ctx context.Context, cfg *config.Config) error {
 	if !allSuccess {
 		clearSourceCache(src)
 		if *verboseFlag {
-			fmt.Println("Cleared release cache for retry")
+			fmt.Println("  Cleared release cache for retry")
+		}
+	}
+
+	// Print completion summary
+	if !*quietFlag {
+		if allSuccess {
+			ui.PrintCompletionSummary(true, fmt.Sprintf("Published %s v%s to %s",
+				apkInfo.PackageID, apkInfo.VersionName, strings.Join(publisher.RelayURLs(), ", ")))
+		} else {
+			ui.PrintCompletionSummary(false, "Published with some failures")
 		}
 	}
 
@@ -1009,66 +1158,66 @@ func outputEvents(events *nostr.EventSet) {
 
 // previewEvents displays signed events in a human-readable format.
 func previewEvents(events *nostr.EventSet) {
-	ui.PrintHeader("Signed Events Preview")
+	ui.PrintSectionHeader("Signed Events Preview")
 
 	// Software Application (kind 32267)
 	fmt.Println()
-	fmt.Println(ui.Bold("Kind 32267 (Software Application)"))
-	fmt.Printf("  ID: %s\n", events.AppMetadata.ID)
-	fmt.Printf("  pubkey: %s\n", events.AppMetadata.PubKey)
-	fmt.Printf("  Created: %s\n", events.AppMetadata.CreatedAt.Time().Format("2006-01-02 15:04:05"))
-	fmt.Println("  Tags:")
+	fmt.Printf("  %s\n", ui.Bold("Kind 32267 (Software Application)"))
+	fmt.Printf("    ID: %s\n", events.AppMetadata.ID)
+	fmt.Printf("    pubkey: %s...\n", events.AppMetadata.PubKey[:16])
+	fmt.Printf("    Created: %s\n", events.AppMetadata.CreatedAt.Time().Format("2006-01-02 15:04:05"))
+	fmt.Println("    Tags:")
 	for _, tag := range events.AppMetadata.Tags {
-		fmt.Printf("    %v\n", tag)
+		fmt.Printf("      %v\n", tag)
 	}
 	if events.AppMetadata.Content != "" {
-		fmt.Printf("  Content: %s\n", truncateString(events.AppMetadata.Content, 100))
+		fmt.Printf("    Content: %s\n", truncateString(events.AppMetadata.Content, 100))
 	}
-	fmt.Printf("  Sig: %s\n", events.AppMetadata.Sig)
+	fmt.Printf("    Sig: %s...\n", events.AppMetadata.Sig[:32])
 
 	// Software Release (kind 30063)
 	fmt.Println()
-	fmt.Println(ui.Bold("Kind 30063 (Software Release)"))
-	fmt.Printf("  ID: %s\n", events.Release.ID)
-	fmt.Printf("  pubkey: %s\n", events.Release.PubKey)
-	fmt.Printf("  Created: %s\n", events.Release.CreatedAt.Time().Format("2006-01-02 15:04:05"))
-	fmt.Println("  Tags:")
+	fmt.Printf("  %s\n", ui.Bold("Kind 30063 (Software Release)"))
+	fmt.Printf("    ID: %s\n", events.Release.ID)
+	fmt.Printf("    pubkey: %s...\n", events.Release.PubKey[:16])
+	fmt.Printf("    Created: %s\n", events.Release.CreatedAt.Time().Format("2006-01-02 15:04:05"))
+	fmt.Println("    Tags:")
 	for _, tag := range events.Release.Tags {
-		fmt.Printf("    %v\n", tag)
+		fmt.Printf("      %v\n", tag)
 	}
 	if events.Release.Content != "" {
-		fmt.Printf("  Content: %s\n", truncateString(events.Release.Content, 100))
+		fmt.Printf("    Content: %s\n", truncateString(events.Release.Content, 100))
 	}
-	fmt.Printf("  Sig: %s\n", events.Release.Sig)
+	fmt.Printf("    Sig: %s...\n", events.Release.Sig[:32])
 
 	// Software Asset (kind 3063)
 	fmt.Println()
-	fmt.Println(ui.Bold("Kind 3063 (Software Asset)"))
-	fmt.Printf("  ID: %s\n", events.SoftwareAsset.ID)
-	fmt.Printf("  pubkey: %s\n", events.SoftwareAsset.PubKey)
-	fmt.Printf("  Created: %s\n", events.SoftwareAsset.CreatedAt.Time().Format("2006-01-02 15:04:05"))
-	fmt.Println("  Tags:")
+	fmt.Printf("  %s\n", ui.Bold("Kind 3063 (Software Asset)"))
+	fmt.Printf("    ID: %s\n", events.SoftwareAsset.ID)
+	fmt.Printf("    pubkey: %s...\n", events.SoftwareAsset.PubKey[:16])
+	fmt.Printf("    Created: %s\n", events.SoftwareAsset.CreatedAt.Time().Format("2006-01-02 15:04:05"))
+	fmt.Println("    Tags:")
 	for _, tag := range events.SoftwareAsset.Tags {
-		fmt.Printf("    %v\n", tag)
+		fmt.Printf("      %v\n", tag)
 	}
-	fmt.Printf("  Sig: %s\n", events.SoftwareAsset.Sig)
+	fmt.Printf("    Sig: %s...\n", events.SoftwareAsset.Sig[:32])
 	fmt.Println()
 }
 
 // previewEventsJSON outputs events as formatted JSON with syntax highlighting.
 func previewEventsJSON(events *nostr.EventSet) {
-	ui.PrintHeader("Signed Events (JSON)")
+	ui.PrintSectionHeader("Signed Events (JSON)")
 	fmt.Println()
 
-	fmt.Println(ui.Bold("Kind 32267 (Software Application):"))
+	fmt.Printf("  %s\n", ui.Bold("Kind 32267 (Software Application):"))
 	printColorizedJSON(events.AppMetadata)
 	fmt.Println()
 
-	fmt.Println(ui.Bold("Kind 30063 (Software Release):"))
+	fmt.Printf("  %s\n", ui.Bold("Kind 30063 (Software Release):"))
 	printColorizedJSON(events.Release)
 	fmt.Println()
 
-	fmt.Println(ui.Bold("Kind 3063 (Software Asset):"))
+	fmt.Printf("  %s\n", ui.Bold("Kind 3063 (Software Asset):"))
 	printColorizedJSON(events.SoftwareAsset)
 	fmt.Println()
 }
@@ -1091,6 +1240,24 @@ func truncateString(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
+// confirmHash asks the user to confirm the file hash they just signed.
+// This is a security step since the hash may have been fetched from an external source.
+func confirmHash(sha256Hash string) (bool, error) {
+	fmt.Println()
+	ui.PrintWarning("You just signed an event attesting to this file hash (kind 3063):")
+	fmt.Println()
+	fmt.Printf("  %s\n", ui.Bold(sha256Hash))
+	fmt.Println()
+	fmt.Printf("  %s\n", ui.Bold("Make sure it matches the APK you intend to distribute."))
+	fmt.Println()
+	fmt.Println("  To verify, run:")
+	fmt.Printf("    %s\n", ui.Dim("shasum -a 256 <path-to-apk>   # macOS"))
+	fmt.Printf("    %s\n", ui.Dim("sha256sum <path-to-apk>       # Linux"))
+	fmt.Println()
+
+	return ui.Confirm("Confirm hash is correct?", false)
+}
+
 // confirmPublish shows a pre-publish summary and asks for confirmation.
 // Returns true if user confirms, false if they want to exit.
 func confirmPublish(events *nostr.EventSet, relayURLs []string) (bool, error) {
@@ -1108,18 +1275,17 @@ func confirmPublish(events *nostr.EventSet, relayURLs []string) (bool, error) {
 		}
 	}
 
-	ui.PrintHeader("Ready to Publish")
+	ui.PrintSectionHeader("Ready to Publish")
 	fmt.Printf("  App: %s v%s\n", packageID, version)
-	fmt.Printf("  Kind 32267 (Software Application)\n")
-	fmt.Printf("  Kind 30063 (Software Release)\n")
-	fmt.Printf("  Kind 3063 (Software Asset) x1\n")
+	fmt.Printf("  Events: Kind 32267 (App) + Kind 30063 (Release) + Kind 3063 (Asset)\n")
+	fmt.Printf("  Target: %s\n", strings.Join(relayURLs, ", "))
 	fmt.Println()
 
 	for {
 		options := []string{
 			"Preview events (formatted)",
 			"Preview events (JSON)",
-			fmt.Sprintf("Publish to %s now", strings.Join(relayURLs, ", ")),
+			"Publish now",
 			"Exit without publishing",
 		}
 
@@ -1436,6 +1602,36 @@ func uploadAndSignWithBatch(ctx context.Context, cfg *config.Config, apkInfo *ap
 	}
 	allEvents = append(allEvents, events.AppMetadata, events.Release, events.SoftwareAsset)
 
+	// Pre-check existence for non-APK uploads in parallel (4 concurrent HEAD requests)
+	var nonAPKHashes []string
+	for _, u := range uploads {
+		if !u.isAPK {
+			nonAPKHashes = append(nonAPKHashes, u.hash)
+		}
+	}
+	var existsMap map[string]bool
+	if len(nonAPKHashes) > 0 {
+		var checkSpinner *ui.Spinner
+		if !*quietFlag {
+			checkSpinner = ui.NewSpinner(fmt.Sprintf("Checking %d files...", len(nonAPKHashes)))
+			checkSpinner.Start()
+		}
+		existsMap = client.ExistsBatch(ctx, nonAPKHashes, 4)
+		if checkSpinner != nil {
+			existCount := 0
+			for _, exists := range existsMap {
+				if exists {
+					existCount++
+				}
+			}
+			if existCount > 0 {
+				checkSpinner.StopWithSuccess(fmt.Sprintf("Checked files (%d already exist)", existCount))
+			} else {
+				checkSpinner.StopWithSuccess("Checked files")
+			}
+		}
+	}
+
 	// Batch sign everything in one browser interaction
 	var signSpinner *ui.Spinner
 	if !*quietFlag {
@@ -1466,28 +1662,39 @@ func uploadAndSignWithBatch(ctx context.Context, cfg *config.Config, apkInfo *ap
 				uploadTracker = ui.NewDownloadTracker(fmt.Sprintf("Uploading APK to %s", client.ServerURL()), size)
 				uploadCallback = uploadTracker.Callback()
 			}
-			_, err := client.UploadWithAuth(ctx, u.apkPath, u.hash, u.authEvent, uploadCallback)
+			result, err := client.UploadWithAuth(ctx, u.apkPath, u.hash, u.authEvent, uploadCallback)
 			if err != nil {
 				return nil, fmt.Errorf("failed to upload APK: %w", err)
 			}
 			if uploadTracker != nil {
-				uploadTracker.Done()
+				if result.Existed {
+					uploadTracker.DoneWithMessage(fmt.Sprintf("APK already exists (%s)", result.URL))
+				} else {
+					uploadTracker.Done()
+				}
 			}
 		} else {
-			var uploadSpinner *ui.Spinner
-			if !*quietFlag {
-				uploadSpinner = ui.NewSpinner(fmt.Sprintf("Uploading %s...", u.uploadType))
-				uploadSpinner.Start()
-			}
-			_, err := client.UploadBytesWithAuth(ctx, u.data, u.hash, u.mimeType, u.authEvent)
-			if err != nil {
-				if uploadSpinner != nil {
-					uploadSpinner.StopWithError(fmt.Sprintf("Failed to upload %s", u.uploadType))
+			existed := existsMap[u.hash]
+			if existed {
+				if !*quietFlag {
+					ui.PrintSuccess(fmt.Sprintf("%s already exists (%s/%s)", u.uploadType, client.ServerURL(), u.hash))
 				}
-				return nil, fmt.Errorf("failed to upload file: %w", err)
-			}
-			if uploadSpinner != nil {
-				uploadSpinner.StopWithSuccess(fmt.Sprintf("Uploaded %s", u.uploadType))
+			} else {
+				var uploadSpinner *ui.Spinner
+				if !*quietFlag {
+					uploadSpinner = ui.NewSpinner(fmt.Sprintf("Uploading %s...", u.uploadType))
+					uploadSpinner.Start()
+				}
+				_, err := client.UploadBytesWithAuthPreChecked(ctx, u.data, u.hash, u.mimeType, u.authEvent, false)
+				if err != nil {
+					if uploadSpinner != nil {
+						uploadSpinner.StopWithError(fmt.Sprintf("Failed to upload %s", u.uploadType))
+					}
+					return nil, fmt.Errorf("failed to upload file: %w", err)
+				}
+				if uploadSpinner != nil {
+					uploadSpinner.StopWithSuccess(fmt.Sprintf("Uploaded %s", u.uploadType))
+				}
 			}
 		}
 	}
@@ -1529,7 +1736,11 @@ func uploadWithIndividualSigning(ctx context.Context, cfg *config.Config, apkInf
 					return "", nil, fmt.Errorf("failed to upload icon: %w", err)
 				}
 				if iconSpinner != nil {
-					iconSpinner.StopWithSuccess("Uploaded icon")
+					if result.Existed {
+						iconSpinner.StopWithSuccess(fmt.Sprintf("Icon already exists (%s)", result.URL))
+					} else {
+						iconSpinner.StopWithSuccess("Uploaded icon")
+					}
 				}
 				iconURL = result.URL
 			}
@@ -1555,7 +1766,11 @@ func uploadWithIndividualSigning(ctx context.Context, cfg *config.Config, apkInf
 				return "", nil, fmt.Errorf("failed to upload icon: %w", err)
 			}
 			if iconSpinner != nil {
-				iconSpinner.StopWithSuccess("Uploaded icon")
+				if result.Existed {
+					iconSpinner.StopWithSuccess(fmt.Sprintf("Icon already exists (%s)", result.URL))
+				} else {
+					iconSpinner.StopWithSuccess("Uploaded icon")
+				}
 			}
 			iconURL = result.URL
 		}
@@ -1575,7 +1790,11 @@ func uploadWithIndividualSigning(ctx context.Context, cfg *config.Config, apkInf
 			return "", nil, fmt.Errorf("failed to upload icon: %w", err)
 		}
 		if iconSpinner != nil {
-			iconSpinner.StopWithSuccess("Uploaded icon")
+			if result.Existed {
+				iconSpinner.StopWithSuccess(fmt.Sprintf("Icon already exists (%s)", result.URL))
+			} else {
+				iconSpinner.StopWithSuccess("Uploaded icon")
+			}
 		}
 		iconURL = result.URL
 	}
@@ -1615,7 +1834,11 @@ func uploadWithIndividualSigning(ctx context.Context, cfg *config.Config, apkInf
 					return "", nil, fmt.Errorf("failed to upload screenshot: %w", err)
 				}
 				if imgSpinner != nil {
-					imgSpinner.StopWithSuccess(fmt.Sprintf("Uploaded screenshot (%d/%d)", i+1, len(cfg.Images)))
+					if result.Existed {
+						imgSpinner.StopWithSuccess(fmt.Sprintf("Screenshot (%d/%d) already exists (%s)", i+1, len(cfg.Images), result.URL))
+					} else {
+						imgSpinner.StopWithSuccess(fmt.Sprintf("Uploaded screenshot (%d/%d)", i+1, len(cfg.Images)))
+					}
 				}
 				imageURLs = append(imageURLs, result.URL)
 			}
@@ -1641,7 +1864,11 @@ func uploadWithIndividualSigning(ctx context.Context, cfg *config.Config, apkInf
 				return "", nil, fmt.Errorf("failed to upload image %s: %w", img, err)
 			}
 			if imgSpinner != nil {
-				imgSpinner.StopWithSuccess(fmt.Sprintf("Uploaded image %s", img))
+				if result.Existed {
+					imgSpinner.StopWithSuccess(fmt.Sprintf("Image %s already exists (%s)", img, result.URL))
+				} else {
+					imgSpinner.StopWithSuccess(fmt.Sprintf("Uploaded image %s", img))
+				}
 			}
 			imageURLs = append(imageURLs, result.URL)
 		}
@@ -1660,12 +1887,16 @@ func uploadWithIndividualSigning(ctx context.Context, cfg *config.Config, apkInf
 		uploadTracker = ui.NewDownloadTracker(fmt.Sprintf("Uploading APK to %s", client.ServerURL()), size)
 		uploadCallback = uploadTracker.Callback()
 	}
-	_, err = client.Upload(ctx, apkPath, apkInfo.SHA256, signer, uploadCallback)
+	apkResult, err := client.Upload(ctx, apkPath, apkInfo.SHA256, signer, uploadCallback)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to upload APK: %w", err)
 	}
 	if uploadTracker != nil {
-		uploadTracker.Done()
+		if apkResult.Existed {
+			uploadTracker.DoneWithMessage(fmt.Sprintf("APK already exists (%s)", apkResult.URL))
+		} else {
+			uploadTracker.Done()
+		}
 	}
 
 	return iconURL, imageURLs, nil
@@ -1673,8 +1904,7 @@ func uploadWithIndividualSigning(ctx context.Context, cfg *config.Config, apkInf
 
 // selectAPKInteractive prompts the user to select an APK from a ranked list.
 func selectAPKInteractive(ranked []picker.ScoredAsset) (*source.Asset, error) {
-	fmt.Println()
-	ui.PrintHeader("Multiple APKs Found")
+	ui.PrintSectionHeader(fmt.Sprintf("Multiple APKs Found (%d)", len(ranked)))
 
 	// Build option list with size and recommendation
 	options := make([]string, len(ranked))
@@ -1685,12 +1915,7 @@ func selectAPKInteractive(ranked []picker.ScoredAsset) (*source.Asset, error) {
 			sizeStr = fmt.Sprintf(" (%.1f MB)", sizeMB)
 		}
 
-		recommended := ""
-		if i == 0 {
-			recommended = " [recommended]"
-		}
-
-		options[i] = fmt.Sprintf("%s%s%s", sa.Asset.Name, sizeStr, recommended)
+		options[i] = fmt.Sprintf("%s%s", sa.Asset.Name, sizeStr)
 	}
 
 	// Default to first (recommended) option

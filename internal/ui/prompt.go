@@ -98,10 +98,14 @@ func PromptInt(message string, defaultValue int) (int, error) {
 	return value, nil
 }
 
-// PrintHeader prints a section header.
+// PrintHeader prints a section header (legacy - use StepTracker for numbered steps).
 func PrintHeader(message string) {
 	fmt.Println()
-	fmt.Println(Title("=== " + message + " ==="))
+	if NoColor {
+		fmt.Printf("=== %s ===\n", message)
+	} else {
+		fmt.Printf("  %s\n", InfoStyle.Render("─── "+message+" ───"))
+	}
 }
 
 // PrintSuccess prints a success message.

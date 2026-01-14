@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -43,10 +44,11 @@ func NewClient(serverURL string) *Client {
 
 // UploadResult contains the result of an upload.
 type UploadResult struct {
-	URL  string `json:"url"`
-	SHA256 string `json:"sha256"`
-	Size int64  `json:"size"`
-	Type string `json:"type"`
+	URL     string `json:"url"`
+	SHA256  string `json:"sha256"`
+	Size    int64  `json:"size"`
+	Type    string `json:"type"`
+	Existed bool   `json:"-"` // True if file already existed on server (not uploaded)
 }
 
 // ProgressFunc is called during upload to report progress.
@@ -70,6 +72,56 @@ func (c *Client) Exists(ctx context.Context, sha256 string) (bool, error) {
 	return resp.StatusCode == http.StatusOK, nil
 }
 
+// ExistsBatch checks if multiple files exist on the server in parallel.
+// Returns a map of sha256 -> exists. Concurrency is limited to maxConcurrent.
+func (c *Client) ExistsBatch(ctx context.Context, hashes []string, maxConcurrent int) map[string]bool {
+	if maxConcurrent <= 0 {
+		maxConcurrent = 4
+	}
+
+	result := make(map[string]bool)
+	if len(hashes) == 0 {
+		return result
+	}
+
+	// Use a mutex to protect the result map
+	var mu sync.Mutex
+
+	// Semaphore channel to limit concurrency
+	sem := make(chan struct{}, maxConcurrent)
+
+	// WaitGroup to wait for all goroutines
+	var wg sync.WaitGroup
+
+	for _, hash := range hashes {
+		wg.Add(1)
+		go func(h string) {
+			defer wg.Done()
+
+			// Acquire semaphore
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
+
+			exists, err := c.Exists(ctx, h)
+			if err != nil {
+				// On error, assume doesn't exist (will try to upload)
+				exists = false
+			}
+
+			mu.Lock()
+			result[h] = exists
+			mu.Unlock()
+		}(hash)
+	}
+
+	wg.Wait()
+	return result
+}
+
 // Upload uploads a file to the Blossom server.
 func (c *Client) Upload(ctx context.Context, filePath string, sha256 string, signer nostrpkg.Signer, onProgress ProgressFunc) (*UploadResult, error) {
 	// Create and sign auth event
@@ -90,8 +142,9 @@ func (c *Client) UploadWithAuth(ctx context.Context, filePath string, sha256 str
 
 	if exists {
 		return &UploadResult{
-			URL:    fmt.Sprintf("%s/%s", c.serverURL, sha256),
-			SHA256: sha256,
+			URL:     fmt.Sprintf("%s/%s", c.serverURL, sha256),
+			SHA256:  sha256,
+			Existed: true,
 		}, nil
 	}
 
@@ -172,18 +225,40 @@ func (c *Client) UploadBytes(ctx context.Context, data []byte, sha256 string, co
 
 // UploadBytesWithAuth uploads raw bytes using a pre-signed auth event.
 func (c *Client) UploadBytesWithAuth(ctx context.Context, data []byte, sha256 string, contentType string, authEvent *nostr.Event) (*UploadResult, error) {
-	// Check if already exists
-	exists, err := c.Exists(ctx, sha256)
-	if err != nil {
-		return nil, fmt.Errorf("failed to check existence: %w", err)
-	}
+	return c.uploadBytesWithAuth(ctx, data, sha256, contentType, authEvent, false)
+}
 
-	if exists {
+// UploadBytesWithAuthPreChecked uploads raw bytes, using a pre-computed existence check result.
+// If existed is true, returns immediately without uploading.
+func (c *Client) UploadBytesWithAuthPreChecked(ctx context.Context, data []byte, sha256 string, contentType string, authEvent *nostr.Event, existed bool) (*UploadResult, error) {
+	if existed {
 		return &UploadResult{
-			URL:    fmt.Sprintf("%s/%s", c.serverURL, sha256),
-			SHA256: sha256,
-			Size:   int64(len(data)),
+			URL:     fmt.Sprintf("%s/%s", c.serverURL, sha256),
+			SHA256:  sha256,
+			Size:    int64(len(data)),
+			Existed: true,
 		}, nil
+	}
+	return c.uploadBytesWithAuth(ctx, data, sha256, contentType, authEvent, true)
+}
+
+// uploadBytesWithAuth is the internal implementation.
+func (c *Client) uploadBytesWithAuth(ctx context.Context, data []byte, sha256 string, contentType string, authEvent *nostr.Event, skipCheck bool) (*UploadResult, error) {
+	// Check if already exists (unless skipCheck is true)
+	if !skipCheck {
+		exists, err := c.Exists(ctx, sha256)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check existence: %w", err)
+		}
+
+		if exists {
+			return &UploadResult{
+				URL:     fmt.Sprintf("%s/%s", c.serverURL, sha256),
+				SHA256:  sha256,
+				Size:    int64(len(data)),
+				Existed: true,
+			}, nil
+		}
 	}
 
 	// Encode auth event
