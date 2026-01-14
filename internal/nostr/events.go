@@ -277,15 +277,15 @@ func archToPlatform(arch string) string {
 
 // BuildEventSetParams contains parameters for building an event set.
 type BuildEventSetParams struct {
-	APKInfo    *apk.APKInfo
-	Config     *config.Config
-	Pubkey     string
-	BlossomURL string
-	IconURL    string
-	ImageURLs  []string
-	Changelog  string // Release notes (from remote source or local file)
-	Variant    string // Explicit variant name (from config variants map)
-	Commit     string // Git commit hash for reproducible builds
+	APKInfo     *apk.APKInfo
+	Config      *config.Config
+	Pubkey      string
+	OriginalURL string // Original download URL (from release source)
+	IconURL     string
+	ImageURLs   []string
+	Changelog   string // Release notes (from remote source or local file)
+	Variant     string // Explicit variant name (from config variants map)
+	Commit      string // Git commit hash for reproducible builds
 }
 
 // BuildEventSet creates all events for an APK release.
@@ -304,10 +304,10 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		name = apkInfo.PackageID
 	}
 
-	// Build APK URL
-	apkURL := ""
-	if params.BlossomURL != "" {
-		apkURL = params.BlossomURL + "/" + apkInfo.SHA256
+	// Build APK URLs - use original URL only (blossom URL can be calculated from x tag)
+	var apkURLs []string
+	if params.OriginalURL != "" {
+		apkURLs = append(apkURLs, params.OriginalURL)
 	}
 
 	// Convert architectures to platform identifiers
@@ -371,7 +371,7 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		VersionCode:           apkInfo.VersionCode,
 		SHA256:                apkInfo.SHA256,
 		Size:                  apkInfo.FileSize,
-		URLs:                  []string{apkURL},
+		URLs:                  apkURLs,
 		CertFingerprint:       apkInfo.CertFingerprint,
 		MinSDK:                apkInfo.MinSDK,
 		TargetSDK:             apkInfo.TargetSDK,

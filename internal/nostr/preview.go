@@ -265,7 +265,7 @@ func (s *PreviewServer) handleImage(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.Header().Set("Content-Type", "image/png")
 	}
-	w.Header().Set("Cache-Control", "max-age=3600")
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 	w.Write(img.Data)
 }
 

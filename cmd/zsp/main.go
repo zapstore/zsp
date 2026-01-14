@@ -788,32 +788,6 @@ func publish(ctx context.Context, cfg *config.Config) error {
 			}
 		}
 
-		// Fetch screenshots from Play Store if none configured yet
-		if len(cfg.Images) == 0 && apkInfo.PackageID != "" {
-			var screenshotSpinner *ui.Spinner
-			if !*quietFlag {
-				screenshotSpinner = ui.NewSpinner("Fetching screenshots from Play Store...")
-				screenshotSpinner.Start()
-			}
-			psMeta, err := source.FetchPlayStoreMetadata(ctx, apkInfo.PackageID)
-			if err != nil {
-				if screenshotSpinner != nil {
-					screenshotSpinner.StopWithWarning("Screenshots not available")
-				}
-				if *verboseFlag {
-					fmt.Printf("    %v\n", err)
-				}
-			} else if len(psMeta.ImageURLs) > 0 {
-				cfg.Images = psMeta.ImageURLs
-				if screenshotSpinner != nil {
-					screenshotSpinner.StopWithSuccess(fmt.Sprintf("Fetched %d screenshots from Play Store", len(psMeta.ImageURLs)))
-				}
-			} else {
-				if screenshotSpinner != nil {
-					screenshotSpinner.StopWithWarning("No screenshots found on Play Store")
-				}
-			}
-		}
 	}
 
 	// Get Blossom server URL (needed for preview)
@@ -1008,7 +982,7 @@ func publish(ctx context.Context, cfg *config.Config) error {
 
 		if isBatchSigner {
 			// Batch signing mode: pre-collect all data, create ALL events (auth + main), sign once
-			events, err = uploadAndSignWithBatch(ctx, cfg, apkInfo, apkPath, release, blossomClient, blossomURL, batchSigner, signer.PublicKey(), relayHint, preDownloaded, variant, commit)
+			events, err = uploadAndSignWithBatch(ctx, cfg, apkInfo, apkPath, release, blossomClient, selectedAsset.URL, batchSigner, signer.PublicKey(), relayHint, preDownloaded, variant, commit)
 			if err != nil {
 				return err
 			}
@@ -1020,15 +994,15 @@ func publish(ctx context.Context, cfg *config.Config) error {
 			}
 			// Build and sign main events
 			events = nostr.BuildEventSet(nostr.BuildEventSetParams{
-				APKInfo:    apkInfo,
-				Config:     cfg,
-				Pubkey:     signer.PublicKey(),
-				BlossomURL: blossomURL,
-				IconURL:    iconURL,
-				ImageURLs:  imageURLs,
-				Changelog:  releaseNotes,
-				Variant:    variant,
-				Commit:     commit,
+				APKInfo:     apkInfo,
+				Config:      cfg,
+				Pubkey:      signer.PublicKey(),
+				OriginalURL: selectedAsset.URL,
+				IconURL:     iconURL,
+				ImageURLs:   imageURLs,
+				Changelog:   releaseNotes,
+				Variant:     variant,
+				Commit:      commit,
 			})
 			if err := nostr.SignEventSet(ctx, signer, events, relayHint); err != nil {
 				return fmt.Errorf("failed to sign events: %w", err)
@@ -1046,15 +1020,15 @@ func publish(ctx context.Context, cfg *config.Config) error {
 		}
 		// Build events
 		events = nostr.BuildEventSet(nostr.BuildEventSetParams{
-			APKInfo:    apkInfo,
-			Config:     cfg,
-			Pubkey:     signer.PublicKey(),
-			BlossomURL: blossomURL,
-			IconURL:    iconURL,
-			ImageURLs:  imageURLs,
-			Changelog:  releaseNotes,
-			Variant:    variant,
-			Commit:     commit,
+			APKInfo:     apkInfo,
+			Config:      cfg,
+			Pubkey:      signer.PublicKey(),
+			OriginalURL: selectedAsset.URL,
+			IconURL:     iconURL,
+			ImageURLs:   imageURLs,
+			Changelog:   releaseNotes,
+			Variant:     variant,
+			Commit:      commit,
 		})
 		// Sign events (will use batch signing if available)
 		if err := nostr.SignEventSet(ctx, signer, events, relayHint); err != nil {
@@ -1619,7 +1593,7 @@ type uploadItem struct {
 // uploadAndSignWithBatch handles uploads and signing when using a batch signer (e.g., NIP-07).
 // It pre-creates ALL events (blossom auth + main events), batch signs them once, then performs uploads.
 // preDownloaded contains images that were already downloaded before preview (to avoid re-downloading).
-func uploadAndSignWithBatch(ctx context.Context, cfg *config.Config, apkInfo *apk.APKInfo, apkPath string, release *source.Release, client *blossom.Client, blossomURL string, batchSigner nostr.BatchSigner, pubkey string, relayHint string, preDownloaded *preDownloadedImages, variant string, commit string) (*nostr.EventSet, error) {
+func uploadAndSignWithBatch(ctx context.Context, cfg *config.Config, apkInfo *apk.APKInfo, apkPath string, release *source.Release, client *blossom.Client, originalURL string, batchSigner nostr.BatchSigner, pubkey string, relayHint string, preDownloaded *preDownloadedImages, variant string, commit string) (*nostr.EventSet, error) {
 	var uploads []uploadItem
 	var iconURL string
 	var imageURLs []string
@@ -1791,15 +1765,15 @@ func uploadAndSignWithBatch(ctx context.Context, cfg *config.Config, apkInfo *ap
 
 	// Build main events (with pre-computed URLs)
 	events := nostr.BuildEventSet(nostr.BuildEventSetParams{
-		APKInfo:    apkInfo,
-		Config:     cfg,
-		Pubkey:     pubkey,
-		BlossomURL: blossomURL,
-		IconURL:    iconURL,
-		ImageURLs:  imageURLs,
-		Changelog:  releaseNotes,
-		Variant:    variant,
-		Commit:     commit,
+		APKInfo:     apkInfo,
+		Config:      cfg,
+		Pubkey:      pubkey,
+		OriginalURL: originalURL,
+		IconURL:     iconURL,
+		ImageURLs:   imageURLs,
+		Changelog:   releaseNotes,
+		Variant:     variant,
+		Commit:      commit,
 	})
 
 	// For batch signing, we need to pre-compute the asset event IDs and add them to release

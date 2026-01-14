@@ -260,13 +260,13 @@ func TestBuildEventSet(t *testing.T) {
 	}
 
 	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	blossomURL := "https://cdn.zapstore.dev"
+	originalURL := "https://github.com/example/app/releases/download/v1.0.0/app.apk"
 
 	events := BuildEventSet(BuildEventSetParams{
-		APKInfo:    apkInfo,
-		Config:     cfg,
-		Pubkey:     pubkey,
-		BlossomURL: blossomURL,
+		APKInfo:     apkInfo,
+		Config:      cfg,
+		Pubkey:      pubkey,
+		OriginalURL: originalURL,
 	})
 
 	if events.AppMetadata == nil {
