@@ -75,19 +75,19 @@ type ReleaseSource struct {
 type HTMLExtractor struct {
 	Selector  string `yaml:"selector"`
 	Attribute string `yaml:"attribute,omitempty"` // defaults to "text"
-	Pattern   string `yaml:"pattern,omitempty"`   // optional regex
+	Match     string `yaml:"match,omitempty"`     // optional regex
 }
 
 // JSONExtractor configures JSON API parsing for version extraction.
 type JSONExtractor struct {
-	Path    string `yaml:"path"`              // JSONPath expression
-	Pattern string `yaml:"pattern,omitempty"` // optional regex
+	Path  string `yaml:"path"`            // JSONPath expression
+	Match string `yaml:"match,omitempty"` // optional regex
 }
 
 // RedirectExtractor configures HTTP redirect header parsing.
 type RedirectExtractor struct {
-	Header  string `yaml:"header"`  // e.g., "location"
-	Pattern string `yaml:"pattern"` // regex to extract version
+	Header string `yaml:"header"` // e.g., "location"
+	Match  string `yaml:"match"`  // regex to extract version
 }
 
 // webReleaseSource is used for YAML unmarshaling of complex release_source.

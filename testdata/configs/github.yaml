@@ -1,5 +1,2 @@
 # GitHub release config
 repository: https://github.com/AeonBTC/mempal
-
-# Optional: override APK selection
-# match: ".*arm64.*\\.apk$"

@@ -62,9 +62,9 @@ type AssetMetadata struct {
 
 // EventSet contains all events to be published for an app release.
 type EventSet struct {
-	AppMetadata   *nostr.Event
-	Release       *nostr.Event
-	SoftwareAsset *nostr.Event
+	AppMetadata    *nostr.Event
+	Release        *nostr.Event
+	SoftwareAssets []*nostr.Event // Multiple assets (e.g., different APK variants)
 }
 
 // BuildAppMetadataEvent creates a Software Application event (kind 32267).
@@ -316,9 +316,9 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 	}
 
 	return &EventSet{
-		AppMetadata:   BuildAppMetadataEvent(appMeta, params.Pubkey),
-		Release:       BuildReleaseEvent(releaseMeta, params.Pubkey),
-		SoftwareAsset: BuildSoftwareAssetEvent(assetMeta, params.Pubkey),
+		AppMetadata:    BuildAppMetadataEvent(appMeta, params.Pubkey),
+		Release:        BuildReleaseEvent(releaseMeta, params.Pubkey),
+		SoftwareAssets: []*nostr.Event{BuildSoftwareAssetEvent(assetMeta, params.Pubkey)},
 	}
 }
 
@@ -329,5 +329,13 @@ func (es *EventSet) AddAssetReference(assetEventID string, relayHint string) {
 		es.Release.Tags = append(es.Release.Tags, nostr.Tag{"e", assetEventID, relayHint})
 	} else {
 		es.Release.Tags = append(es.Release.Tags, nostr.Tag{"e", assetEventID})
+	}
+}
+
+// AddAssetReferences adds all asset event ID references to the Release event.
+// This must be called after the asset events are signed but before the release is signed.
+func (es *EventSet) AddAssetReferences(relayHint string) {
+	for _, asset := range es.SoftwareAssets {
+		es.AddAssetReference(asset.ID, relayHint)
 	}
 }

@@ -1,0 +1,7 @@
+# GitHub releases + Play Store metadata
+# APKs from GitHub, metadata enriched from Play Store
+repository: https://github.com/AeonBTC/mempal
+
+# Fetch additional metadata from Play Store (by package ID from APK)
+metadata_sources:
+  - playstore

@@ -1,0 +1,5 @@
+# Config with asset match pattern - Phoenix wallet
+repository: https://github.com/ACINQ/phoenix
+
+# Match only mainnet arm64 APKs
+match: "phoenix-.*-mainnet\\.apk$"

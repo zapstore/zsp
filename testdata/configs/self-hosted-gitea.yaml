@@ -1,0 +1,6 @@
+# Self-hosted Forgejo/Gitea with explicit type override
+repository: https://forge.example.org/user/app
+release_source:
+  url: https://forge.example.org/user/app
+  type: gitea
+

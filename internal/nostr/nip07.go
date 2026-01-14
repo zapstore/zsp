@@ -375,7 +375,7 @@ const nip07HTML = `<!DOCTYPE html>
   <div id="sign-section">
     <div id="sign-status" class="status waiting">Ready to sign events</div>
     <button id="sign-all">Sign All Events</button>
-    <p style="margin-top: 12px; color: #a78baf;">After signing, this window will show a completion message and you can close it.</p>
+    <p style="margin-top: 12px; color: #a78baf;">This tab will close automatically after signing.</p>
     <div id="events-container" style="margin-top: 16px;"></div>
   </div>
 
@@ -520,7 +520,8 @@ const nip07HTML = `<!DOCTYPE html>
             });
 
             if (resp.ok) {
-              status.innerHTML = '✓ Success! Events signed and sent. You can close this tab.';
+              status.innerHTML = '✓ Success! Events signed and sent. Closing...';
+              setTimeout(() => window.close(), 300);
             }
           } catch (e) {
             status.className = 'status error';
@@ -535,9 +536,13 @@ const nip07HTML = `<!DOCTYPE html>
           const resp = await fetch('/api/shutdown');
           const data = await resp.json();
           if (data.shouldClose) {
-            document.body.innerHTML = '<div class="status success"><h2>✓ Done</h2><p>All events signed. You can close this tab.</p></div>';
+            document.body.innerHTML = '<div class="status success"><h2>✓ Done</h2><p>All events signed. Closing...</p></div>';
+            setTimeout(() => window.close(), 300);
           }
-        } catch (e) {}
+        } catch (e) {
+          // Server closed (Ctrl+C in terminal)
+          window.close();
+        }
       }
 
       checkState();

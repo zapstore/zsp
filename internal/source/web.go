@@ -137,11 +137,11 @@ func (w *Web) extractVersionHTML(ctx context.Context, url string, extractor *con
 		return "", fmt.Errorf("could not extract value using selector %q", extractor.Selector)
 	}
 
-	// Apply pattern if specified
-	if extractor.Pattern != "" {
-		re, err := regexp.Compile(extractor.Pattern)
+	// Apply match pattern if specified
+	if extractor.Match != "" {
+		re, err := regexp.Compile(extractor.Match)
 		if err != nil {
-			return "", fmt.Errorf("invalid pattern: %w", err)
+			return "", fmt.Errorf("invalid match pattern: %w", err)
 		}
 		matches := re.FindStringSubmatch(value)
 		if len(matches) > 1 {
@@ -191,11 +191,11 @@ func (w *Web) extractVersionJSON(ctx context.Context, url string, extractor *con
 		return "", err
 	}
 
-	// Apply pattern if specified
-	if extractor.Pattern != "" {
-		re, err := regexp.Compile(extractor.Pattern)
+	// Apply match pattern if specified
+	if extractor.Match != "" {
+		re, err := regexp.Compile(extractor.Match)
 		if err != nil {
-			return "", fmt.Errorf("invalid pattern: %w", err)
+			return "", fmt.Errorf("invalid match pattern: %w", err)
 		}
 		matches := re.FindStringSubmatch(value)
 		if len(matches) > 1 {
@@ -233,14 +233,14 @@ func (w *Web) extractVersionRedirect(ctx context.Context, url string, extractor 
 		return "", fmt.Errorf("header %q not found in response", extractor.Header)
 	}
 
-	// Apply pattern
-	if extractor.Pattern == "" {
-		return "", fmt.Errorf("pattern is required for redirect extraction")
+	// Apply match pattern
+	if extractor.Match == "" {
+		return "", fmt.Errorf("match pattern is required for redirect extraction")
 	}
 
-	re, err := regexp.Compile(extractor.Pattern)
+	re, err := regexp.Compile(extractor.Match)
 	if err != nil {
-		return "", fmt.Errorf("invalid pattern: %w", err)
+		return "", fmt.Errorf("invalid match pattern: %w", err)
 	}
 
 	matches := re.FindStringSubmatch(headerValue)

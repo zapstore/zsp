@@ -23,6 +23,17 @@ import (
 // DefaultPreviewPort is the default port for the HTML preview server.
 const DefaultPreviewPort = 17008
 
+// AssetPreviewData contains data for a single software asset.
+type AssetPreviewData struct {
+	SHA256          string
+	FileSize        int64
+	Filename        string
+	CertFingerprint string
+	MinSDK          int32
+	TargetSDK       int32
+	Platforms       []string // Platform identifiers for this specific asset
+}
+
 // PreviewData contains all data needed to render the preview.
 type PreviewData struct {
 	// Software Application
@@ -37,7 +48,7 @@ type PreviewData struct {
 	IconData    []byte   // Raw PNG icon data
 	IconURL     string   // URL if using remote icon
 	ImageURLs   []string // Screenshot URLs
-	Platforms   []string
+	Platforms   []string // All platforms (union of all assets)
 
 	// Software Release
 	Version     string
@@ -45,22 +56,17 @@ type PreviewData struct {
 	Channel     string
 	Changelog   string
 
-	// Software Asset
-	SHA256          string
-	FileSize        int64
-	Filename        string
-	CertFingerprint string
-	MinSDK          int32
-	TargetSDK       int32
+	// Software Assets (multiple)
+	Assets []AssetPreviewData
 
 	// Publish targets (where it WILL be published)
 	BlossomServer string
 	RelayURLs     []string
 
 	// Events for JSON view (optional - may be nil before signing)
-	AppMetadataEvent   *nostr.Event
-	ReleaseEvent       *nostr.Event
-	SoftwareAssetEvent *nostr.Event
+	AppMetadataEvent    *nostr.Event
+	ReleaseEvent        *nostr.Event
+	SoftwareAssetEvents []*nostr.Event
 }
 
 // BuildPreviewDataFromAPK creates preview data from APK info and config (before signing).
@@ -129,7 +135,6 @@ type PreviewServer struct {
 	server      *http.Server
 	listener    net.Listener
 	data        *PreviewData
-	confirmed   chan bool
 	done        chan struct{}
 	cliConfirm  chan struct{} // signals when confirmed from CLI
 	changelog   string
@@ -153,7 +158,6 @@ func NewPreviewServer(data *PreviewData, changelog, iconURL string, port int) *P
 	return &PreviewServer{
 		port:        port,
 		data:        data,
-		confirmed:   make(chan bool, 1),
 		done:        make(chan struct{}),
 		cliConfirm:  make(chan struct{}),
 		changelog:   changelog,
@@ -172,8 +176,6 @@ func (s *PreviewServer) Start() (string, error) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
-	mux.HandleFunc("/api/confirm", s.handleConfirm)
-	mux.HandleFunc("/api/cancel", s.handleCancel)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/poll", s.handlePoll)
 
@@ -191,23 +193,6 @@ func (s *PreviewServer) Start() (string, error) {
 	return url, nil
 }
 
-// WaitForConfirmation blocks until user confirms or cancels in the browser.
-func (s *PreviewServer) WaitForConfirmation(ctx context.Context) (bool, error) {
-	select {
-	case confirmed := <-s.confirmed:
-		return confirmed, nil
-	case <-ctx.Done():
-		return false, ctx.Err()
-	case <-time.After(10 * time.Minute):
-		return false, fmt.Errorf("preview confirmation timed out")
-	}
-}
-
-// WaitForBrowserConfirmation returns a channel that receives the result when browser confirms/cancels.
-func (s *PreviewServer) WaitForBrowserConfirmation() <-chan bool {
-	return s.confirmed
-}
-
 // Close shuts down the preview server.
 func (s *PreviewServer) Close() error {
 	close(s.done)
@@ -222,30 +207,6 @@ func (s *PreviewServer) Close() error {
 func (s *PreviewServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
 	w.Write([]byte(s.buildHTML()))
-}
-
-func (s *PreviewServer) handleConfirm(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-	select {
-	case s.confirmed <- true:
-	default:
-	}
-}
-
-func (s *PreviewServer) handleCancel(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-	select {
-	case s.confirmed <- false:
-	default:
-	}
 }
 
 func (s *PreviewServer) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -282,10 +243,6 @@ func (s *PreviewServer) handlePoll(w http.ResponseWriter, r *http.Request) {
 // ConfirmFromCLI confirms the preview from the CLI, which signals the browser to close.
 func (s *PreviewServer) ConfirmFromCLI() {
 	close(s.cliConfirm)
-	select {
-	case s.confirmed <- true:
-	default:
-	}
 }
 
 func (s *PreviewServer) buildHTML() string {
@@ -306,17 +263,7 @@ func (s *PreviewServer) buildHTML() string {
 		for _, tag := range d.Tags {
 			tagSpans = append(tagSpans, fmt.Sprintf(`<span class="tag">%s</span>`, html.EscapeString(tag)))
 		}
-		tagsHTML = strings.Join(tagSpans, " ")
-	}
-
-	// Platforms HTML
-	platformsHTML := ""
-	if len(d.Platforms) > 0 {
-		var platformSpans []string
-		for _, p := range d.Platforms {
-			platformSpans = append(platformSpans, fmt.Sprintf(`<span class="platform">%s</span>`, html.EscapeString(p)))
-		}
-		platformsHTML = strings.Join(platformSpans, " ")
+		tagsHTML = fmt.Sprintf(`<div class="tags-container">%s</div>`, strings.Join(tagSpans, " "))
 	}
 
 	// Screenshots HTML
@@ -342,39 +289,71 @@ func (s *PreviewServer) buildHTML() string {
 		relayURLsHTML = strings.Join(urls, "<br>")
 	}
 
-	// Changelog - convert to HTML
-	changelogHTML := ""
+	// Changelog - convert to HTML, build section conditionally
+	releaseSectionHTML := ""
 	if s.changelog != "" {
-		changelogHTML = simpleMarkdownToHTML(s.changelog)
+		changelogHTML := simpleMarkdownToHTML(s.changelog)
+		releaseSectionHTML = fmt.Sprintf(`
+    <div class="section">
+      <h2>Release</h2>
+      <div class="version-badge">
+        <span class="ver">v%s</span>
+        <span class="code">(%d)</span>
+        <span class="channel-badge">%s</span>
+      </div>
+      <div class="changelog">%s</div>
+    </div>`,
+			html.EscapeString(d.Version),
+			d.VersionCode,
+			html.EscapeString(d.Channel),
+			changelogHTML,
+		)
+	} else {
+		// Show release section without changelog container
+		releaseSectionHTML = fmt.Sprintf(`
+    <div class="section">
+      <h2>Release</h2>
+      <div class="version-badge">
+        <span class="ver">v%s</span>
+        <span class="code">(%d)</span>
+        <span class="channel-badge">%s</span>
+      </div>
+    </div>`,
+			html.EscapeString(d.Version),
+			d.VersionCode,
+			html.EscapeString(d.Channel),
+		)
 	}
 
 	// Description - convert markdown to HTML
 	descriptionHTML := ""
 	if d.Description != "" {
-		descriptionHTML = simpleMarkdownToHTML(d.Description)
+		descriptionHTML = fmt.Sprintf(`<div class="description">%s</div>`, simpleMarkdownToHTML(d.Description))
+	}
+
+	// App info rows
+	appInfoHTML := ""
+	websiteRow := buildInfoRow("Website", d.Website, true)
+	repoRow := buildInfoRow("Repository", d.Repository, true)
+	licenseRow := buildInfoRow("License", d.License, false)
+	if websiteRow != "" || repoRow != "" || licenseRow != "" {
+		appInfoHTML = fmt.Sprintf(`<div class="info-grid">%s%s%s</div>`, websiteRow, repoRow, licenseRow)
 	}
 
 	return fmt.Sprintf(previewHTML,
-		// Title and header
+		// Title
 		html.EscapeString(d.AppName),
+		// App section
 		iconHTML,
 		html.EscapeString(d.AppName),
-		// App details
 		html.EscapeString(d.PackageID),
 		html.EscapeString(d.Summary),
-		buildInfoRow("Website", d.Website, true),
-		buildInfoRow("Repository", d.Repository, true),
-		buildInfoRow("License", d.License, false),
-		tagsHTML,
-		platformsHTML,
-		// Description
 		descriptionHTML,
+		appInfoHTML,
+		tagsHTML,
 		screenshotsHTML,
-		// Release info
-		html.EscapeString(d.Version),
-		d.VersionCode,
-		html.EscapeString(d.Channel),
-		changelogHTML,
+		// Release section (built conditionally)
+		releaseSectionHTML,
 		// Asset info
 		html.EscapeString(d.SHA256),
 		fileSizeStr,
@@ -536,72 +515,14 @@ const previewHTML = `<!DOCTYPE html>
     }
     
     .header-banner {
-      background: #4a3a5c;
-      padding: 16px 24px;
-      border-radius: 8px;
+      padding: 16px 0;
       margin-bottom: 24px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
     }
     
     .header-banner h1 {
       font-size: 1.25rem;
       font-weight: 600;
-      color: #fff;
-    }
-    
-    .header-banner .badge {
-      background: rgba(255,255,255,0.15);
-      padding: 6px 12px;
-      border-radius: 4px;
-      font-size: 0.8rem;
-      color: #e0e0e4;
-    }
-    
-    .app-header {
-      display: flex;
-      align-items: center;
-      gap: 24px;
-      padding: 24px;
-      background: #232328;
-      border: 1px solid #3a3a42;
-      border-radius: 8px;
-      margin-bottom: 24px;
-    }
-    
-    .app-header img {
-      width: 96px;
-      height: 96px;
-      border-radius: 16px;
-      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-    }
-    
-    .app-header .app-title {
-      flex: 1;
-    }
-    
-    .app-header h1 {
-      font-size: 2rem;
-      font-weight: 700;
-      color: #fff;
-      margin-bottom: 4px;
-    }
-    
-    .app-header .package-id {
-      font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
-      font-size: 0.9rem;
       color: #9080a0;
-      background: rgba(74, 58, 92, 0.3);
-      padding: 4px 10px;
-      border-radius: 4px;
-      display: inline-block;
-    }
-    
-    .app-header .summary {
-      color: #a0a0a8;
-      margin-top: 8px;
-      font-size: 1.05rem;
     }
     
     .section {
@@ -633,10 +554,53 @@ const previewHTML = `<!DOCTYPE html>
       border-radius: 2px;
     }
     
+    .app-header {
+      display: flex;
+      align-items: flex-start;
+      gap: 24px;
+      margin-bottom: 20px;
+    }
+    
+    .app-header img {
+      width: 96px;
+      height: 96px;
+      border-radius: 16px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+      flex-shrink: 0;
+    }
+    
+    .app-header .app-title {
+      flex: 1;
+    }
+    
+    .app-header h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 4px;
+    }
+    
+    .app-header .package-id {
+      font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+      font-size: 0.9rem;
+      color: #9080a0;
+      background: rgba(74, 58, 92, 0.3);
+      padding: 4px 10px;
+      border-radius: 4px;
+      display: inline-block;
+    }
+    
+    .app-header .summary {
+      color: #a0a0a8;
+      margin-top: 8px;
+      font-size: 1.05rem;
+    }
+    
     .info-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
       gap: 16px;
+      margin-top: 20px;
     }
     
     .info-row {
@@ -663,11 +627,11 @@ const previewHTML = `<!DOCTYPE html>
       color: #a898b8;
     }
     
-    .tags-container, .platforms-container {
+    .tags-container {
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
-      margin-top: 8px;
+      margin-top: 16px;
     }
     
     .tag {
@@ -679,19 +643,10 @@ const previewHTML = `<!DOCTYPE html>
       font-size: 0.85rem;
     }
     
-    .platform {
-      background: rgba(90, 90, 100, 0.2);
-      border: 1px solid rgba(90, 90, 100, 0.4);
-      color: #a0a0a8;
-      padding: 4px 12px;
-      border-radius: 4px;
-      font-size: 0.85rem;
-      font-family: 'SF Mono', monospace;
-    }
-    
     .description {
       color: #c8c8d0;
       line-height: 1.7;
+      margin-top: 16px;
     }
     .description h2, .description h3, .description h4 {
       color: #9080a0;
@@ -725,7 +680,7 @@ const previewHTML = `<!DOCTYPE html>
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
       gap: 16px;
-      margin-top: 16px;
+      margin-top: 20px;
     }
     
     .screenshots img {
@@ -742,7 +697,6 @@ const previewHTML = `<!DOCTYPE html>
       border: 1px solid rgba(74, 58, 92, 0.5);
       padding: 8px 16px;
       border-radius: 6px;
-      margin-bottom: 16px;
     }
     
     .version-badge .ver {
@@ -775,6 +729,7 @@ const previewHTML = `<!DOCTYPE html>
       max-height: 300px;
       overflow-y: auto;
       font-size: 0.95rem;
+      margin-top: 16px;
     }
     .changelog h2, .changelog h3, .changelog h4 {
       color: #9080a0;
@@ -832,42 +787,24 @@ const previewHTML = `<!DOCTYPE html>
       border-top: 1px solid #3a3a42;
     }
     
-    button {
-      flex: 1;
-      padding: 16px 32px;
-      border: none;
-      border-radius: 6px;
-      font-size: 1rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s ease;
-    }
-    
-    .btn-confirm {
-      background: #4a3a5c;
-      color: #e0e0e4;
-      box-shadow: 0 2px 8px rgba(74, 58, 92, 0.3);
-    }
-    
-    .btn-confirm:hover {
-      background: #5a4a6c;
-      box-shadow: 0 4px 12px rgba(74, 58, 92, 0.4);
-    }
-    
-    .btn-cancel {
-      background: #2a2a30;
-      color: #c8c8d0;
+    .terminal-hint {
+      text-align: center;
+      color: #9080a0;
+      font-size: 1.1rem;
+      padding: 16px 24px;
+      background: rgba(74, 58, 92, 0.2);
       border: 1px solid #3a3a42;
+      border-radius: 8px;
     }
     
-    .btn-cancel:hover {
+    .terminal-hint kbd {
       background: #3a3a42;
-    }
-    
-    button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-      transform: none !important;
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 0.95rem;
+      border: 1px solid #4a4a52;
+      color: #e0e0e4;
     }
     
     .status {
@@ -896,48 +833,29 @@ const previewHTML = `<!DOCTYPE html>
 <body>
   <div class="container">
     <div class="header-banner">
-      <h1>⚡ zsp Release Preview</h1>
-      <span class="badge">Review before signing</span>
+      <h1>Zapstore Publisher - Release Preview</h1>
     </div>
     
-    <div class="app-header">
+    <div class="section">
+      <h2>Application</h2>
+      <div class="app-header">
+        %s
+        <div class="app-title">
+          <h1>%s</h1>
+          <span class="package-id">%s</span>
+          <p class="summary">%s</p>
+        </div>
+      </div>
       %s
-      <div class="app-title">
-        <h1>%s</h1>
-        <span class="package-id">%s</span>
-        <p class="summary">%s</p>
-      </div>
-    </div>
-    
-    <div class="section">
-      <h2>App Details</h2>
-      <div class="info-grid">
-        %s
-        %s
-        %s
-      </div>
-      <div class="tags-container">%s</div>
-      <div class="platforms-container">%s</div>
-    </div>
-    
-    <div class="section">
-      <h2>Description</h2>
-      <div class="description">%s</div>
+      %s
+      %s
       %s
     </div>
     
-    <div class="section">
-      <h2>Software Release</h2>
-      <div class="version-badge">
-        <span class="ver">v%s</span>
-        <span class="code">(%d)</span>
-        <span class="channel-badge">%s</span>
-      </div>
-      <div class="changelog">%s</div>
-    </div>
+    %s
     
     <div class="section">
-      <h2>Software Asset</h2>
+      <h2>Asset</h2>
       <div class="asset-grid">
         <div class="asset-item">
           <div class="label">SHA256</div>
@@ -977,49 +895,16 @@ const previewHTML = `<!DOCTYPE html>
     </div>
     
     <div class="actions">
-      <button class="btn-cancel" onclick="cancel()">Cancel</button>
-      <button class="btn-confirm" onclick="confirm()">✓ Looks Good - Continue</button>
+      <div class="terminal-hint">Press <kbd>Enter</kbd> in terminal to continue, or <kbd>Ctrl+C</kbd> to cancel</div>
     </div>
     
     <div id="status" class="status"></div>
   </div>
   
   <script>
-    let polling = true;
-    
-    async function confirm() {
-      polling = false;
-      try {
-        await fetch('/api/confirm', { method: 'POST' });
-        const status = document.getElementById('status');
-        status.className = 'status success';
-        status.innerHTML = '✓ Confirmed! Returning to terminal...';
-        document.querySelectorAll('button').forEach(b => b.disabled = true);
-        setTimeout(() => window.close(), 500);
-      } catch (e) {
-        const status = document.getElementById('status');
-        status.className = 'status error';
-        status.textContent = 'Error: ' + e.message;
-      }
-    }
-    
-    async function cancel() {
-      polling = false;
-      try {
-        await fetch('/api/cancel', { method: 'POST' });
-        const status = document.getElementById('status');
-        status.className = 'status error';
-        status.innerHTML = 'Cancelled. Returning to terminal...';
-        document.querySelectorAll('button').forEach(b => b.disabled = true);
-        setTimeout(() => window.close(), 500);
-      } catch (e) {
-        console.error(e);
-      }
-    }
-    
-    // Poll for CLI confirmation
+    // Poll for terminal confirmation or server shutdown
     async function pollCLI() {
-      while (polling) {
+      while (true) {
         try {
           const resp = await fetch('/api/poll');
           const data = await resp.json();
@@ -1027,12 +912,12 @@ const previewHTML = `<!DOCTYPE html>
             const status = document.getElementById('status');
             status.className = 'status success';
             status.innerHTML = '✓ Confirmed from terminal! Closing...';
-            document.querySelectorAll('button').forEach(b => b.disabled = true);
-            setTimeout(() => window.close(), 500);
+            setTimeout(() => window.close(), 300);
             return;
           }
         } catch (e) {
-          // Server probably closed
+          // Server closed (Ctrl+C in terminal)
+          window.close();
           return;
         }
         await new Promise(r => setTimeout(r, 500));

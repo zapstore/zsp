@@ -362,3 +362,224 @@ func TestBuildEventSetArchitectureIndependent(t *testing.T) {
 	}
 }
 
+// TestBuildAppMetadataEmptyOptionalFields tests that empty optional fields are handled gracefully
+func TestBuildAppMetadataEmptyOptionalFields(t *testing.T) {
+	meta := &AppMetadata{
+		PackageID: "com.example.app",
+		Name:      "Minimal App",
+		// All other fields empty
+	}
+
+	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	event := BuildAppMetadataEvent(meta, pubkey)
+
+	// Required fields should still be present
+	dTag := event.Tags.GetFirst([]string{"d"})
+	if dTag == nil || (*dTag)[1] != "com.example.app" {
+		t.Error("missing d tag for minimal metadata")
+	}
+
+	nameTag := event.Tags.GetFirst([]string{"name"})
+	if nameTag == nil || (*nameTag)[1] != "Minimal App" {
+		t.Error("missing name tag for minimal metadata")
+	}
+
+	// Optional fields should be absent
+	urlTag := event.Tags.GetFirst([]string{"url"})
+	if urlTag != nil {
+		t.Error("url tag should not be present when website is empty")
+	}
+}
+
+// TestBuildAppMetadataSpecialCharacters tests handling of special characters
+func TestBuildAppMetadataSpecialCharacters(t *testing.T) {
+	meta := &AppMetadata{
+		PackageID:   "com.example.app",
+		Name:        "Test App 日本語 🎉",
+		Description: "Description with <html> & \"quotes\" and 'apostrophes'",
+		Tags:        []string{"test-tag", "another_tag", "tag with spaces"},
+	}
+
+	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	event := BuildAppMetadataEvent(meta, pubkey)
+
+	// Check that special characters are preserved
+	nameTag := event.Tags.GetFirst([]string{"name"})
+	if nameTag == nil || (*nameTag)[1] != "Test App 日本語 🎉" {
+		t.Errorf("name tag doesn't preserve unicode: %v", nameTag)
+	}
+
+	// Check content preserves special chars
+	if event.Content != "Description with <html> & \"quotes\" and 'apostrophes'" {
+		t.Errorf("content doesn't preserve special chars: %q", event.Content)
+	}
+}
+
+// TestBuildReleaseEventEmptyChangelog tests release event with empty changelog
+func TestBuildReleaseEventEmptyChangelog(t *testing.T) {
+	meta := &ReleaseMetadata{
+		PackageID:     "com.example.app",
+		Version:       "1.0.0",
+		Changelog:     "", // Empty changelog
+		AssetEventIDs: []string{"abc123"},
+	}
+
+	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	event := BuildReleaseEvent(meta, pubkey)
+
+	// Content should be empty for empty changelog
+	if event.Content != "" {
+		t.Errorf("expected empty content, got %q", event.Content)
+	}
+}
+
+// TestBuildReleaseEventMultilineChangelog tests release event with multiline changelog
+func TestBuildReleaseEventMultilineChangelog(t *testing.T) {
+	meta := &ReleaseMetadata{
+		PackageID: "com.example.app",
+		Version:   "1.0.0",
+		Changelog: `# Version 1.0.0
+
+- Bug fix 1
+- Bug fix 2
+- New feature
+
+Thanks to all contributors!`,
+		AssetEventIDs: []string{"abc123"},
+	}
+
+	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	event := BuildReleaseEvent(meta, pubkey)
+
+	// Multiline content should be preserved
+	if event.Content != meta.Changelog {
+		t.Errorf("changelog not preserved in content")
+	}
+}
+
+// TestBuildSoftwareAssetEventNoSDKVersions tests asset event without SDK versions
+func TestBuildSoftwareAssetEventNoSDKVersions(t *testing.T) {
+	meta := &AssetMetadata{
+		Identifier: "com.example.app",
+		Version:    "1.0.0",
+		SHA256:     "abc123",
+		Size:       1024,
+		URLs:       []string{"https://example.com/app.apk"},
+		Platforms:  []string{"android-arm64-v8a"},
+		// MinSDK and TargetSDK are 0
+	}
+
+	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	event := BuildSoftwareAssetEvent(meta, pubkey)
+
+	// SDK version tags should not be present when values are 0
+	minTag := event.Tags.GetFirst([]string{"min_platform_version"})
+	if minTag != nil {
+		t.Error("min_platform_version should not be present when MinSDK is 0")
+	}
+
+	targetTag := event.Tags.GetFirst([]string{"target_platform_version"})
+	if targetTag != nil {
+		t.Error("target_platform_version should not be present when TargetSDK is 0")
+	}
+}
+
+// TestBuildSoftwareAssetEventMultipleURLs tests asset event with multiple download URLs
+func TestBuildSoftwareAssetEventMultipleURLs(t *testing.T) {
+	meta := &AssetMetadata{
+		Identifier: "com.example.app",
+		Version:    "1.0.0",
+		SHA256:     "abc123",
+		Size:       1024,
+		URLs: []string{
+			"https://cdn1.example.com/app.apk",
+			"https://cdn2.example.com/app.apk",
+			"https://mirror.example.com/app.apk",
+		},
+		Platforms: []string{"android-arm64-v8a"},
+	}
+
+	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	event := BuildSoftwareAssetEvent(meta, pubkey)
+
+	// All URLs should be present as url tags
+	urlTags := event.Tags.GetAll([]string{"url"})
+	if len(urlTags) != 3 {
+		t.Errorf("expected 3 url tags, got %d", len(urlTags))
+	}
+}
+
+// TestBuildEventSetWithChangelog tests the changelog is properly propagated
+func TestBuildEventSetWithChangelog(t *testing.T) {
+	apkInfo := &apk.APKInfo{
+		PackageID:   "com.example.app",
+		VersionName: "1.0.0",
+		VersionCode: 1,
+		Label:       "Test App",
+		SHA256:      "abc123",
+		FilePath:    "/path/to/app.apk",
+	}
+
+	cfg := &config.Config{}
+	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	changelog := "Fixed critical bug in payment processing"
+
+	events := BuildEventSet(BuildEventSetParams{
+		APKInfo:   apkInfo,
+		Config:    cfg,
+		Pubkey:    pubkey,
+		Changelog: changelog,
+	})
+
+	// Release event should contain the changelog
+	if events.Release.Content != changelog {
+		t.Errorf("expected changelog %q in release content, got %q", changelog, events.Release.Content)
+	}
+}
+
+// TestBuildEventSetMultipleArchitectures tests handling of multiple architectures
+func TestBuildEventSetMultipleArchitectures(t *testing.T) {
+	apkInfo := &apk.APKInfo{
+		PackageID:     "com.example.app",
+		VersionName:   "1.0.0",
+		VersionCode:   1,
+		Label:         "Universal App",
+		SHA256:        "abc123",
+		FilePath:      "/path/to/app.apk",
+		Architectures: []string{"arm64-v8a", "armeabi-v7a", "x86", "x86_64"},
+	}
+
+	cfg := &config.Config{}
+	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	events := BuildEventSet(BuildEventSetParams{
+		APKInfo: apkInfo,
+		Config:  cfg,
+		Pubkey:  pubkey,
+	})
+
+	// Should have 4 platform tags in the app metadata
+	fTags := filterExactTag(events.AppMetadata.Tags, "f")
+	if len(fTags) != 4 {
+		t.Errorf("expected 4 f tags for multi-arch APK, got %d", len(fTags))
+	}
+
+	// Verify architecture names are properly prefixed with android-
+	expectedArches := map[string]bool{
+		"android-arm64-v8a":    true,
+		"android-armeabi-v7a":  true,
+		"android-x86":          true,
+		"android-x86_64":       true,
+	}
+
+	for _, tag := range fTags {
+		if len(tag) < 2 {
+			t.Error("f tag missing value")
+			continue
+		}
+		if !expectedArches[tag[1]] {
+			t.Errorf("unexpected architecture %q", tag[1])
+		}
+	}
+}
+

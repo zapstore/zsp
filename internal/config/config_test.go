@@ -140,7 +140,7 @@ release_source:
   html:
     selector: ".version"
     attribute: text
-    pattern: "v([0-9.]+)"
+    match: "v([0-9.]+)"
 `,
 			check: func(c *Config) bool {
 				return c.ReleaseSource != nil &&
@@ -150,7 +150,7 @@ release_source:
 					c.ReleaseSource.HTML != nil &&
 					c.ReleaseSource.HTML.Selector == ".version" &&
 					c.ReleaseSource.HTML.Attribute == "text" &&
-					c.ReleaseSource.HTML.Pattern == "v([0-9.]+)" &&
+					c.ReleaseSource.HTML.Match == "v([0-9.]+)" &&
 					c.GetSourceType() == SourceWeb
 			},
 		},
@@ -163,7 +163,7 @@ release_source:
   asset_url: https://cdn.example.com/app_$version.apk
   json:
     path: "$.tag_name"
-    pattern: "v([0-9.]+)"
+    match: "v([0-9.]+)"
 `,
 			check: func(c *Config) bool {
 				return c.ReleaseSource != nil &&
@@ -182,7 +182,7 @@ release_source:
   asset_url: https://example.com/v$version/app.apk
   redirect:
     header: location
-    pattern: "/v([0-9.]+)/"
+    match: "/v([0-9.]+)/"
 `,
 			check: func(c *Config) bool {
 				return c.ReleaseSource != nil &&
@@ -641,6 +641,554 @@ func TestGetGitLabRepoWithBase(t *testing.T) {
 			}
 			if gotPath != tt.wantRepoPath {
 				t.Errorf("GetGitLabRepoWithBase(%q) repoPath = %q, want %q", tt.url, gotPath, tt.wantRepoPath)
+			}
+		})
+	}
+}
+
+// TestParseAdditionalCases covers more parsing edge cases
+func TestParseAdditionalCases(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr bool
+		check   func(*Config) bool
+	}{
+		{
+			name: "metadata_sources single",
+			yaml: `
+repository: https://github.com/user/app
+metadata_sources:
+  - playstore
+`,
+			check: func(c *Config) bool {
+				return len(c.MetadataSources) == 1 && c.MetadataSources[0] == "playstore"
+			},
+		},
+		{
+			name: "metadata_sources multiple",
+			yaml: `
+repository: https://github.com/user/app
+metadata_sources:
+  - github
+  - fdroid
+  - playstore
+`,
+			check: func(c *Config) bool {
+				return len(c.MetadataSources) == 3
+			},
+		},
+		{
+			name: "empty tags array",
+			yaml: `
+repository: https://github.com/user/app
+tags: []
+`,
+			check: func(c *Config) bool {
+				return len(c.Tags) == 0
+			},
+		},
+		{
+			name: "empty images array",
+			yaml: `
+repository: https://github.com/user/app
+images: []
+`,
+			check: func(c *Config) bool {
+				return len(c.Images) == 0
+			},
+		},
+		{
+			name: "multiline description",
+			yaml: `
+repository: https://github.com/user/app
+description: |
+  This is a multiline
+  description that spans
+  multiple lines.
+`,
+			check: func(c *Config) bool {
+				return strings.Contains(c.Description, "multiline") &&
+					strings.Contains(c.Description, "multiple lines")
+			},
+		},
+		{
+			name: "play store URL detected",
+			yaml: `repository: https://play.google.com/store/apps/details?id=com.example.app`,
+			check: func(c *Config) bool {
+				return c.GetSourceType() == SourcePlayStore
+			},
+		},
+		{
+			name: "release_source only (no repository)",
+			yaml: `release_source: https://github.com/user/releases`,
+			check: func(c *Config) bool {
+				return c.Repository == "" &&
+					c.ReleaseSource != nil &&
+					c.ReleaseSource.URL == "https://github.com/user/releases"
+			},
+		},
+		{
+			name: "local glob pattern",
+			yaml: `local: "./builds/*.apk"`,
+			check: func(c *Config) bool {
+				return c.Local == "./builds/*.apk" && c.GetSourceType() == SourceLocal
+			},
+		},
+		{
+			name: "complex match regex",
+			yaml: `
+repository: https://github.com/user/app
+match: "(?i).*-(arm64|universal).*\\.apk$"
+`,
+			check: func(c *Config) bool {
+				return c.Match == "(?i).*-(arm64|universal).*\\.apk$"
+			},
+		},
+		{
+			name: "web source with only asset_url makes it web source",
+			yaml: `
+repository: https://github.com/user/app
+release_source:
+  url: https://example.com/releases
+  asset_url: https://example.com/app.apk
+`,
+			check: func(c *Config) bool {
+				return c.ReleaseSource.IsWebSource && c.GetSourceType() == SourceWeb
+			},
+		},
+		{
+			name: "explicit type github overrides detection",
+			yaml: `
+repository: https://example.com/user/app
+release_source:
+  url: https://example.com/user/app
+  type: github
+`,
+			check: func(c *Config) bool {
+				return c.ReleaseSource.Type == "github" && c.GetSourceType() == SourceGitHub
+			},
+		},
+		{
+			name: "explicit type fdroid",
+			yaml: `
+repository: https://github.com/user/app
+release_source:
+  url: https://custom-fdroid.example.com/repo
+  type: fdroid
+`,
+			check: func(c *Config) bool {
+				return c.ReleaseSource.Type == "fdroid" && c.GetSourceType() == SourceFDroid
+			},
+		},
+		{
+			name: "whitespace in tags",
+			yaml: `
+repository: https://github.com/user/app
+tags:
+  - " spaced tag "
+  - normal
+`,
+			check: func(c *Config) bool {
+				return len(c.Tags) == 2
+			},
+		},
+		{
+			name: "unicode in name and description",
+			yaml: `
+repository: https://github.com/user/app
+name: "アプリ名"
+description: "日本語の説明 🎉"
+`,
+			check: func(c *Config) bool {
+				return c.Name == "アプリ名" && strings.Contains(c.Description, "🎉")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Parse(strings.NewReader(tt.yaml))
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Parse() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if err == nil && tt.check != nil && !tt.check(cfg) {
+				t.Errorf("Parse() check failed for %s", tt.name)
+			}
+		})
+	}
+}
+
+// TestParseErrorCases covers cases that should produce errors
+func TestParseErrorCases(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+	}{
+		{
+			name: "invalid yaml syntax",
+			yaml: `
+repository: [invalid
+  nested: bad
+`,
+		},
+		{
+			name: "html and json extractors together",
+			yaml: `
+repository: https://github.com/user/app
+release_source:
+  url: https://example.com
+  asset_url: https://example.com/app.apk
+  html:
+    selector: ".version"
+  json:
+    path: "$.version"
+`,
+		},
+		{
+			name: "html and redirect extractors together",
+			yaml: `
+repository: https://github.com/user/app
+release_source:
+  url: https://example.com
+  asset_url: https://example.com/app.apk
+  html:
+    selector: ".version"
+  redirect:
+    header: location
+    match: "v(.*)"
+`,
+		},
+		{
+			name: "json and redirect extractors together",
+			yaml: `
+repository: https://github.com/user/app
+release_source:
+  url: https://example.com
+  asset_url: https://example.com/app.apk
+  json:
+    path: "$.version"
+  redirect:
+    header: location
+    match: "v(.*)"
+`,
+		},
+		{
+			name: "all three extractors together",
+			yaml: `
+repository: https://github.com/user/app
+release_source:
+  url: https://example.com
+  asset_url: https://example.com/app.apk
+  html:
+    selector: ".version"
+  json:
+    path: "$.version"
+  redirect:
+    header: location
+    match: "v(.*)"
+`,
+		},
+		{
+			name: "release_source invalid type (list instead of string/map)",
+			yaml: `
+repository: https://github.com/user/app
+release_source:
+  - https://example1.com
+  - https://example2.com
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse(strings.NewReader(tt.yaml))
+			if err == nil {
+				t.Errorf("Parse() expected error for %s", tt.name)
+			}
+		})
+	}
+}
+
+// TestValidateURLCases covers URL validation edge cases
+func TestValidateURLCases(t *testing.T) {
+	tests := []struct {
+		url     string
+		wantErr bool
+	}{
+		{"https://github.com/user/repo", false},
+		{"http://github.com/user/repo", false},
+		{"https://localhost:8080/user/repo", false},
+		{"http://localhost/path", false},
+		{"ftp://github.com/user/repo", true}, // Invalid scheme
+		{"github.com/user/repo", true},       // No scheme
+		{"https://", true},                   // No host
+		{"https:///path", true},              // No host
+		{"https://singleword", true},         // No TLD (unless localhost)
+		{"", true},                           // Empty
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			err := ValidateURL(tt.url)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateURL(%q) error = %v, wantErr %v", tt.url, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestValidateConfigCases covers more validation scenarios
+func TestValidateConfigCases(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  Config
+		wantErr bool
+	}{
+		{
+			name:    "empty config fails",
+			config:  Config{},
+			wantErr: true,
+		},
+		{
+			name:    "repository only passes",
+			config:  Config{Repository: "https://github.com/user/app"},
+			wantErr: false,
+		},
+		{
+			name:    "local only passes",
+			config:  Config{Local: "./app.apk"},
+			wantErr: false,
+		},
+		{
+			name: "release_source only passes",
+			config: Config{
+				ReleaseSource: &ReleaseSource{URL: "https://github.com/user/releases"},
+			},
+			wantErr: false,
+		},
+		{
+			name:    "invalid repository URL fails",
+			config:  Config{Repository: "not-a-valid-url"},
+			wantErr: true,
+		},
+		{
+			name:    "repository with invalid scheme fails",
+			config:  Config{Repository: "ftp://github.com/user/app"},
+			wantErr: true,
+		},
+		{
+			name: "web source skips URL validation",
+			config: Config{
+				ReleaseSource: &ReleaseSource{
+					URL:         "https://example.com/releases",
+					IsWebSource: true,
+					AssetURL:    "https://example.com/app.apk",
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "non-web release_source with invalid URL fails",
+			config: Config{
+				ReleaseSource: &ReleaseSource{
+					URL:         "invalid-url",
+					IsWebSource: false,
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "all three sources set (local takes precedence)",
+			config: Config{
+				Local:         "./app.apk",
+				Repository:    "https://github.com/user/app",
+				ReleaseSource: &ReleaseSource{URL: "https://gitlab.com/user/releases"},
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.config.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestSourceTypeString covers SourceType.String() method
+func TestSourceTypeString(t *testing.T) {
+	tests := []struct {
+		st   SourceType
+		want string
+	}{
+		{SourceUnknown, "unknown"},
+		{SourceLocal, "local"},
+		{SourceGitHub, "github"},
+		{SourceGitLab, "gitlab"},
+		{SourceGitea, "gitea"},
+		{SourceFDroid, "fdroid"},
+		{SourceWeb, "web"},
+		{SourcePlayStore, "playstore"},
+		{SourceType(999), "unknown"}, // Unknown value
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			if got := tt.st.String(); got != tt.want {
+				t.Errorf("SourceType(%d).String() = %q, want %q", tt.st, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestGetAPKSourceURL covers GetAPKSourceURL method
+func TestGetAPKSourceURL(t *testing.T) {
+	tests := []struct {
+		name   string
+		config Config
+		want   string
+	}{
+		{
+			name:   "repository only",
+			config: Config{Repository: "https://github.com/user/app"},
+			want:   "https://github.com/user/app",
+		},
+		{
+			name: "release_source takes precedence",
+			config: Config{
+				Repository:    "https://github.com/user/app",
+				ReleaseSource: &ReleaseSource{URL: "https://gitlab.com/user/releases"},
+			},
+			want: "https://gitlab.com/user/releases",
+		},
+		{
+			name:   "empty config",
+			config: Config{},
+			want:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.config.GetAPKSourceURL(); got != tt.want {
+				t.Errorf("GetAPKSourceURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDetectSourceTypeAdditional covers more URL detection cases
+func TestDetectSourceTypeAdditional(t *testing.T) {
+	tests := []struct {
+		url  string
+		want SourceType
+	}{
+		// Play Store variations
+		{"https://play.google.com/store/apps/details?id=com.example", SourcePlayStore},
+		{"https://PLAY.GOOGLE.COM/store/apps/details?id=com.example", SourcePlayStore},
+
+		// F-Droid variations
+		{"https://www.f-droid.org/packages/com.example", SourceFDroid},
+		{"https://f-droid.org/de/packages/com.example", SourceFDroid},
+		{"https://f-droid.org/fr/packages/com.example", SourceFDroid},
+
+		// GitHub variations
+		{"https://github.com/user/repo/releases/latest", SourceGitHub},
+		{"https://github.com/user/repo/releases/tag/v1.0.0", SourceGitHub},
+		// Note: raw.githubusercontent.com is NOT detected as GitHub since it's not a repo URL
+		{"https://raw.githubusercontent.com/user/repo/main/README.md", SourceUnknown},
+
+		// GitLab variations
+		{"https://gitlab.com/user/repo/-/releases", SourceGitLab},
+		{"https://gitlab.com/group/subgroup/repo", SourceGitLab},
+
+		// Self-hosted with gitlab in name
+		{"https://gitlab-ce.company.com/user/repo", SourceGitLab},
+		{"https://my.gitlab.server.com/user/repo", SourceGitLab},
+
+		// Unknown cases
+		{"https://bitbucket.org/user/repo", SourceUnknown},
+		{"https://sourceforge.net/projects/example", SourceUnknown},
+		{"https://example.com/downloads/app.apk", SourceUnknown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			if got := DetectSourceType(tt.url); got != tt.want {
+				t.Errorf("DetectSourceType(%q) = %v, want %v", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLoadConfigFile tests loading config from file paths
+func TestLoadConfigFile(t *testing.T) {
+	// Test loading a valid config file from testdata
+	cfg, err := Load("../../testdata/configs/github.yaml")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Repository == "" {
+		t.Error("Load() repository should not be empty")
+	}
+
+	if cfg.BaseDir == "" {
+		t.Error("Load() should set BaseDir")
+	}
+
+	// Test loading non-existent file
+	_, err = Load("/nonexistent/path/config.yaml")
+	if err == nil {
+		t.Error("Load() should error for non-existent file")
+	}
+}
+
+// TestLoadAllFixtures tests that all fixture configs parse successfully
+func TestLoadAllFixtures(t *testing.T) {
+	// Each fixture tests a unique feature/combination - no duplicates
+	fixtures := []string{
+		// Source types
+		"local-minimal.yaml",      // Local source (glob pattern)
+		"local-full.yaml",         // Local + all metadata fields
+		"github.yaml",             // GitHub source
+		"gitlab.yaml",             // GitLab source
+		"gitea-codeberg.yaml",     // Gitea/Codeberg source
+		"fdroid.yaml",             // F-Droid release source
+		"izzy.yaml",               // IzzyOnDroid release source
+		"self-hosted-gitlab.yaml", // Type override: gitlab
+		"self-hosted-gitea.yaml",  // Type override: gitea
+		// Web scraping extractors
+		"web-html.yaml",     // HTML selector extractor
+		"web-redirect.yaml", // Redirect header extractor (Fountain app)
+		// Features
+		"match-pattern.yaml",      // Asset match regex
+		"playstore-metadata.yaml", // Play Store metadata
+		"metadata-sources.yaml",   // Multiple metadata sources
+	}
+
+	for _, fixture := range fixtures {
+		t.Run(fixture, func(t *testing.T) {
+			cfg, err := Load("../../testdata/configs/" + fixture)
+			if err != nil {
+				t.Errorf("Load(%s) error = %v", fixture, err)
+				return
+			}
+
+			// Basic validation that config loaded
+			if cfg == nil {
+				t.Errorf("Load(%s) returned nil config", fixture)
+				return
+			}
+
+			// Validate each loaded config
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("Load(%s) Validate() error = %v", fixture, err)
 			}
 		})
 	}

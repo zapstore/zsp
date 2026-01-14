@@ -1,0 +1,7 @@
+# Self-hosted GitLab with explicit type override
+# For GitLab instances without "gitlab" in the domain
+repository: https://git.mycompany.com/team/app
+release_source:
+  url: https://git.mycompany.com/team/app
+  type: gitlab
+

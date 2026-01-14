@@ -1,0 +1,9 @@
+# Config with multiple metadata sources
+# APKs from F-Droid, enriched with GitHub + F-Droid metadata
+repository: https://github.com/AntennaPod/AntennaPod
+release_source: https://f-droid.org/packages/de.danoeh.antennapod
+
+# Fetch metadata from multiple sources (order matters for priority)
+metadata_sources:
+  - github
+  - fdroid

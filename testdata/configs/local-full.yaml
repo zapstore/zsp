@@ -20,7 +20,7 @@ images:
 repository: https://github.com/zapstore/zapstore
 
 # Changelog file
-changelog: CHANGELOG.md
+changelog: ../fixtures/CHANGELOG.md
 
 # Fetch additional metadata
 fetch_metadata: [github]

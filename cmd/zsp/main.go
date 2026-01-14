@@ -870,28 +870,19 @@ func publish(ctx context.Context, cfg *config.Config) error {
 			}
 
 			fmt.Printf("Preview server started at %s\n", url)
-			fmt.Println("Press Enter to confirm, or cancel in browser...")
+			fmt.Println("Press Enter to continue, or Ctrl+C to cancel...")
 
-			// Wait for confirmation from CLI (Enter) or browser
-			cliConfirm := make(chan struct{})
-			go func() {
-				reader := bufio.NewReader(os.Stdin)
-				reader.ReadString('\n')
-				close(cliConfirm)
-			}()
-
-			var confirmed bool
-			select {
-			case <-cliConfirm:
-				// Confirmed from CLI - signal browser to close
-				previewServer.ConfirmFromCLI()
-				confirmed = true
-			case confirmed = <-previewServer.WaitForBrowserConfirmation():
-				// Confirmed or cancelled from browser
-			case <-ctx.Done():
+			// Wait for Enter from terminal
+			reader := bufio.NewReader(os.Stdin)
+			_, err = reader.ReadString('\n')
+			if err != nil {
 				previewServer.Close()
-				return ctx.Err()
+				return fmt.Errorf("failed to read input: %w", err)
 			}
+
+			// Signal browser to close and confirm
+			previewServer.ConfirmFromCLI()
+			confirmed := true
 			previewServer.Close()
 
 			if !confirmed {

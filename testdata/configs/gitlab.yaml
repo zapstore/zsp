@@ -1,5 +1,2 @@
 # GitLab release config
 repository: https://gitlab.com/AuroraOSS/AuroraStore
-
-# Optional: override APK selection
-# match: ".*\\.apk$"
