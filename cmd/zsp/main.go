@@ -23,6 +23,7 @@ import (
 	"github.com/zapstore/zsp/internal/apk"
 	"github.com/zapstore/zsp/internal/blossom"
 	"github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/internal/help"
 	"github.com/zapstore/zsp/internal/nostr"
 	"github.com/zapstore/zsp/internal/picker"
 	"github.com/zapstore/zsp/internal/source"
@@ -36,14 +37,16 @@ var (
 	repoFlag             = flag.String("r", "", "Repository URL (quick mode)")
 	releaseSourceFlag    = flag.String("s", "", "Release source URL (defaults to -r)")
 	fetchMetadataFlag    stringSliceFlag // Accumulates multiple -m flags
+	matchFlag            = flag.String("match", "", "Regex pattern to filter APK assets")
+	commitFlag           = flag.String("commit", "", "Git commit hash for reproducible builds")
 	yesFlag              = flag.Bool("y", false, "Skip confirmations (auto-yes)")
 	dryRunFlag           = flag.Bool("dry-run", false, "Do everything except upload/publish")
 	quietFlag            = flag.Bool("quiet", false, "Minimal output, no prompts (implies -y)")
 	verboseFlag          = flag.Bool("verbose", false, "Debug output")
 	noColorFlag          = flag.Bool("no-color", false, "Disable colored output")
-	extractFlag          = flag.Bool("extract", false, "Extract APK metadata as JSON (local APK only)")
+	extractAPKFlag       = flag.Bool("extract-apk", false, "Extract APK metadata as JSON (local APK only)")
 	checkAPKFlag         = flag.Bool("check-apk", false, "Verify config fetches and parses an arm64-v8a APK (exit 0 on success)")
-	previewFlag          = flag.Bool("preview", false, "Show HTML preview in browser before publishing")
+	skipPreviewFlag      = flag.Bool("skip-preview", false, "Skip the browser preview prompt")
 	portFlag             = flag.Int("port", 0, "Custom port for browser preview/signing (default: 17007 for signing, 17008 for preview)")
 	overwriteReleaseFlag = flag.Bool("overwrite-release", false, "Bypass cache and re-publish even if release unchanged")
 	overwriteAppFlag     = flag.Bool("overwrite-app", false, "Re-fetch metadata even if app already exists on relays")
@@ -66,11 +69,28 @@ func (s *stringSliceFlag) Set(value string) error {
 
 func init() {
 	flag.Var(&fetchMetadataFlag, "m", "Fetch metadata from source (can be repeated: -m github -m fdroid)")
-	flag.Var(&fetchMetadataFlag, "fetch-metadata", "Fetch metadata from source (can be repeated)")
 	flag.BoolVar(dryRunFlag, "n", false, "Do everything except upload/publish (alias for --dry-run)")
 	flag.BoolVar(versionFlag, "version", false, "Print version and exit")
 	flag.BoolVar(helpFlag, "help", false, "Show help")
 	flag.Usage = usage
+}
+
+// extractHelpArgs checks if --help or -h is in args and returns any search query.
+// Returns nil if no help flag found, empty slice for help without query.
+func extractHelpArgs() []string {
+	args := os.Args[1:]
+
+	for i, arg := range args {
+		if arg == "--help" || arg == "-h" || arg == "-help" {
+			// Collect any arguments after the help flag as search query
+			if i+1 < len(args) {
+				return args[i+1:]
+			}
+			return []string{} // Help without query
+		}
+	}
+
+	return nil // No help flag
 }
 
 // reorderArgs moves flags before positional arguments so flag.Parse() works
@@ -81,7 +101,7 @@ func reorderArgs() {
 
 	// Flags that take a value argument
 	valuedFlags := map[string]bool{
-		"-r": true, "-s": true, "-m": true, "--fetch-metadata": true, "--port": true,
+		"-r": true, "-s": true, "-m": true, "--match": true, "--commit": true, "--port": true,
 	}
 
 	for i := 0; i < len(args); i++ {
@@ -102,83 +122,7 @@ func reorderArgs() {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `zsp - Publish Android apps to Nostr relays used by Zapstore
-
-USAGE
-  zsp [config.yaml]              Config file (default: ./zapstore.yaml)
-  zsp <app.apk> [-r <repo>]      Local APK with optional source repo
-  zsp -r <repo>                  Fetch latest release from repo
-  zsp <app.apk> --extract        Extract APK metadata as JSON
-  zsp                            Interactive wizard (no args, no config)
-  zsp --wizard                   Interactive wizard (uses existing config as defaults)
-
-FLAGS
-  -r <url>        Repository URL (GitHub/GitLab/F-Droid)
-  -s <url>        Release source URL (defaults to -r if not specified)
-  -m <source>     Fetch metadata from source (repeatable: -m github -m fdroid)
-  -y              Auto-confirm all prompts
-  -h, --help      Show this help
-  -v, --version   Print version
-
-  --wizard        Run interactive wizard (uses existing config as defaults)
-  --fetch-metadata <source>   Same as -m
-  --extract       Extract APK metadata as JSON (local APK only)
-  --check-apk     Verify config fetches and parses an arm64-v8a APK (exit 0=success)
-  --preview       Show HTML preview in browser before publishing
-  --port <port>   Custom port for browser preview/signing (default: 17007/17008)
-  --overwrite-release  Bypass cache and re-publish even if release unchanged
-  --overwrite-app      Re-fetch metadata even if app already exists on relays
-  -n, --dry-run   Parse & build events, but don't upload/publish
-  --quiet         Minimal output, no prompts (implies -y)
-  --verbose       Debug output (show scores, API responses)
-  --no-color      Disable colored output
-
-ENVIRONMENT
-  SIGN_WITH         Required. Signing method:
-                      nsec1...      Direct signing with private key
-                      npub1...      Output unsigned events (for external signing)
-                      bunker://...  Remote signing via NIP-46
-                      browser       Sign with browser extension (NIP-07)
-
-  GITHUB_TOKEN      Optional. Avoid GitHub API rate limits
-  FDROID_DATA_PATH  Optional. Local fdroiddata clone for metadata
-  RELAY_URLS        Custom relay URLs (default: wss://relay.zapstore.dev)
-  BLOSSOM_URL       Custom CDN server (default: https://cdn.zapstore.dev)
-
-CONFIG FILE (zapstore.yaml)
-  repository: https://github.com/user/app    # Source code repo (URL or NIP-34 naddr)
-  release_source: <url>                      # APK source (if different from repo)
-  local: ./build/app.apk                     # Local APK path (highest priority)
-  match: ".*arm64.*\\.apk$"                  # Asset filter regex
-  name: My App                               # Override APK label
-  summary: Short tagline                     # One-line summary
-  description: ...                           # App description
-  tags: [tools, productivity]                # Category tags
-  license: MIT                               # SPDX license identifier
-  website: https://myapp.com                 # App homepage
-  icon: ./icon.png                           # Custom icon (local path or URL)
-  images: [./screenshot1.png, ...]           # Screenshots (local paths or URLs)
-  release_notes: ./CHANGELOG.md              # Release notes (file path or URL)
-  release_channel: main                      # Channel: main, beta, nightly, dev
-  commit: abc123                             # Git commit hash (for reproducible builds)
-  supported_nips: ["01", "07"]               # Supported Nostr NIPs
-  min_allowed_version: "1.0.0"               # Minimum allowed version
-  variants:                                  # APK variant patterns
-    fdroid: ".*-fdroid-.*\\.apk$"
-    google: ".*-google-.*\\.apk$"
-
-EXAMPLES
-  SIGN_WITH=nsec1... zsp                          # Wizard mode
-  SIGN_WITH=nsec1... zsp zapstore.yaml            # Publish from config
-  SIGN_WITH=nsec1... zsp -r github.com/user/app   # Quick GitHub publish
-  SIGN_WITH=nsec1... zsp -r github.com/user/app -m github  # With GitHub metadata
-  SIGN_WITH=nsec1... zsp -r f-droid.org/packages/com.app  # F-Droid publish
-  SIGN_WITH=nsec1... zsp app.apk                  # Publish local APK
-  SIGN_WITH=nsec1... zsp --preview zapstore.yaml  # Preview release in browser
-  SIGN_WITH=npub1... zsp --dry-run zapstore.yaml  # Preview unsigned events
-
-More info: https://github.com/zapstore/zsp
-`)
+	fmt.Fprint(os.Stderr, help.QuickReference())
 }
 
 func main() {
@@ -189,12 +133,19 @@ func main() {
 }
 
 func run() error {
+	// Handle --help before flag parsing to support search queries
+	// e.g., "zsp --help fdroid metadata"
+	if helpArgs := extractHelpArgs(); helpArgs != nil {
+		help.HandleHelp(helpArgs)
+		return nil
+	}
+
 	reorderArgs()
 	flag.Parse()
 
-	// Handle help flag
+	// Handle help flag (for -h without args)
 	if *helpFlag {
-		usage()
+		help.HandleHelp(nil)
 		return nil
 	}
 
@@ -215,11 +166,11 @@ func run() error {
 		ui.SetNoColor(true)
 	}
 
-	// Handle extract flag (must be a local APK)
-	if *extractFlag {
+	// Handle extract-apk flag (must be a local APK)
+	if *extractAPKFlag {
 		args := flag.Args()
 		if len(args) == 0 || !strings.HasSuffix(strings.ToLower(args[0]), ".apk") {
-			return fmt.Errorf("--extract requires a local APK file as argument")
+			return fmt.Errorf("--extract-apk requires a local APK file as argument")
 		}
 		return extractAPKMetadata(args[0])
 	}
@@ -252,6 +203,14 @@ func run() error {
 	// Validate config
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	// Apply CLI flag overrides to config
+	if *matchFlag != "" {
+		cfg.Match = *matchFlag
+	}
+	if *commitFlag != "" {
+		cfg.Commit = *commitFlag
 	}
 
 	// Run the publish flow
@@ -832,24 +791,22 @@ func publish(ctx context.Context, cfg *config.Config) error {
 	browserPort := *portFlag
 	previewWasShown := false
 
-	// Show HTML preview BEFORE signing (if --preview flag or interactive prompt)
-	if !*quietFlag && !*yesFlag {
-		showPreview := *previewFlag
+	// Show HTML preview BEFORE signing (unless --skip-preview flag is set)
+	if !*quietFlag && !*yesFlag && !*skipPreviewFlag {
+		showPreview := false
 
-		if !showPreview {
-			defaultPort := nostr.DefaultPreviewPort
-			if browserPort != 0 {
-				defaultPort = browserPort
-			}
+		defaultPort := nostr.DefaultPreviewPort
+		if browserPort != 0 {
+			defaultPort = browserPort
+		}
 
-			confirmed, port, err := ui.ConfirmWithPort("Preview release in browser?", defaultPort)
-			if err != nil {
-				return fmt.Errorf("prompt failed: %w", err)
-			}
-			showPreview = confirmed
-			if confirmed {
-				browserPort = port
-			}
+		confirmed, port, err := ui.ConfirmWithPort("Preview release in browser?", defaultPort)
+		if err != nil {
+			return fmt.Errorf("prompt failed: %w", err)
+		}
+		showPreview = confirmed
+		if confirmed {
+			browserPort = port
 		}
 
 		if showPreview {
