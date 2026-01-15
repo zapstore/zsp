@@ -290,93 +290,194 @@ const nip07HTML = `<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>zsp - NIP-07 Signer</title>
   <style>
-    * { box-sizing: border-box; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      max-width: 700px;
-      margin: 0 auto;
-      padding: 24px;
-      background: linear-gradient(135deg, #1a0a1f 0%, #12071a 50%, #0d0510 100%);
-      color: #e8e0f0;
-      line-height: 1.5;
+      font-family: 'SF Pro Text', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a1e;
+      color: #e0e0e4;
       min-height: 100vh;
+      line-height: 1.6;
     }
-    h1 { color: #e879f9; margin-bottom: 8px; }
-    .subtitle { color: #a78baf; margin-bottom: 24px; }
+    
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 32px 24px;
+    }
+    
+    .header-banner {
+      padding: 16px 0;
+      margin-bottom: 24px;
+    }
+    
+    .header-banner h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: #9080a0;
+    }
+    
+    .subtitle {
+      color: #8a8a94;
+      margin-top: 8px;
+      font-size: 1rem;
+    }
+    
+    .section {
+      background: #232328;
+      border: 1px solid #3a3a42;
+      border-radius: 8px;
+      padding: 24px;
+      margin-bottom: 20px;
+    }
+    
+    .section h2 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: #9080a0;
+      border-bottom: 1px solid #3a3a42;
+      padding-bottom: 12px;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    
+    .section h2::before {
+      content: '';
+      display: block;
+      width: 4px;
+      height: 18px;
+      background: #4a3a5c;
+      border-radius: 2px;
+    }
+    
     .status {
       padding: 16px;
-      border-radius: 8px;
+      border-radius: 6px;
       margin-bottom: 16px;
-      border: 1px solid #3d1f47;
+      background: #1a1a1e;
+      border: 1px solid #3a3a42;
+      color: #c8c8d0;
     }
-    .status.waiting { background: rgba(26, 10, 31, 0.8); }
-    .status.success { background: linear-gradient(135deg, rgba(147, 51, 234, 0.3), rgba(219, 39, 119, 0.3)); border-color: #9333ea; color: #e879f9; }
-    .status.error { background: linear-gradient(135deg, #3d1f1f, #5c1f1f); border-color: #991b1b; color: #fca5a5; }
+    
+    .status.waiting {
+      background: rgba(74, 58, 92, 0.15);
+      border-color: #3a3a42;
+    }
+    
+    .status.success {
+      background: rgba(74, 58, 92, 0.3);
+      border-color: #4a3a5c;
+      color: #9080a0;
+    }
+    
+    .status.error {
+      background: rgba(140, 50, 50, 0.2);
+      border-color: #8c3232;
+      color: #e0a0a0;
+    }
+    
     pre {
-      background: #0d0510;
+      background: #1a1a1e;
       padding: 16px;
-      border-radius: 8px;
+      border-radius: 6px;
       overflow-x: auto;
       font-size: 13px;
-      border: 1px solid #2d1535;
+      border: 1px solid #3a3a42;
+      font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
     }
+    
     button {
-      background: linear-gradient(135deg, #9333ea, #db2777);
-      color: white;
-      border: none;
+      background: #4a3a5c;
+      color: #e0e0e4;
+      border: 1px solid #5a4a6c;
       padding: 12px 24px;
       border-radius: 6px;
-      font-size: 16px;
+      font-size: 1rem;
       cursor: pointer;
       font-weight: 500;
-      box-shadow: 0 4px 12px rgba(147, 51, 234, 0.4);
       transition: all 0.2s ease;
     }
-    button:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(147, 51, 234, 0.5); }
-    button:disabled { background: #1a0a1f; color: #6b5577; cursor: not-allowed; box-shadow: none; transform: none; }
+    
+    button:hover {
+      background: #5a4a6c;
+      border-color: #6a5a7c;
+    }
+    
+    button:disabled {
+      background: #2a2a30;
+      border-color: #3a3a42;
+      color: #6a6a74;
+      cursor: not-allowed;
+    }
+    
     .event {
-      background: rgba(26, 10, 31, 0.8);
-      border: 1px solid #3d1f47;
-      border-radius: 8px;
+      background: #1a1a1e;
+      border: 1px solid #3a3a42;
+      border-radius: 6px;
       padding: 16px;
       margin-bottom: 12px;
     }
-    .event.signed { border-color: #9333ea; box-shadow: 0 0 12px rgba(147, 51, 234, 0.3); }
-    .json-key { color: #c084fc; }
-    .json-string { color: #f0abfc; }
-    .json-number { color: #f472b6; }
+    
+    .event.signed {
+      border-color: #4a3a5c;
+      box-shadow: 0 0 8px rgba(74, 58, 92, 0.4);
+    }
+    
+    .json-key { color: #9080a0; font-weight: 500; }
+    .json-string { color: #a8c8a8; }
+    .json-number { color: #c9a866; }
+    
     #idle-section, #publicKey-section, #sign-section { display: none; }
+    
+    .hint {
+      margin-top: 12px;
+      color: #8a8a94;
+      font-size: 0.9rem;
+    }
+    
     .spinner {
       display: inline-block;
       width: 16px;
       height: 16px;
-      border: 2px solid #3d1f47;
-      border-top-color: #e879f9;
+      border: 2px solid #3a3a42;
+      border-top-color: #9080a0;
       border-radius: 50%;
       animation: spin 1s linear infinite;
       margin-right: 8px;
       vertical-align: middle;
     }
+    
     @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
-  <h1>⚡ zsp</h1>
-  <p class="subtitle">Sign Nostr events with your browser extension</p>
+  <div class="container">
+    <div class="header-banner">
+      <h1>Zapstore Publisher - NIP-07 Signer</h1>
+      <p class="subtitle">Sign Nostr events with your browser extension</p>
+    </div>
 
-  <div id="idle-section">
-    <div class="status waiting"><span class="spinner"></span>Waiting for operation from terminal...</div>
-  </div>
+    <div id="idle-section" class="section">
+      <h2>Status</h2>
+      <div class="status waiting"><span class="spinner"></span>Waiting for operation from terminal...</div>
+    </div>
 
-  <div id="publicKey-section">
-    <div id="pk-status" class="status waiting"><span class="spinner"></span>Requesting public key from extension...</div>
-  </div>
+    <div id="publicKey-section" class="section">
+      <h2>Public Key</h2>
+      <div id="pk-status" class="status waiting"><span class="spinner"></span>Requesting public key from extension...</div>
+    </div>
 
-  <div id="sign-section">
-    <div id="sign-status" class="status waiting">Ready to sign events</div>
-    <button id="sign-all">Sign All Events</button>
-    <p style="margin-top: 12px; color: #a78baf;">This tab will close automatically after signing.</p>
-    <div id="events-container" style="margin-top: 16px;"></div>
+    <div id="sign-section" class="section">
+      <h2>Sign Events</h2>
+      <div id="sign-status" class="status waiting">Ready to sign events</div>
+      <div style="margin-top: 16px;">
+        <button id="sign-all">Sign All Events</button>
+      </div>
+      <p class="hint">This tab will close automatically after signing.</p>
+      <div id="events-container" style="margin-top: 20px;"></div>
+    </div>
   </div>
 
   <script type="module">
@@ -412,7 +513,7 @@ const nip07HTML = `<!DOCTYPE html>
 
     const hasNostr = await waitForNostr();
     if (!hasNostr) {
-      document.body.innerHTML = '<div class="status error"><h2>No Nostr extension detected</h2><p>Please install a NIP-07 compatible browser extension (e.g., Alby, nos2x, Flamingo).</p></div>';
+      document.querySelector('.container').innerHTML = '<div class="section"><h2>Error</h2><div class="status error"><strong>No Nostr extension detected</strong><br><br>Please install a NIP-07 compatible browser extension (e.g., Alby, nos2x, Flamingo).</div></div>';
     } else {
       let displayedSignature = null;
 
@@ -536,7 +637,7 @@ const nip07HTML = `<!DOCTYPE html>
           const resp = await fetch('/api/shutdown');
           const data = await resp.json();
           if (data.shouldClose) {
-            document.body.innerHTML = '<div class="status success"><h2>✓ Done</h2><p>All events signed. Closing...</p></div>';
+            document.querySelector('.container').innerHTML = '<div class="section"><h2>Complete</h2><div class="status success"><strong>✓ Done</strong><br><br>All events signed. Closing...</div></div>';
             setTimeout(() => window.close(), 300);
           }
         } catch (e) {

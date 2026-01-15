@@ -7,14 +7,17 @@ import (
 	"strings"
 )
 
-// ASCII art logo for zapstore
-const zapstoreLogo = `
+// Logo is the ASCII art logo for Zapstore Publisher.
+const Logo = `
  _____                _
 / _  / __ _ _ __  ___| |_ ___  _ __ ___
 \// / / _` + "`" + ` | '_ \/ __| __/ _ \| '__/ _ \
  / //\ (_| | |_) \__ \ || (_) | | |  __/
 /____/\__,_| .__/|___/\__\___/|_|  \___|
-           |_|`
+           |_|
+    ═══════════════════════════════
+           P U B L I S H E R
+`
 
 // StepTracker tracks progress through numbered steps in the CLI flow.
 type StepTracker struct {
@@ -74,8 +77,7 @@ func (s *StepTracker) printBanner() {
 		fmt.Fprintln(s.writer, "=== ZAPSTORE ===")
 		return
 	}
-	fmt.Fprint(s.writer, LogoStyle.Render(zapstoreLogo))
-	fmt.Fprintln(s.writer)
+	fmt.Fprint(s.writer, LogoStyle.Render(Logo))
 }
 
 // SetTotal updates the total number of steps (useful when steps are conditional).

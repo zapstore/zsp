@@ -13,20 +13,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Logo is the ASCII art logo for Zapstore.
-const Logo = `
- _____                _
-/ _  / __ _ _ __  ___| |_ ___  _ __ ___
-\// / / _` + "`" + ` | '_ \/ __| __/ _ \| '__/ _ \
- / //\ (_| | |_) \__ \ || (_) | | |  __/
-/____/\__,_| .__/|___/\__\___/|_|  \___|
-           |_|
-`
-
 // RunWizard runs the interactive configuration wizard.
 // If defaults is non-nil, those values are used as defaults for prompts.
 func RunWizard(defaults *Config) (*Config, error) {
-	fmt.Print(ui.Title(Logo))
+	fmt.Print(ui.Title(ui.Logo))
 	if defaults != nil {
 		fmt.Println(ui.Title("Edit Configuration"))
 	} else {

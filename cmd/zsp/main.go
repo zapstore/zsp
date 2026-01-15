@@ -67,6 +67,7 @@ func (s *stringSliceFlag) Set(value string) error {
 func init() {
 	flag.Var(&fetchMetadataFlag, "m", "Fetch metadata from source (can be repeated: -m github -m fdroid)")
 	flag.Var(&fetchMetadataFlag, "fetch-metadata", "Fetch metadata from source (can be repeated)")
+	flag.BoolVar(dryRunFlag, "n", false, "Do everything except upload/publish (alias for --dry-run)")
 	flag.BoolVar(versionFlag, "version", false, "Print version and exit")
 	flag.BoolVar(helpFlag, "help", false, "Show help")
 	flag.Usage = usage
@@ -127,7 +128,7 @@ FLAGS
   --port <port>   Custom port for browser preview/signing (default: 17007/17008)
   --overwrite-release  Bypass cache and re-publish even if release unchanged
   --overwrite-app      Re-fetch metadata even if app already exists on relays
-  --dry-run       Parse & build events, but don't upload/publish
+  -n, --dry-run   Parse & build events, but don't upload/publish
   --quiet         Minimal output, no prompts (implies -y)
   --verbose       Debug output (show scores, API responses)
   --no-color      Disable colored output
@@ -199,7 +200,7 @@ func run() error {
 
 	// Handle version flag
 	if *versionFlag {
-		fmt.Print(ui.Title(config.Logo))
+		fmt.Print(ui.Title(ui.Logo))
 		fmt.Printf("zsp version %s\n", version)
 		return nil
 	}
@@ -1009,14 +1010,11 @@ func publish(ctx context.Context, cfg *config.Config) error {
 			}
 		}
 	} else {
-		// Dry run or npub - just resolve URLs without uploading
-		if cfg.Icon != "" && isRemoteURL(cfg.Icon) {
-			iconURL = cfg.Icon
-		}
-		for _, img := range cfg.Images {
-			if isRemoteURL(img) {
-				imageURLs = append(imageURLs, img)
-			}
+		// Dry run or npub - compute URLs without uploading
+		// Images must be downloaded to compute hashes for proper Blossom URLs
+		iconURL, imageURLs, err = resolveURLsWithoutUpload(ctx, cfg, apkInfo, blossomURL, preDownloaded, *quietFlag)
+		if err != nil {
+			return err
 		}
 		// Build events
 		events = nostr.BuildEventSet(nostr.BuildEventSetParams{
@@ -1038,6 +1036,22 @@ func publish(ctx context.Context, cfg *config.Config) error {
 
 	// Dry run - output events and exit
 	if isDryRun {
+		if !*quietFlag {
+			fmt.Println()
+			fmt.Println(ui.Dim("─────────────────────────────────────────────────────────────────────"))
+			fmt.Println(ui.Warning("You are in dry run mode. These events are signed with a dummy key."))
+			fmt.Println(ui.Dim("Use SIGN_WITH to generate real events."))
+			fmt.Println(ui.Dim("─────────────────────────────────────────────────────────────────────"))
+		}
+		if !*yesFlag && !*quietFlag {
+			confirmed, err := ui.Confirm("View events?", true)
+			if err != nil {
+				return fmt.Errorf("confirmation failed: %w", err)
+			}
+			if !confirmed {
+				return nil
+			}
+		}
 		outputEvents(events)
 		return nil
 	}
@@ -1158,13 +1172,25 @@ func publish(ctx context.Context, cfg *config.Config) error {
 	return nil
 }
 
-// outputEvents prints events as JSON Lines (one JSON object per line).
+// outputEvents prints events as formatted, colorized JSON.
 func outputEvents(events *nostr.EventSet) {
-	enc := json.NewEncoder(os.Stdout)
-	enc.Encode(events.AppMetadata)
-	enc.Encode(events.Release)
-	for _, asset := range events.SoftwareAssets {
-		enc.Encode(asset)
+	fmt.Println()
+	fmt.Printf("%s\n", ui.Bold("Kind 32267 (Software Application):"))
+	printColorizedJSON(events.AppMetadata)
+	fmt.Println()
+
+	fmt.Printf("%s\n", ui.Bold("Kind 30063 (Software Release):"))
+	printColorizedJSON(events.Release)
+	fmt.Println()
+
+	for i, asset := range events.SoftwareAssets {
+		assetLabel := "Kind 3063 (Software Asset):"
+		if len(events.SoftwareAssets) > 1 {
+			assetLabel = fmt.Sprintf("Kind 3063 (Software Asset %d):", i+1)
+		}
+		fmt.Printf("%s\n", ui.Bold(assetLabel))
+		printColorizedJSON(asset)
+		fmt.Println()
 	}
 }
 
@@ -2140,6 +2166,85 @@ func uploadWithIndividualSigning(ctx context.Context, cfg *config.Config, apkInf
 			uploadTracker.DoneWithMessage(fmt.Sprintf("APK already exists (%s)", apkResult.URL))
 		} else {
 			uploadTracker.Done()
+		}
+	}
+
+	return iconURL, imageURLs, nil
+}
+
+// resolveURLsWithoutUpload computes Blossom URLs by downloading/reading files and computing hashes,
+// but without actually uploading to Blossom. Used for dry-run and npub modes.
+func resolveURLsWithoutUpload(ctx context.Context, cfg *config.Config, apkInfo *apk.APKInfo, blossomURL string, preDownloaded *preDownloadedImages, quiet bool) (iconURL string, imageURLs []string, err error) {
+	// Process icon
+	if preDownloaded != nil && preDownloaded.Icon != nil {
+		// Use pre-downloaded icon hash
+		iconURL = fmt.Sprintf("%s/%s", blossomURL, preDownloaded.Icon.Hash)
+	} else if cfg.Icon != "" {
+		if isRemoteURL(cfg.Icon) {
+			// Download to compute hash
+			var spinner *ui.Spinner
+			if !quiet {
+				spinner = ui.NewSpinner("Fetching icon (for hash)...")
+				spinner.Start()
+			}
+			_, hashStr, _, err := downloadRemoteImage(ctx, cfg.Icon)
+			if err != nil {
+				if spinner != nil {
+					spinner.StopWithError("Failed to fetch icon")
+				}
+				return "", nil, fmt.Errorf("failed to fetch icon from %s: %w", cfg.Icon, err)
+			}
+			if spinner != nil {
+				spinner.StopWithSuccess("Fetched icon")
+			}
+			iconURL = fmt.Sprintf("%s/%s", blossomURL, hashStr)
+		} else {
+			// Local file - read and compute hash
+			iconPath := resolvePath(cfg.Icon, cfg.BaseDir)
+			iconData, err := os.ReadFile(iconPath)
+			if err != nil {
+				return "", nil, fmt.Errorf("failed to read icon file %s: %w", iconPath, err)
+			}
+			hash := sha256.Sum256(iconData)
+			iconURL = fmt.Sprintf("%s/%s", blossomURL, hex.EncodeToString(hash[:]))
+		}
+	} else if apkInfo.Icon != nil {
+		// Use APK icon hash
+		hash := sha256.Sum256(apkInfo.Icon)
+		iconURL = fmt.Sprintf("%s/%s", blossomURL, hex.EncodeToString(hash[:]))
+	}
+
+	// Process pre-downloaded images first
+	if preDownloaded != nil && len(preDownloaded.Images) > 0 {
+		for _, img := range preDownloaded.Images {
+			imageURLs = append(imageURLs, fmt.Sprintf("%s/%s", blossomURL, img.Hash))
+		}
+	}
+
+	// Process remaining images from config
+	for _, img := range cfg.Images {
+		// Skip remote images that were already handled via pre-download
+		if isRemoteURL(img) && preDownloaded != nil && findPreDownloadedImage(preDownloaded.Images, img) != nil {
+			continue
+		}
+
+		if isRemoteURL(img) {
+			// Download to compute hash
+			_, hashStr, _, err := downloadRemoteImage(ctx, img)
+			if err != nil {
+				// Log warning but continue with other images
+				continue
+			}
+			imageURLs = append(imageURLs, fmt.Sprintf("%s/%s", blossomURL, hashStr))
+		} else {
+			// Local file - read and compute hash
+			imgPath := resolvePath(img, cfg.BaseDir)
+			imgData, err := os.ReadFile(imgPath)
+			if err != nil {
+				return "", nil, fmt.Errorf("failed to read image file %s: %w", imgPath, err)
+			}
+			hash := sha256.Sum256(imgData)
+			imageURLs = append(imageURLs, fmt.Sprintf("%s/%s", blossomURL, hex.EncodeToString(hash[:])))
 		}
 	}
 
