@@ -138,10 +138,40 @@ func sortMetadataSourcesByPriority(sources []string) {
 	}
 }
 
+// MetadataError represents a non-fatal error when fetching metadata from a source.
+type MetadataError struct {
+	Source string
+	Err    error
+}
+
+func (e *MetadataError) Error() string {
+	return fmt.Sprintf("failed to fetch %s metadata: %v", e.Source, e.Err)
+}
+
+// MetadataResult contains the result of fetching metadata from multiple sources.
+type MetadataResult struct {
+	// Errors contains non-fatal errors from individual sources.
+	// The fetch continues even if some sources fail.
+	Errors []*MetadataError
+}
+
+// HasErrors returns true if any metadata sources failed.
+func (r *MetadataResult) HasErrors() bool {
+	return len(r.Errors) > 0
+}
+
 // FetchMetadata fetches metadata from the specified sources and merges into config.
 // Sources can be: "github", "gitlab", "fdroid", "playstore"
 // Only empty fields in config are populated (existing values are preserved).
+// Returns a MetadataResult containing any non-fatal errors from individual sources.
 func (f *MetadataFetcher) FetchMetadata(ctx context.Context, sources []string) error {
+	return f.FetchMetadataWithResult(ctx, sources).firstFatalError()
+}
+
+// FetchMetadataWithResult fetches metadata and returns detailed results including partial failures.
+func (f *MetadataFetcher) FetchMetadataWithResult(ctx context.Context, sources []string) *MetadataResult {
+	result := &MetadataResult{}
+
 	for _, source := range sources {
 		source = strings.TrimSpace(strings.ToLower(source))
 		var meta *AppMetadata
@@ -157,12 +187,18 @@ func (f *MetadataFetcher) FetchMetadata(ctx context.Context, sources []string) e
 		case "playstore":
 			meta, err = f.fetchPlayStoreMetadata(ctx)
 		default:
-			return fmt.Errorf("unknown metadata source: %s", source)
+			result.Errors = append(result.Errors, &MetadataError{
+				Source: source,
+				Err:    fmt.Errorf("unknown metadata source"),
+			})
+			continue
 		}
 
 		if err != nil {
-			// Log warning but continue with other sources
-			fmt.Printf("  Warning: failed to fetch %s metadata: %v\n", source, err)
+			result.Errors = append(result.Errors, &MetadataError{
+				Source: source,
+				Err:    err,
+			})
 			continue
 		}
 
@@ -170,6 +206,12 @@ func (f *MetadataFetcher) FetchMetadata(ctx context.Context, sources []string) e
 		f.mergeMetadata(meta)
 	}
 
+	return result
+}
+
+// firstFatalError returns nil - all metadata errors are non-fatal.
+// This maintains backward compatibility with the original error return.
+func (r *MetadataResult) firstFatalError() error {
 	return nil
 }
 
