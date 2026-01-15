@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"strings"
 
 	"github.com/zapstore/zsp/internal/apk"
@@ -18,7 +19,25 @@ import (
 	"github.com/zapstore/zsp/internal/workflow"
 )
 
+// version is set via -ldflags at build time, or auto-detected from Go module info
 var version = "dev"
+
+// getVersion returns the version string, preferring Go's embedded build info
+// (set when installed via `go install module@version`), falling back to
+// the ldflags-set version, or "dev" if neither is available.
+func getVersion() string {
+	// If version was set via ldflags to something other than "dev", use it
+	if version != "dev" {
+		return version
+	}
+
+	// Try to get version from Go's embedded build info
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+
+	return version
+}
 
 func main() {
 	// Set up signal handler first - this handles Ctrl+C globally
@@ -47,7 +66,7 @@ func run(sigHandler *cli.SignalHandler) int {
 	// Handle version flag
 	if opts.Version {
 		fmt.Print(ui.Title(ui.Logo))
-		fmt.Printf("zsp version %s\n", version)
+		fmt.Printf("zsp version %s\n", getVersion())
 		return 0
 	}
 
