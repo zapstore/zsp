@@ -1,7 +1,7 @@
 BINARY_NAME := zsp
-CMD_PATH := ./cmd/zsp
+CMD_PATH := .
 
-.PHONY: all build build-linux-amd64 clean test install fmt vet
+.PHONY: all build build-linux-amd64 build-linux-arm64 clean test install fmt vet
 
 all: build
 
@@ -11,8 +11,11 @@ build:
 build-linux-amd64:
 	GOOS=linux GOARCH=amd64 go build -o $(BINARY_NAME)-linux-amd64 $(CMD_PATH)
 
+build-linux-arm64:
+	GOOS=linux GOARCH=arm64 go build -o $(BINARY_NAME)-linux-arm64 $(CMD_PATH)
+
 clean:
-	rm -f $(BINARY_NAME) $(BINARY_NAME)-linux-amd64
+	rm -f $(BINARY_NAME) $(BINARY_NAME)-linux-amd64 $(BINARY_NAME)-linux-arm64
 	go clean
 
 test:
