@@ -52,6 +52,7 @@ type UploadParams struct {
 	Variant       string
 	Commit        string
 	Opts          *cli.Options
+	Legacy        bool
 }
 
 // uploadItem represents a file to upload with its auth event.
@@ -284,16 +285,23 @@ func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.Ev
 		}
 	}
 
+	var releaseURL string
+	if params.Release != nil {
+		releaseURL = params.Release.URL
+	}
+
 	events := nostr.BuildEventSet(nostr.BuildEventSetParams{
-		APKInfo:     params.APKInfo,
-		Config:      params.Cfg,
-		Pubkey:      params.Pubkey,
-		OriginalURL: params.OriginalURL,
-		IconURL:     iconURL,
-		ImageURLs:   imageURLs,
-		Changelog:   releaseNotes,
-		Variant:     params.Variant,
-		Commit:      params.Commit,
+		APKInfo:      params.APKInfo,
+		Config:       params.Cfg,
+		Pubkey:       params.Pubkey,
+		OriginalURL:  params.OriginalURL,
+		IconURL:      iconURL,
+		ImageURLs:    imageURLs,
+		Changelog:    releaseNotes,
+		Variant:      params.Variant,
+		Commit:       params.Commit,
+		ReleaseURL:   releaseURL,
+		LegacyFormat: params.Legacy,
 	})
 
 	// Pre-compute asset event IDs

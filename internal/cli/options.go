@@ -29,6 +29,7 @@ type Options struct {
 	SkipPreview      bool
 	OverwriteRelease bool
 	OverwriteApp     bool
+	Legacy           bool
 
 	// Mode flags
 	ExtractAPK bool
@@ -77,6 +78,7 @@ func ParseFlags() (*Options, []string) {
 	flag.BoolVar(&opts.OverwriteRelease, "overwrite-release", false, "Bypass cache and re-publish even if release unchanged")
 	flag.BoolVar(&opts.OverwriteApp, "overwrite-app", false, "Re-fetch metadata even if app already exists on relays")
 	flag.BoolVar(&opts.Wizard, "wizard", false, "Run interactive wizard (uses existing config as defaults)")
+	flag.BoolVar(&opts.Legacy, "legacy", true, "Use legacy event format for relay.zapstore.dev compatibility")
 	flag.BoolVar(&opts.Version, "v", false, "Print version and exit")
 	flag.BoolVar(&opts.Version, "version", false, "Print version and exit")
 	flag.BoolVar(&opts.Help, "h", false, "Show help")

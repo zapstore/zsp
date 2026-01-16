@@ -157,6 +157,7 @@ type githubRelease struct {
 	Prerelease  bool          `json:"prerelease"`
 	Draft       bool          `json:"draft"`
 	PublishedAt string        `json:"published_at"`
+	HTMLURL     string        `json:"html_url"`
 	Assets      []githubAsset `json:"assets"`
 }
 
@@ -265,6 +266,7 @@ func (g *GitHub) convertRelease(ghRelease *githubRelease) *Release {
 		Changelog:  ghRelease.Body,
 		Assets:     assets,
 		PreRelease: ghRelease.Prerelease,
+		URL:        ghRelease.HTMLURL,
 	}
 }
 

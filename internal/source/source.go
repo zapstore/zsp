@@ -37,6 +37,7 @@ type Release struct {
 	Changelog  string   // Release notes/changelog
 	Assets     []*Asset // Available APK assets
 	PreRelease bool     // Whether this is a pre-release
+	URL        string   // Release page URL (e.g., https://github.com/user/repo/releases/tag/v1.0)
 }
 
 // Source is the interface for APK sources.
@@ -245,6 +246,20 @@ func GetCachedDownload(downloadURL, filename string) string {
 		return "" // Not cached or invalid
 	}
 	return cachedPath
+}
+
+// DeleteCachedDownload removes a cached download file.
+// Returns nil if the file doesn't exist or was successfully deleted.
+func DeleteCachedDownload(downloadURL, filename string) error {
+	cacheDir := DownloadCacheDir()
+	cacheKey := DownloadCacheKey(downloadURL)
+	cachedPath := filepath.Join(cacheDir, cacheKey+"_"+filepath.Base(filename))
+
+	err := os.Remove(cachedPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
 
 // SaveToDownloadCache saves a downloaded file to the cache.

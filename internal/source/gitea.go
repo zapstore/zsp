@@ -64,6 +64,7 @@ type giteaRelease struct {
 	Prerelease  bool         `json:"prerelease"`
 	CreatedAt   string       `json:"created_at"`
 	PublishedAt string       `json:"published_at"`
+	HTMLURL     string       `json:"html_url"`
 	Assets      []giteaAsset `json:"assets"`
 }
 
@@ -201,6 +202,7 @@ func (g *Gitea) convertRelease(gtRelease *giteaRelease) *Release {
 		Changelog:  gtRelease.Body,
 		Assets:     assets,
 		PreRelease: gtRelease.Prerelease,
+		URL:        gtRelease.HTMLURL,
 	}
 }
 

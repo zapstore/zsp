@@ -65,7 +65,10 @@ type gitlabRelease struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	ReleasedAt  string `json:"released_at"`
-	Assets      struct {
+	Links       struct {
+		Self string `json:"self"` // Release page URL
+	} `json:"_links"`
+	Assets struct {
 		Links []gitlabAssetLink `json:"links"`
 	} `json:"assets"`
 }
@@ -171,6 +174,7 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		TagName:   glRelease.TagName,
 		Changelog: glRelease.Description,
 		Assets:    assets,
+		URL:       glRelease.Links.Self,
 	}, nil
 }
 

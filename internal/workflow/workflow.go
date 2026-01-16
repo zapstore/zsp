@@ -602,15 +602,17 @@ func (p *Publisher) buildEventsWithoutUpload(ctx context.Context) error {
 	}
 
 	p.events = nostr.BuildEventSet(nostr.BuildEventSetParams{
-		APKInfo:     p.apkInfo,
-		Config:      p.cfg,
-		Pubkey:      p.signer.PublicKey(),
-		OriginalURL: p.selectedAsset.URL,
-		IconURL:     p.iconURL,
-		ImageURLs:   p.imageURLs,
-		Changelog:   p.releaseNotes,
-		Variant:     p.matchVariant(),
-		Commit:      p.cfg.Commit,
+		APKInfo:      p.apkInfo,
+		Config:       p.cfg,
+		Pubkey:       p.signer.PublicKey(),
+		OriginalURL:  p.selectedAsset.URL,
+		IconURL:      p.iconURL,
+		ImageURLs:    p.imageURLs,
+		Changelog:    p.releaseNotes,
+		Variant:      p.matchVariant(),
+		Commit:       p.cfg.Commit,
+		ReleaseURL:   p.getReleaseURL(),
+		LegacyFormat: p.opts.Legacy,
 	})
 
 	relayHint := p.getRelayHint()
@@ -641,6 +643,7 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 			Variant:       p.matchVariant(),
 			Commit:        p.cfg.Commit,
 			Opts:          p.opts,
+			Legacy:        p.opts.Legacy,
 		})
 		return err
 	}
@@ -661,15 +664,17 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 	}
 
 	p.events = nostr.BuildEventSet(nostr.BuildEventSetParams{
-		APKInfo:     p.apkInfo,
-		Config:      p.cfg,
-		Pubkey:      p.signer.PublicKey(),
-		OriginalURL: p.selectedAsset.URL,
-		IconURL:     p.iconURL,
-		ImageURLs:   p.imageURLs,
-		Changelog:   p.releaseNotes,
-		Variant:     p.matchVariant(),
-		Commit:      p.cfg.Commit,
+		APKInfo:      p.apkInfo,
+		Config:       p.cfg,
+		Pubkey:       p.signer.PublicKey(),
+		OriginalURL:  p.selectedAsset.URL,
+		IconURL:      p.iconURL,
+		ImageURLs:    p.imageURLs,
+		Changelog:    p.releaseNotes,
+		Variant:      p.matchVariant(),
+		Commit:       p.cfg.Commit,
+		ReleaseURL:   p.getReleaseURL(),
+		LegacyFormat: p.opts.Legacy,
 	})
 
 	return nostr.SignEventSet(ctx, p.signer, p.events, relayHint)
@@ -685,6 +690,14 @@ func (p *Publisher) getRelayHint() string {
 		}
 	}
 	return relayHint
+}
+
+// getReleaseURL returns the release page URL (for legacy format).
+func (p *Publisher) getReleaseURL() string {
+	if p.release != nil {
+		return p.release.URL
+	}
+	return ""
 }
 
 // matchVariant returns the variant name if the APK matches a variant pattern.
@@ -804,6 +817,7 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 	// Commit or clear cache
 	if allSuccess {
 		p.commitCache()
+		p.deleteCachedAPK()
 	} else {
 		p.clearCache()
 		if p.opts.Verbose {
@@ -836,6 +850,14 @@ func (p *Publisher) commitCache() {
 	if cacheCommitter, ok := p.src.(source.CacheCommitter); ok {
 		_ = cacheCommitter.CommitCache()
 	}
+}
+
+// deleteCachedAPK removes the cached APK file after successful publishing.
+func (p *Publisher) deleteCachedAPK() {
+	if p.selectedAsset == nil || p.selectedAsset.URL == "" {
+		return // Local file or no URL, nothing to delete
+	}
+	_ = source.DeleteCachedDownload(p.selectedAsset.URL, p.selectedAsset.Name)
 }
 
 // Close releases resources.

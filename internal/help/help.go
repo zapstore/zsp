@@ -364,6 +364,7 @@ FLAGS
   --port <port>   Custom port for browser preview/signing (default: 17007/17008)
   --overwrite-release  Bypass cache and re-publish even if release unchanged
   --overwrite-app      Re-fetch metadata even if app already exists on relays
+  --legacy        Use legacy event format (default: true, use --legacy=false for new format)
   -n, --dry-run   Parse & build events, but don't upload/publish
   --quiet         Minimal output, no prompts (implies -y)
   --verbose       Debug output (show scores, API responses)

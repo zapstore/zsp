@@ -583,3 +583,138 @@ func TestBuildEventSetMultipleArchitectures(t *testing.T) {
 	}
 }
 
+// TestBuildEventSetLegacyFormat tests the legacy format for relay.zapstore.dev compatibility
+func TestBuildEventSetLegacyFormat(t *testing.T) {
+	apkInfo := &apk.APKInfo{
+		PackageID:       "com.example.app",
+		VersionName:     "1.0.0",
+		VersionCode:     42,
+		Label:           "Example App",
+		SHA256:          "abc123def456",
+		FileSize:        1024000,
+		CertFingerprint: "certfp123",
+		MinSDK:          26,
+		TargetSDK:       34,
+		FilePath:        "/path/to/app.apk",
+		Architectures:   []string{"arm64-v8a"},
+	}
+
+	cfg := &config.Config{
+		Repository: "https://github.com/example/app",
+		License:    "MIT",
+	}
+	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	releaseURL := "https://github.com/example/app/releases/tag/v1.0.0"
+	commit := "abc123"
+
+	events := BuildEventSet(BuildEventSetParams{
+		APKInfo:      apkInfo,
+		Config:       cfg,
+		Pubkey:       pubkey,
+		ReleaseURL:   releaseURL,
+		Commit:       commit,
+		LegacyFormat: true,
+	})
+
+	// Test App Metadata event (32267)
+	appMeta := events.AppMetadata
+	if appMeta.Kind != KindAppMetadata {
+		t.Errorf("expected app metadata kind %d, got %d", KindAppMetadata, appMeta.Kind)
+	}
+
+	// Legacy format should have a-tag pointing to release (30063)
+	aTags := filterExactTag(appMeta.Tags, "a")
+	if len(aTags) != 1 {
+		t.Errorf("expected 1 a-tag in legacy app metadata, got %d", len(aTags))
+	} else {
+		expectedATag := "30063:" + pubkey + ":com.example.app@1.0.0"
+		if aTags[0][1] != expectedATag {
+			t.Errorf("expected a-tag %q, got %q", expectedATag, aTags[0][1])
+		}
+	}
+
+	// Test Release event (30063)
+	release := events.Release
+	if release.Kind != KindRelease {
+		t.Errorf("expected release kind %d, got %d", KindRelease, release.Kind)
+	}
+
+	// Legacy format should have url and r tags
+	urlTags := filterExactTag(release.Tags, "url")
+	if len(urlTags) != 1 || urlTags[0][1] != releaseURL {
+		t.Errorf("expected url tag with %q, got %v", releaseURL, urlTags)
+	}
+	rTags := filterExactTag(release.Tags, "r")
+	if len(rTags) != 1 || rTags[0][1] != releaseURL {
+		t.Errorf("expected r tag with %q, got %v", releaseURL, rTags)
+	}
+
+	// Legacy format should have commit tag on release
+	commitTags := filterExactTag(release.Tags, "commit")
+	if len(commitTags) != 1 || commitTags[0][1] != commit {
+		t.Errorf("expected commit tag with %q, got %v", commit, commitTags)
+	}
+
+	// Legacy format should have a-tag pointing back to app metadata (32267)
+	releaseATags := filterExactTag(release.Tags, "a")
+	if len(releaseATags) != 1 {
+		t.Errorf("expected 1 a-tag in legacy release, got %d", len(releaseATags))
+	} else {
+		expectedATag := "32267:" + pubkey + ":com.example.app"
+		if releaseATags[0][1] != expectedATag {
+			t.Errorf("expected a-tag %q, got %q", expectedATag, releaseATags[0][1])
+		}
+	}
+
+	// Legacy format should NOT have i tag or c (channel) tag
+	iTags := filterExactTag(release.Tags, "i")
+	if len(iTags) != 0 {
+		t.Errorf("legacy format should not have i tag, got %v", iTags)
+	}
+	cTags := filterExactTag(release.Tags, "c")
+	if len(cTags) != 0 {
+		t.Errorf("legacy format should not have c (channel) tag, got %v", cTags)
+	}
+
+	// Test Asset event (should be kind 1063 in legacy mode)
+	if len(events.SoftwareAssets) != 1 {
+		t.Fatalf("expected 1 asset event, got %d", len(events.SoftwareAssets))
+	}
+	asset := events.SoftwareAssets[0]
+	if asset.Kind != KindFileMetadataLegacy {
+		t.Errorf("expected legacy asset kind %d, got %d", KindFileMetadataLegacy, asset.Kind)
+	}
+
+	// Legacy format should have content = "packageId@version"
+	expectedContent := "com.example.app@1.0.0"
+	if asset.Content != expectedContent {
+		t.Errorf("expected asset content %q, got %q", expectedContent, asset.Content)
+	}
+
+	// Legacy format should use apk_signature_hash instead of apk_certificate_hash
+	sigHashTags := filterExactTag(asset.Tags, "apk_signature_hash")
+	if len(sigHashTags) != 1 || sigHashTags[0][1] != "certfp123" {
+		t.Errorf("expected apk_signature_hash tag, got %v", sigHashTags)
+	}
+	certHashTags := filterExactTag(asset.Tags, "apk_certificate_hash")
+	if len(certHashTags) != 0 {
+		t.Errorf("legacy format should not have apk_certificate_hash tag, got %v", certHashTags)
+	}
+
+	// Legacy format should use min_sdk_version/target_sdk_version
+	minSDKTags := filterExactTag(asset.Tags, "min_sdk_version")
+	if len(minSDKTags) != 1 || minSDKTags[0][1] != "26" {
+		t.Errorf("expected min_sdk_version tag with 26, got %v", minSDKTags)
+	}
+	targetSDKTags := filterExactTag(asset.Tags, "target_sdk_version")
+	if len(targetSDKTags) != 1 || targetSDKTags[0][1] != "34" {
+		t.Errorf("expected target_sdk_version tag with 34, got %v", targetSDKTags)
+	}
+
+	// Legacy format should NOT have i tag, filename, variant, or commit on asset
+	assetITags := filterExactTag(asset.Tags, "i")
+	if len(assetITags) != 0 {
+		t.Errorf("legacy asset should not have i tag, got %v", assetITags)
+	}
+}
+
