@@ -9,6 +9,9 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 )
 
+// KindProfile is the kind for profile metadata events (NIP-01).
+const KindProfile = 0
+
 const (
 	// DefaultRelay is the default relay URL.
 	DefaultRelay = "wss://relay.zapstore.dev"
@@ -221,4 +224,90 @@ func (p *Publisher) CheckExistingApp(ctx context.Context, identifier string) (*E
 	}
 
 	return nil, nil
+}
+
+// FetchIdentityProof queries relays for a kind 30509 identity proof event.
+// If spkifp is provided, looks for that specific identity; otherwise returns any identity proof.
+// Returns nil if no matching event is found.
+func (p *Publisher) FetchIdentityProof(ctx context.Context, pubkey, spkifp string) (*nostr.Event, error) {
+	filter := nostr.Filter{
+		Kinds:   []int{KindIdentityProof},
+		Authors: []string{pubkey},
+		Limit:   1,
+	}
+
+	// If specific SPKIFP provided, filter by d tag
+	if spkifp != "" {
+		filter.Tags = nostr.TagMap{
+			"d": []string{spkifp},
+		}
+	}
+
+	// Query each relay until we find an identity proof
+	for _, url := range p.relayURLs {
+		event, err := p.queryRelay(ctx, url, filter)
+		if err != nil {
+			// Log error but continue to other relays
+			continue
+		}
+		if event != nil {
+			return event, nil
+		}
+	}
+
+	return nil, nil
+}
+
+// FetchAllIdentityProofs queries relays for all kind 30509 identity proof events from a pubkey.
+func (p *Publisher) FetchAllIdentityProofs(ctx context.Context, pubkey string) ([]*nostr.Event, error) {
+	filter := nostr.Filter{
+		Kinds:   []int{KindIdentityProof},
+		Authors: []string{pubkey},
+		Limit:   100,
+	}
+
+	var allEvents []*nostr.Event
+	seen := make(map[string]bool)
+
+	// Query each relay
+	for _, url := range p.relayURLs {
+		events, err := p.queryRelayMultiple(ctx, url, filter)
+		if err != nil {
+			continue
+		}
+		for _, event := range events {
+			if !seen[event.ID] {
+				seen[event.ID] = true
+				allEvents = append(allEvents, event)
+			}
+		}
+	}
+
+	return allEvents, nil
+}
+
+// queryRelayMultiple queries a single relay and returns all matching events.
+func (p *Publisher) queryRelayMultiple(ctx context.Context, url string, filter nostr.Filter) ([]*nostr.Event, error) {
+	ctx, cancel := context.WithTimeout(ctx, RelayTimeout)
+	defer cancel()
+
+	relay, err := nostr.RelayConnect(ctx, url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect: %w", err)
+	}
+	defer relay.Close()
+
+	return relay.QuerySync(ctx, filter)
+}
+
+// BuildIdentityProofEvent creates a kind 30509 identity proof event per NIP-C1.
+// The createdAt timestamp must match the one used when signing the proof message.
+func BuildIdentityProofEvent(tags nostr.Tags, pubkey string, createdAt int64) *nostr.Event {
+	return &nostr.Event{
+		Kind:      KindIdentityProof,
+		PubKey:    pubkey,
+		CreatedAt: nostr.Timestamp(createdAt),
+		Tags:      tags,
+		Content:   "",
+	}
 }

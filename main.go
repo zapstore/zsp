@@ -2,17 +2,24 @@ package main
 
 import (
 	"context"
+	"crypto"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 
+	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip19"
 	"github.com/zapstore/zsp/internal/apk"
 	"github.com/zapstore/zsp/internal/cli"
 	"github.com/zapstore/zsp/internal/config"
 	"github.com/zapstore/zsp/internal/help"
+	"github.com/zapstore/zsp/internal/identity"
+	nostrpkg "github.com/zapstore/zsp/internal/nostr"
 	"github.com/zapstore/zsp/internal/picker"
 	"github.com/zapstore/zsp/internal/source"
 	"github.com/zapstore/zsp/internal/ui"
@@ -97,6 +104,32 @@ func run(sigHandler *cli.SignalHandler) int {
 		return 0
 	}
 
+	// Handle --link-identity flag
+	if opts.LinkIdentity != "" {
+		if err := runLinkIdentity(ctx, opts); err != nil {
+			if errors.Is(err, identity.ErrJKSFormat) {
+				fmt.Fprint(os.Stderr, identity.JKSConversionHelp(opts.LinkIdentity))
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	// Handle --verify-identity flag
+	if opts.VerifyIdentity != "" {
+		if err := runVerifyIdentity(ctx, opts); err != nil {
+			if errors.Is(err, identity.ErrJKSFormat) {
+				fmt.Fprint(os.Stderr, identity.JKSConversionHelp(opts.VerifyIdentity))
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
 	// Load configuration
 	cfg, err := loadConfig(opts, args)
 	if err != nil {
@@ -135,13 +168,13 @@ func run(sigHandler *cli.SignalHandler) int {
 
 // runPublish executes the publish workflow.
 func runPublish(ctx context.Context, opts *cli.Options, cfg *config.Config) error {
-	publisher, err := workflow.NewPublisher(opts, cfg)
+	pub, err := workflow.NewPublisher(opts, cfg)
 	if err != nil {
 		return err
 	}
-	defer publisher.Close()
+	defer pub.Close()
 
-	return publisher.Execute(ctx)
+	return pub.Execute(ctx)
 }
 
 // loadConfig loads configuration from various sources.
@@ -354,4 +387,511 @@ func checkAPK(ctx context.Context, opts *cli.Options, args []string) error {
 
 	fmt.Println(apkInfo.PackageID)
 	return nil
+}
+
+// runLinkIdentity handles the --link-identity flag for cryptographic identity proofs (NIP-C1).
+func runLinkIdentity(ctx context.Context, opts *cli.Options) error {
+	filePath := opts.LinkIdentity
+
+	// Check file exists
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return fmt.Errorf("file not found: %s", filePath)
+	}
+
+	// Parse expiry duration
+	expiry, err := cli.ParseExpiryDuration(opts.IdentityExpiry)
+	if err != nil {
+		return fmt.Errorf("invalid --identity-expiry: %w", err)
+	}
+
+	// 1. Load x509 key and certificate based on file type
+	privateKey, cert, err := loadX509FromFile(filePath)
+	if err != nil {
+		return err
+	}
+
+	// Compute SPKIFP from cert
+	certSPKIFP, err := identity.ComputeSPKIFP(cert)
+	if err != nil {
+		return fmt.Errorf("failed to compute SPKIFP: %w", err)
+	}
+
+	// Show certificate summary
+	ui.PrintSectionHeader("Certificate Summary")
+	ui.PrintKeyValue("SPKIFP", certSPKIFP)
+	ui.PrintKeyValue("Validity", fmt.Sprintf("%d year(s)", int(expiry.Hours()/24/365)))
+
+	// 2. Get signWith config
+	signWith := config.GetSignWith()
+	if signWith == "" {
+		if opts.Quiet {
+			return fmt.Errorf("SIGN_WITH environment variable is required")
+		}
+		ui.PrintSectionHeader("Signing Setup")
+		signWith, err = config.PromptSignWith()
+		if err != nil {
+			return fmt.Errorf("signing setup failed: %w", err)
+		}
+	}
+
+	// 3. Create publisher with identity-specific relays
+	publisher := nostrpkg.NewPublisher(opts.IdentityRelays)
+
+	// 4. Try to get pubkey without opening browser (for nsec/npub/hex)
+	// This allows checking existing proofs BEFORE browser opens
+	pubkeyHex, canCheckBeforeSigner := extractPubkeyFromSignWith(signWith)
+
+	if canCheckBeforeSigner {
+		// Check for existing identity proof with same SPKIFP (with spinner)
+		checkSpinner := ui.NewSpinner("Checking existing identity proofs...")
+		checkSpinner.Start()
+		existingProof, err := publisher.FetchIdentityProof(ctx, pubkeyHex, certSPKIFP)
+		if err != nil {
+			checkSpinner.StopWithWarning("Could not check existing proofs")
+		} else if existingProof != nil {
+			checkSpinner.StopWithSuccess("Found existing proof (will be replaced)")
+		} else {
+			checkSpinner.StopWithSuccess("No existing proof for this SPKIFP")
+		}
+	}
+
+	// 5. Create signer (browser opens here for browser signers)
+	signer, err := nostrpkg.NewSignerWithOptions(ctx, signWith, nostrpkg.SignerOptions{
+		Port: opts.Port,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create signer: %w", err)
+	}
+	defer signer.Close()
+
+	// Get pubkey from signer (needed for browser/bunker signers)
+	if !canCheckBeforeSigner {
+		pubkeyHex = signer.PublicKey()
+
+		// Now check for existing proofs
+		checkSpinner := ui.NewSpinner("Checking existing identity proofs...")
+		checkSpinner.Start()
+		existingProof, err := publisher.FetchIdentityProof(ctx, pubkeyHex, certSPKIFP)
+		if err != nil {
+			checkSpinner.StopWithWarning("Could not check existing proofs")
+		} else if existingProof != nil {
+			checkSpinner.StopWithSuccess("Found existing proof (will be replaced)")
+		} else {
+			checkSpinner.StopWithSuccess("No existing proof for this SPKIFP")
+		}
+	}
+
+	// 6. Generate identity proof
+	proof, err := identity.GenerateIdentityProof(privateKey, pubkeyHex, &identity.IdentityProofOptions{
+		Expiry: expiry,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to generate identity proof: %w", err)
+	}
+
+	// 7. Build kind 30509 identity proof event (CreatedAt must match the signed message)
+	identityTags := proof.ToEventTags()
+	identityEvent := nostrpkg.BuildIdentityProofEvent(identityTags, pubkeyHex, proof.CreatedAt)
+
+	// 8. Sign the identity event with Nostr key
+	signSpinner := ui.NewSpinner("Signing identity event...")
+	signSpinner.Start()
+	if err := signer.Sign(ctx, identityEvent); err != nil {
+		signSpinner.StopWithError("Failed to sign")
+		return fmt.Errorf("failed to sign identity event: %w", err)
+	}
+	signSpinner.StopWithSuccess("Signed identity event")
+
+	// 9. Dry run: show event and exit
+	if opts.DryRun {
+		fmt.Println()
+		fmt.Println(ui.Dim("─────────────────────────────────────────────────────────────────────"))
+		fmt.Println(ui.Warning("You are in dry run mode. Event was NOT published."))
+		fmt.Println(ui.Dim("─────────────────────────────────────────────────────────────────────"))
+		fmt.Println()
+		fmt.Printf("%s\n", ui.Bold("Kind 30509 (Cryptographic Identity Proof):"))
+		printIdentityEventJSON(identityEvent)
+		return nil
+	}
+
+	// Convert pubkey to npub for display
+	npub, err := nip19.EncodePublicKey(pubkeyHex)
+	if err != nil {
+		return fmt.Errorf("failed to encode public key: %w", err)
+	}
+
+	// 10. Interactive menu for preview/publish (like main workflow)
+	if !opts.Yes {
+		ui.PrintSectionHeader("Ready to Publish")
+		fmt.Printf("  SPKIFP: %s\n", proof.SPKIFP)
+		fmt.Printf("  Nostr pubkey: %s\n", npub)
+		fmt.Printf("  Created: %s\n", proof.CreatedAtTime().Format("2006-01-02 15:04:05 UTC"))
+		fmt.Printf("  Expires: %s\n", proof.ExpiryTime().Format("2006-01-02 15:04:05 UTC"))
+		fmt.Printf("  Target: %s\n", strings.Join(opts.IdentityRelays, ", "))
+		fmt.Println()
+
+		for {
+			options := []string{
+				"Preview event (JSON)",
+				"Publish now",
+				"Exit without publishing",
+			}
+
+			idx, err := ui.SelectOption("Choose an option:", options, 1)
+			if err != nil {
+				return fmt.Errorf("selection failed: %w", err)
+			}
+
+			switch idx {
+			case 0:
+				// Preview JSON
+				fmt.Println()
+				fmt.Printf("%s\n", ui.Bold("Kind 30509 (Cryptographic Identity Proof):"))
+				printIdentityEventJSON(identityEvent)
+				fmt.Println()
+			case 1:
+				// Publish
+				return publishIdentityProof(ctx, publisher, identityEvent, opts)
+			case 2:
+				// Exit
+				fmt.Println(ui.Warning("Aborted - identity proof was NOT published"))
+				return nil
+			}
+		}
+	}
+
+	// Auto-publish with -y flag
+	return publishIdentityProof(ctx, publisher, identityEvent, opts)
+}
+
+// publishIdentityProof publishes the identity proof event to relays.
+func publishIdentityProof(ctx context.Context, publisher *nostrpkg.Publisher, event *nostr.Event, opts *cli.Options) error {
+	publishSpinner := ui.NewSpinner(fmt.Sprintf("Publishing to %d relays...", len(opts.IdentityRelays)))
+	publishSpinner.Start()
+
+	results := publisher.Publish(ctx, event)
+
+	var successCount int
+	var failures []string
+	for _, r := range results {
+		if r.Success {
+			successCount++
+		} else {
+			failures = append(failures, fmt.Sprintf("  ✗ %s: %v", r.RelayURL, r.Error))
+		}
+	}
+
+	if successCount == len(results) {
+		publishSpinner.StopWithSuccess("Published successfully")
+	} else if successCount > 0 {
+		publishSpinner.StopWithWarning("Published with some failures")
+	} else {
+		publishSpinner.StopWithError("Failed to publish")
+	}
+
+	// Show individual relay results
+	for _, r := range results {
+		if r.Success {
+			fmt.Printf("  ✓ %s\n", r.RelayURL)
+		}
+	}
+	for _, f := range failures {
+		fmt.Println(f)
+	}
+
+	if successCount == 0 {
+		return fmt.Errorf("failed to publish to any relay")
+	}
+
+	ui.PrintCompletionSummary(true, fmt.Sprintf("Identity proof published to %d relay(s)", successCount))
+	return nil
+}
+
+// printIdentityEventJSON prints an identity event as colorized JSON.
+func printIdentityEventJSON(event *nostr.Event) {
+	data, err := json.MarshalIndent(event, "", "  ")
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	fmt.Println(ui.ColorizeJSON(string(data)))
+}
+
+// runVerifyIdentity handles the --verify-identity flag to verify cryptographic identity proofs (NIP-C1).
+func runVerifyIdentity(ctx context.Context, opts *cli.Options) error {
+	filePath := opts.VerifyIdentity
+
+	// Check file exists
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return fmt.Errorf("file not found: %s", filePath)
+	}
+
+	var cert *x509.Certificate
+	var err error
+
+	// Check if file is an APK
+	lower := strings.ToLower(filePath)
+	isAPK := strings.HasSuffix(lower, ".apk")
+
+	if isAPK {
+		// Extract certificate from APK
+		ui.PrintSectionHeader("APK Certificate")
+		cert, err = apk.ExtractCertificate(filePath)
+		if err != nil {
+			return fmt.Errorf("failed to extract certificate from APK: %w", err)
+		}
+		fmt.Printf("  File: %s\n", filepath.Base(filePath))
+	} else {
+		// Load x509 certificate from file
+		_, cert, err = loadX509FromFile(filePath)
+		if err != nil {
+			return err
+		}
+		ui.PrintSectionHeader("Certificate Loaded")
+	}
+
+	// Display certificate info
+	if cert.Subject.CommonName != "" {
+		fmt.Printf("  Subject: %s\n", cert.Subject.CommonName)
+	}
+	if len(cert.Subject.Organization) > 0 {
+		fmt.Printf("  Organization: %s\n", cert.Subject.Organization[0])
+	}
+	fmt.Printf("  Valid: %s to %s\n",
+		cert.NotBefore.Format("2006-01-02"),
+		cert.NotAfter.Format("2006-01-02"))
+
+	// Compute SPKIFP from certificate
+	certSPKIFP, err := identity.ComputeSPKIFP(cert)
+	if err != nil {
+		return fmt.Errorf("failed to compute SPKIFP: %w", err)
+	}
+	fmt.Printf("  SPKIFP: %s\n", certSPKIFP)
+
+	// 2. Get pubkey to verify - for APKs, prompt for npub directly
+	var pubkeyHex string
+	if isAPK {
+		// For APKs, ask for the npub to verify against
+		fmt.Println()
+		npubInput, err := ui.Prompt("Enter npub to verify: ")
+		if err != nil {
+			return fmt.Errorf("failed to read input: %w", err)
+		}
+		npubInput = strings.TrimSpace(npubInput)
+		if !strings.HasPrefix(npubInput, "npub1") {
+			return fmt.Errorf("invalid npub format")
+		}
+		_, pubkey, err := nip19.Decode(npubInput)
+		if err != nil {
+			return fmt.Errorf("failed to decode npub: %w", err)
+		}
+		var ok bool
+		pubkeyHex, ok = pubkey.(string)
+		if !ok {
+			return fmt.Errorf("invalid npub")
+		}
+	} else {
+		// For certificate files, use SIGN_WITH
+		signWith := config.GetSignWith()
+		if signWith == "" {
+			if opts.Quiet {
+				return fmt.Errorf("SIGN_WITH environment variable is required")
+			}
+			ui.PrintSectionHeader("Signing Setup")
+			signWith, err = config.PromptSignWith()
+			if err != nil {
+				return fmt.Errorf("signing setup failed: %w", err)
+			}
+		}
+
+		// Create signer to get public key
+		signer, err := nostrpkg.NewSignerWithOptions(ctx, signWith, nostrpkg.SignerOptions{
+			Port: opts.Port,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create signer: %w", err)
+		}
+		defer signer.Close()
+
+		pubkeyHex = signer.PublicKey()
+	}
+
+	// Convert pubkey to npub for display
+	npub, err := nip19.EncodePublicKey(pubkeyHex)
+	if err != nil {
+		return fmt.Errorf("failed to encode public key: %w", err)
+	}
+
+	fmt.Println()
+	ui.PrintSectionHeader("Fetching Identity Proof")
+	fmt.Printf("  Nostr pubkey: %s\n", npub)
+	fmt.Printf("  Relays: %v\n", opts.IdentityRelays)
+
+	// 5. Fetch identity proof for this SPKIFP from relays
+	publisher := nostrpkg.NewPublisher(opts.IdentityRelays)
+	identityEvent, err := publisher.FetchIdentityProof(ctx, pubkeyHex, certSPKIFP)
+	if err != nil {
+		return fmt.Errorf("failed to fetch identity proof: %w", err)
+	}
+	if identityEvent == nil {
+		return fmt.Errorf("no identity proof found for SPKIFP %s", certSPKIFP)
+	}
+
+	fmt.Printf("  Found identity proof (created: %s)\n", identityEvent.CreatedAt.Time().Format("2006-01-02 15:04:05 UTC"))
+
+	// 6. Parse the identity event
+	proof, err := identity.ParseIdentityProofFromEvent(identityEvent)
+	if err != nil {
+		return fmt.Errorf("failed to parse identity event: %w", err)
+	}
+
+	fmt.Println()
+	ui.PrintSectionHeader("Kind 30509 Event")
+	eventJSON, _ := json.MarshalIndent(identityEvent, "", "  ")
+	fmt.Println(string(eventJSON))
+
+	// 7. Verify the proof against the certificate
+	fmt.Println()
+	ui.PrintSectionHeader("Verification Results")
+	result := identity.VerifyIdentityProofWithCert(proof, identityEvent, pubkeyHex, cert)
+
+	fmt.Printf("  SPKIFP: %s\n", result.SPKIFP)
+	fmt.Printf("  Expiry: %s\n", result.ExpiryTime.Format("2006-01-02 15:04:05 UTC"))
+
+	// Show individual check results
+	if result.SPKIFPMatch {
+		fmt.Printf("  SPKIFP match: %s\n", ui.Success("YES"))
+	} else {
+		fmt.Printf("  SPKIFP match: %s\n", ui.Error("NO"))
+	}
+
+	if result.Revoked {
+		fmt.Printf("  Status: %s", ui.Error("REVOKED"))
+		if result.RevokeReason != "" {
+			fmt.Printf(" (%s)", result.RevokeReason)
+		}
+		fmt.Println()
+	} else if result.Expired {
+		fmt.Printf("  Status: %s\n", ui.Warning("EXPIRED"))
+	} else {
+		fmt.Printf("  Status: %s\n", ui.Success("ACTIVE"))
+	}
+
+	if result.Error != nil {
+		fmt.Printf("  Signature: %s\n", ui.Error("INVALID"))
+		fmt.Printf("  Error: %v\n", result.Error)
+	} else if result.Valid {
+		fmt.Printf("  Signature: %s\n", ui.Success("VALID"))
+	}
+
+	fmt.Println()
+	if result.Valid && result.SPKIFPMatch && !result.Expired && !result.Revoked {
+		fmt.Println(ui.Success("✓ Cryptographic identity proof is fully verified"))
+	} else if result.Valid && result.SPKIFPMatch && result.Expired {
+		fmt.Println(ui.Warning("⚠ Cryptographic identity proof is valid but EXPIRED"))
+	} else if result.Valid && result.SPKIFPMatch && result.Revoked {
+		fmt.Println(ui.Error("✗ Cryptographic identity proof has been REVOKED"))
+		return fmt.Errorf("identity proof revoked")
+	} else {
+		fmt.Println(ui.Error("✗ Cryptographic identity proof verification failed"))
+		return fmt.Errorf("verification failed")
+	}
+
+	return nil
+}
+
+// extractPubkeyFromSignWith extracts the pubkey from signWith without creating a signer.
+// Returns (pubkey, true) for nsec/npub/hex, or ("", false) for browser/bunker.
+func extractPubkeyFromSignWith(signWith string) (string, bool) {
+	signWith = strings.TrimSpace(signWith)
+
+	// nsec - decode private key and derive pubkey
+	if strings.HasPrefix(signWith, "nsec1") {
+		_, privkey, err := nip19.Decode(signWith)
+		if err != nil {
+			return "", false
+		}
+		privkeyHex, ok := privkey.(string)
+		if !ok {
+			return "", false
+		}
+		pubkey, err := nostr.GetPublicKey(privkeyHex)
+		if err != nil {
+			return "", false
+		}
+		return pubkey, true
+	}
+
+	// npub - decode directly
+	if strings.HasPrefix(signWith, "npub1") {
+		_, pubkey, err := nip19.Decode(signWith)
+		if err != nil {
+			return "", false
+		}
+		pubkeyHex, ok := pubkey.(string)
+		if !ok {
+			return "", false
+		}
+		return pubkeyHex, true
+	}
+
+	// Hex private key (64 chars)
+	if len(signWith) == 64 && isHex(signWith) {
+		pubkey, err := nostr.GetPublicKey(signWith)
+		if err != nil {
+			return "", false
+		}
+		return pubkey, true
+	}
+
+	// browser or bunker - cannot extract pubkey without connecting
+	return "", false
+}
+
+// isHex checks if a string is valid hexadecimal.
+func isHex(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// loadX509FromFile loads x509 private key and certificate from a file.
+// Detects file type by extension and prompts for additional info as needed.
+func loadX509FromFile(filePath string) (crypto.PrivateKey, *x509.Certificate, error) {
+	lower := strings.ToLower(filePath)
+
+	// Check for JKS files first (by extension or content)
+	if strings.HasSuffix(lower, ".jks") || strings.HasSuffix(lower, ".keystore") {
+		return nil, nil, identity.ErrJKSFormat
+	}
+
+	// PKCS12 keystore (.p12, .pfx)
+	if strings.HasSuffix(lower, ".p12") || strings.HasSuffix(lower, ".pfx") {
+		password, err := ui.PromptPassword("Keystore password")
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to read password: %w", err)
+		}
+		return identity.LoadPKCS12File(filePath, password)
+	}
+
+	// PEM certificate (.pem, .crt, .cer)
+	if strings.HasSuffix(lower, ".pem") || strings.HasSuffix(lower, ".crt") || strings.HasSuffix(lower, ".cer") {
+		// Prompt for private key file
+		keyPath, err := ui.PromptDefault("Private key file", strings.TrimSuffix(filePath, ".pem")+"-key.pem")
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to read input: %w", err)
+		}
+		keyPath = strings.TrimSpace(keyPath)
+		if keyPath == "" {
+			return nil, nil, fmt.Errorf("private key file is required")
+		}
+
+		return identity.LoadPEM(keyPath, filePath)
+	}
+
+	// Unknown extension - try to detect from content
+	return nil, nil, fmt.Errorf("unsupported file type: %s (use .p12, .pfx, .pem, or .crt)", filePath)
 }

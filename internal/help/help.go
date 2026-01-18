@@ -123,6 +123,7 @@ func extractKeywords(content string) []string {
 		`dry-run`, `check-apk`, `extract`,
 		`match`, `pattern`, `regex`, `filter`,
 		`variant`, `channel`, `beta`, `nightly`,
+		`identity`, `x509`, `certificate`, `nip-ci`, `keystore`, `pkcs12`, `pem`, `jks`, `spkifp`, `kind 30509`,
 	}
 
 	lower := strings.ToLower(content)
@@ -369,6 +370,20 @@ FLAGS
   --quiet         Minimal output, no prompts (implies -y)
   --verbose       Debug output (show scores, API responses)
   --no-color      Disable colored output
+
+IDENTITY (NIP-C1)
+  --link-identity <file>        Publish cryptographic identity proof (kind 30509)
+                                Supports: .p12, .pfx (PKCS12), .pem, .crt (PEM)
+                                Links your signing key's SPKIFP to your Nostr pubkey
+  --verify-identity <file>      Verify identity proof against certificate
+                                Checks SPKIFP match, signature, expiry, and revocation
+  --identity-expiry <duration>  Validity period (default: 1y). Examples: 1y, 6mo, 30d
+  --identity-relays <url>       Relays for identity proofs (repeatable, overrides defaults)
+                                Defaults: relay.primal.net, relay.damus.io, relay.zapstore.dev
+
+  Example: zsp --link-identity signing.p12 --dry-run
+  Example: zsp --link-identity signing.p12 --identity-expiry 2y
+  Example: zsp --verify-identity signing.p12
 
 ENVIRONMENT
   SIGN_WITH         Required. Signing method:

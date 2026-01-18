@@ -592,3 +592,8 @@ func GetGitLabRepoWithBase(rawURL string) (baseURL, repoPath string) {
 
 	return baseURL, repoPath
 }
+
+// GetRelayURLs returns the RELAY_URLS environment variable value.
+func GetRelayURLs() string {
+	return os.Getenv("RELAY_URLS")
+}

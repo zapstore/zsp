@@ -586,6 +586,121 @@ Outputs JSON with package ID, version, certificate hash, architectures, permissi
 
 ---
 
+## Cryptographic Identity (NIP-C1)
+
+Link your code-signing key (e.g., your Android app signing key) to your Nostr identity. This allows users to verify that the same key that signs your APKs also controls your Nostr pubkey.
+
+### Publishing an Identity Proof
+
+```bash
+# Using PKCS12 keystore (e.g., from Android Studio)
+zsp --link-identity signing.p12
+
+# Using PEM certificate (will prompt for private key path)
+zsp --link-identity cert.pem
+
+# Custom validity period (default: 1 year)
+zsp --link-identity signing.p12 --identity-expiry 2y
+
+# Dry run (preview the kind 30509 event without publishing)
+zsp --link-identity signing.p12 --dry-run
+```
+
+The command:
+1. Prompts for password (PKCS12) or private key path (PEM)
+2. Extracts the public key and computes its SPKIFP (Subject Public Key Info Fingerprint)
+3. Signs a timestamped verification message with your signing key
+4. Creates a kind 30509 identity proof event
+5. Signs the event with your Nostr key (SIGN_WITH)
+6. Publishes to relays
+
+### Verifying an Identity Proof
+
+```bash
+# Verify your identity proof against a certificate
+zsp --verify-identity signing.p12
+```
+
+This fetches the kind 30509 event from relays and verifies:
+- SPKIFP matches the certificate
+- Signature is valid
+- Proof is not expired or revoked
+
+### Identity Expiry
+
+Identity proofs include an expiry timestamp (default: 1 year). The expiry is:
+- Embedded in the signed message (cryptographically bound)
+- Published in the `expiry` tag
+
+Clients should show warnings for expired proofs. To renew, simply run `--link-identity` again.
+
+### Java KeyStore (JKS) Files
+
+If you have a JKS file, convert it to PKCS12 first:
+
+```bash
+keytool -importkeystore \
+  -srckeystore your-keystore.jks \
+  -destkeystore your-keystore.p12 \
+  -deststoretype PKCS12
+```
+
+### Getting Your Android Signing Key
+
+For apps signed with Android Studio or Gradle:
+
+```bash
+# Find certificate fingerprint
+keytool -list -keystore ~/.android/debug.keystore
+
+# Convert to PKCS12
+keytool -importkeystore \
+  -srckeystore ~/.android/debug.keystore \
+  -destkeystore debug.p12 \
+  -deststoretype PKCS12
+```
+
+### NIP-C1 Event Format (kind 30509)
+
+The identity proof is published as a parameterized replaceable event:
+
+```json
+{
+  "kind": 30509,
+  "pubkey": "<nostr-pubkey-hex>",
+  "tags": [
+    ["d", "<spkifp>"],
+    ["signature", "<base64-signature>"],
+    ["expiry", "<unix-timestamp>"]
+  ],
+  "content": ""
+}
+```
+
+The SPKIFP (Subject Public Key Info Fingerprint) is the SHA-256 hash of the DER-encoded public key. This allows the same identity to work across certificate re-issuance.
+
+The signed message format:
+
+```
+Verifying until <expiry> that I control the following Nostr public key: <hex-pubkey>
+```
+
+### Multiple Identities
+
+You can publish multiple identity proofs (e.g., for different signing keys or during key rotation). Each proof is a separate kind 30509 event with a different `d` tag (SPKIFP). Clients should accept any valid, non-expired, non-revoked proof.
+
+### Revocation
+
+To revoke an identity proof, publish a new event with the same `d` tag and add a `revoked` tag:
+
+```json
+["revoked", "key-compromised"]
+```
+
+Standard reasons: `key-compromised`, `key-retired`, `superseded`.
+
+---
+
 ## License
 
 MIT

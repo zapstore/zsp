@@ -4,8 +4,12 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
+
+	"golang.org/x/term"
 )
 
 // Prompt asks for user input with a prompt message.
@@ -81,6 +85,67 @@ func PromptSecret(message string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(input), nil
+}
+
+// PromptPassword asks for password input with hidden characters.
+// Handles Ctrl+C gracefully by restoring terminal state.
+func PromptPassword(message string) (string, error) {
+	fmt.Print(message + ": ")
+
+	// Check if stdin is a terminal
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		// Fall back to regular input if not a terminal
+		reader := bufio.NewReader(os.Stdin)
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(input), nil
+	}
+
+	// Save terminal state before reading password
+	oldState, err := term.GetState(fd)
+	if err != nil {
+		return "", err
+	}
+
+	// Set up signal handler to restore terminal on Ctrl+C
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	// Channel to receive password result
+	resultCh := make(chan struct {
+		password []byte
+		err      error
+	}, 1)
+
+	go func() {
+		password, err := term.ReadPassword(fd)
+		resultCh <- struct {
+			password []byte
+			err      error
+		}{password, err}
+	}()
+
+	select {
+	case sig := <-sigCh:
+		// Restore terminal state before exiting
+		term.Restore(fd, oldState)
+		fmt.Println() // Print newline
+		// Re-raise the signal so the main handler can catch it
+		signal.Stop(sigCh)
+		p, _ := os.FindProcess(os.Getpid())
+		p.Signal(sig)
+		return "", fmt.Errorf("interrupted")
+	case result := <-resultCh:
+		fmt.Println() // Print newline after password entry
+		if result.err != nil {
+			return "", result.err
+		}
+		return string(result.password), nil
+	}
 }
 
 // PromptInt asks for an integer input with a default value.

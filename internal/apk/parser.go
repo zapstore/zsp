@@ -5,6 +5,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -454,6 +455,23 @@ func verifyCertificate(path string) (string, error) {
 	// Calculate SHA256 fingerprint of the certificate
 	fingerprint := sha256.Sum256(cert.Raw)
 	return hex.EncodeToString(fingerprint[:]), nil
+}
+
+// ExtractCertificate extracts the signing certificate from an APK file.
+// Returns the x509 certificate used to sign the APK.
+func ExtractCertificate(path string) (*x509.Certificate, error) {
+	res, err := apkverifier.Verify(path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("APK verification failed: %w", err)
+	}
+
+	// Pick the best certificate (prefers v3 > v2 > v1)
+	_, cert := apkverifier.PickBestApkCert(res.SignerCerts)
+	if cert == nil {
+		return nil, fmt.Errorf("failed to extract certificate: no valid certificate found")
+	}
+
+	return cert, nil
 }
 
 // extractIcon extracts the app icon from the APK as PNG bytes.

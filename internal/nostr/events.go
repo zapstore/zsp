@@ -17,6 +17,7 @@ const (
 	KindRelease       = 30063 // Software Release (version, changelog, asset links)
 	KindSoftwareAsset = 3063  // Software Asset (hash, size, URLs, cert hash, platforms)
 	KindBlossomAuth   = 24242 // Blossom upload authorization
+	KindIdentityProof = 30509 // NIP-C1 Cryptographic Identity Proof (SPKI)
 
 	// Legacy kind used by older relay.zapstore.dev format
 	KindFileMetadataLegacy = 1063 // NIP-94 File Metadata (legacy asset format)

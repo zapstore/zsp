@@ -5,7 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/zapstore/zsp/internal/help"
 )
@@ -40,6 +42,12 @@ type Options struct {
 
 	// Server options
 	Port int
+
+	// Identity options (NIP-C1)
+	LinkIdentity   string   // Path to certificate file (.p12, .pfx, .pem, .crt)
+	VerifyIdentity string   // Verify cryptographic identity proof (path to certificate for verification)
+	IdentityExpiry string   // Validity period for identity proof (e.g., "1y", "6mo", "30d")
+	IdentityRelays []string // Relays to publish/fetch kind 30509 identity proofs
 }
 
 // stringSliceFlag implements flag.Value to accumulate multiple flag values.
@@ -54,11 +62,19 @@ func (s *stringSliceFlag) Set(value string) error {
 	return nil
 }
 
+// DefaultIdentityRelays are the default relays for kind 30509 identity proof operations.
+var DefaultIdentityRelays = []string{
+	"wss://relay.primal.net",
+	"wss://relay.damus.io",
+	"wss://relay.zapstore.dev",
+}
+
 // ParseFlags parses command-line flags and returns Options.
 // Returns the options and any remaining positional arguments.
 func ParseFlags() (*Options, []string) {
 	opts := &Options{}
 	var metadataFlags stringSliceFlag
+	var identityRelaysFlag stringSliceFlag
 
 	flag.StringVar(&opts.RepoURL, "r", "", "Repository URL (quick mode)")
 	flag.StringVar(&opts.ReleaseSource, "s", "", "Release source URL (defaults to -r)")
@@ -84,6 +100,12 @@ func ParseFlags() (*Options, []string) {
 	flag.BoolVar(&opts.Help, "h", false, "Show help")
 	flag.BoolVar(&opts.Help, "help", false, "Show help")
 
+	// Identity options (NIP-C1)
+	flag.StringVar(&opts.LinkIdentity, "link-identity", "", "Publish cryptographic identity proof (NIP-C1 kind 30509)")
+	flag.StringVar(&opts.VerifyIdentity, "verify-identity", "", "Verify cryptographic identity proof against certificate")
+	flag.StringVar(&opts.IdentityExpiry, "identity-expiry", "1y", "Validity period for identity proof (e.g., 1y, 6mo, 30d)")
+	flag.Var(&identityRelaysFlag, "identity-relays", "Relays for identity proofs (repeatable, overrides defaults)")
+
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, help.QuickReference())
 	}
@@ -98,6 +120,13 @@ func ParseFlags() (*Options, []string) {
 	flag.Parse()
 
 	opts.Metadata = metadataFlags
+
+	// Set identity relays (use defaults if not specified)
+	if len(identityRelaysFlag) > 0 {
+		opts.IdentityRelays = identityRelaysFlag
+	} else {
+		opts.IdentityRelays = DefaultIdentityRelays
+	}
 
 	// Quiet implies yes
 	if opts.Quiet {
@@ -134,6 +163,7 @@ func reorderArgs() {
 	// Flags that take a value argument
 	valuedFlags := map[string]bool{
 		"-r": true, "-s": true, "-m": true, "--match": true, "--commit": true, "--port": true,
+		"--link-identity": true, "--verify-identity": true, "--identity-expiry": true, "--identity-relays": true,
 	}
 
 	for i := 0; i < len(args); i++ {
@@ -161,4 +191,50 @@ func (o *Options) IsInteractive() bool {
 // ShouldShowSpinners returns true if spinners/progress should be shown.
 func (o *Options) ShouldShowSpinners() bool {
 	return !o.Quiet
+}
+
+// ParseExpiryDuration parses a human-friendly duration string.
+// Supports: y (years), mo (months), d (days), h (hours).
+// Note: Use "mo" for months to avoid conflict with Go's "m" for minutes.
+// Returns the duration or an error if the format is invalid.
+func ParseExpiryDuration(s string) (time.Duration, error) {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "" {
+		return 0, fmt.Errorf("empty duration")
+	}
+
+	// Check for our custom format first (before Go's time.ParseDuration)
+	// This ensures "6mo" is parsed as months, not passed to Go's parser
+
+	// Try months first (must check before single-char suffixes)
+	if strings.HasSuffix(s, "mo") {
+		numStr := s[:len(s)-2]
+		num, err := strconv.Atoi(numStr)
+		if err != nil {
+			return 0, fmt.Errorf("invalid duration number: %s", numStr)
+		}
+		return time.Duration(num) * 30 * 24 * time.Hour, nil // Approximate month
+	}
+
+	// Parse single-char suffixes
+	if len(s) >= 2 {
+		unit := s[len(s)-1]
+		numStr := s[:len(s)-1]
+
+		if num, err := strconv.Atoi(numStr); err == nil {
+			switch unit {
+			case 'y':
+				return time.Duration(num) * 365 * 24 * time.Hour, nil
+			case 'd':
+				return time.Duration(num) * 24 * time.Hour, nil
+			}
+		}
+	}
+
+	// Fall back to Go's standard duration format (e.g., "720h", "30m")
+	if d, err := time.ParseDuration(s); err == nil {
+		return d, nil
+	}
+
+	return 0, fmt.Errorf("invalid duration format: %s (use y, mo, d, or h)", s)
 }

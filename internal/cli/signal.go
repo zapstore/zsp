@@ -57,12 +57,22 @@ func (h *SignalHandler) Shutdown() {
 
 // watch monitors for signals and triggers shutdown.
 func (h *SignalHandler) watch() {
-	select {
-	case <-h.sigCh:
-		fmt.Fprintln(os.Stderr, "\nInterrupted")
-		h.Shutdown()
-	case <-h.ctx.Done():
-		// Context was cancelled elsewhere
+	for {
+		select {
+		case <-h.sigCh:
+			select {
+			case <-h.shutdownCh:
+				// Already shutting down, force exit on second signal
+				fmt.Fprintln(os.Stderr, "\nForce quit")
+				os.Exit(130)
+			default:
+				fmt.Fprintln(os.Stderr, "\nInterrupted")
+				h.Shutdown()
+			}
+		case <-h.ctx.Done():
+			// Context was cancelled elsewhere
+			return
+		}
 	}
 }
 
