@@ -24,11 +24,9 @@ type Config struct {
 	NIP34Repo *NIP34RepoPointer `yaml:"-"`
 
 	// Release source (for APK fetching) - can be string or ReleaseSource
+	// For local files, use a local path: release_source: ./build/outputs/apk/release/app-release.apk
 	ReleaseSource    *ReleaseSource `yaml:"-"`
 	ReleaseSourceRaw yaml.Node      `yaml:"release_source,omitempty"`
-
-	// Local APK override (takes precedence over remote sources)
-	Local string `yaml:"local,omitempty"`
 
 	// Asset matching (optional, overrides auto-detection)
 	Match string `yaml:"match,omitempty"`
@@ -84,13 +82,17 @@ type NIP34RepoPointer struct {
 }
 
 // ReleaseSource represents a release source configuration.
-// It can be a simple URL string or a web source config with version extractors.
+// It can be a simple URL string, a local file path, or a web source config with version extractors.
 type ReleaseSource struct {
 	// Simple URL mode (GitHub, GitLab, Gitea, F-Droid)
 	URL string
 
+	// LocalPath is set when the release source is a local file or glob pattern.
+	// When set, URL is empty and this takes precedence.
+	LocalPath string
+
 	// Explicit source type (optional, overrides auto-detection)
-	// Valid values: "github", "gitlab", "gitea", "fdroid"
+	// Valid values: "github", "gitlab", "gitea", "fdroid", "local"
 	// Useful for self-hosted GitLab/Gitea/Forgejo instances
 	Type string
 
@@ -107,6 +109,11 @@ type ReleaseSource struct {
 	// If no version extractor is set, this is the direct download URL and
 	// HTTP caching (ETag/Last-Modified) is used to detect changes.
 	AssetURL string
+}
+
+// IsLocal returns true if this release source is a local file path.
+func (r *ReleaseSource) IsLocal() bool {
+	return r != nil && r.LocalPath != ""
 }
 
 // HTMLExtractor extracts version from an HTML page using CSS selector.
@@ -310,24 +317,27 @@ func (c *Config) parseReleaseSource() error {
 
 	switch c.ReleaseSourceRaw.Kind {
 	case yaml.ScalarNode:
-		// Simple string URL
-		var urlStr string
-		if err := c.ReleaseSourceRaw.Decode(&urlStr); err != nil {
-			return fmt.Errorf("failed to parse release_source URL: %w", err)
+		// Simple string - could be URL or local path
+		var value string
+		if err := c.ReleaseSourceRaw.Decode(&value); err != nil {
+			return fmt.Errorf("failed to parse release_source: %w", err)
 		}
 
-		// If the URL is from an unknown source (not GitHub, GitLab, etc.),
-		// treat it as a web source with the URL as the asset_url.
-		// This allows: release_source: https://example.com/app.apk
-		// to be shorthand for: release_source: { asset_url: https://example.com/app.apk }
-		// Uses HTTP caching (ETag/Last-Modified) to detect changes.
-		if DetectSourceType(urlStr) == SourceUnknown {
+		// Check if it's a local path (starts with . or / or contains glob patterns without http)
+		if isLocalPath(value) {
+			c.ReleaseSource = &ReleaseSource{LocalPath: value}
+		} else if DetectSourceType(value) == SourceUnknown {
+			// If the URL is from an unknown source (not GitHub, GitLab, etc.),
+			// treat it as a web source with the URL as the asset_url.
+			// This allows: release_source: https://example.com/app.apk
+			// to be shorthand for: release_source: { asset_url: https://example.com/app.apk }
+			// Uses HTTP caching (ETag/Last-Modified) to detect changes.
 			c.ReleaseSource = &ReleaseSource{
 				IsWebSource: true,
-				AssetURL:    urlStr,
+				AssetURL:    value,
 			}
 		} else {
-			c.ReleaseSource = &ReleaseSource{URL: urlStr}
+			c.ReleaseSource = &ReleaseSource{URL: value}
 		}
 
 	case yaml.MappingNode:
@@ -377,10 +387,31 @@ func (c *Config) parseReleaseSource() error {
 	return nil
 }
 
+// isLocalPath returns true if the value looks like a local file path.
+// Local paths start with . or / or are relative paths without URL scheme.
+func isLocalPath(value string) bool {
+	if value == "" {
+		return false
+	}
+	// Starts with ./ or ../ or /
+	if strings.HasPrefix(value, "./") || strings.HasPrefix(value, "../") || strings.HasPrefix(value, "/") {
+		return true
+	}
+	// Contains glob patterns but no URL scheme
+	if (strings.Contains(value, "*") || strings.Contains(value, "?")) && !strings.Contains(value, "://") {
+		return true
+	}
+	// Ends with .apk and has no URL scheme (simple filename or relative path)
+	if strings.HasSuffix(strings.ToLower(value), ".apk") && !strings.Contains(value, "://") {
+		return true
+	}
+	return false
+}
+
 // Validate checks if the config has required fields and valid URLs.
 func (c *Config) Validate() error {
-	if c.Local == "" && c.Repository == "" && c.ReleaseSource == nil {
-		return fmt.Errorf("no source specified: need 'local', 'repository', or 'release_source'")
+	if c.Repository == "" && c.ReleaseSource == nil {
+		return fmt.Errorf("no source specified: need 'repository' or 'release_source'")
 	}
 
 	// Validate repository URL if provided (skip if it's an naddr)
@@ -493,16 +524,16 @@ func ValidateURL(rawURL string) error {
 }
 
 // GetSourceType returns the detected source type for APK fetching.
-// Follows precedence: local > release_source > repository
+// Follows precedence: release_source > repository
 // If release_source has an explicit type, it overrides auto-detection.
 func (c *Config) GetSourceType() SourceType {
-	// Local always takes precedence
-	if c.Local != "" {
-		return SourceLocal
-	}
-
 	// Check release_source
 	if c.ReleaseSource != nil {
+		// Local path takes precedence
+		if c.ReleaseSource.IsLocal() {
+			return SourceLocal
+		}
+
 		// Web scraping mode (has extractors or asset_url)
 		if c.ReleaseSource.IsWebSource {
 			return SourceWeb

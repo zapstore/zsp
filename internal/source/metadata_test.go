@@ -44,8 +44,8 @@ func TestDefaultMetadataSources(t *testing.T) {
 		{
 			name: "local source with github repo gets github metadata",
 			cfg: &config.Config{
-				Local:      "./app.apk",
-				Repository: "https://github.com/AeonBTC/mempal",
+				ReleaseSource: &config.ReleaseSource{LocalPath: "./app.apk"},
+				Repository:    "https://github.com/AeonBTC/mempal",
 			},
 			wantLen:   1,
 			wantFirst: "github",
@@ -69,7 +69,7 @@ func TestDefaultMetadataSources(t *testing.T) {
 		{
 			name: "unknown source type with no repo",
 			cfg: &config.Config{
-				Local: "./app.apk",
+				ReleaseSource: &config.ReleaseSource{LocalPath: "./app.apk"},
 			},
 			wantNil: true,
 		},

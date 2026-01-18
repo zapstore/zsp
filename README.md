@@ -26,35 +26,10 @@ Download from [releases](https://github.com/zapstore/zsp/releases).
 ## Quick Start
 
 ```bash
-# Set your signing key
-export SIGN_WITH=nsec1...
-
-# Publish from GitHub (open source - repository has releases)
-zsp publish -r github.com/user/app
-
-# Publish from GitHub pulling metadata from Play Store
-zsp publish -r github.com/user/app -m playstore
-
-# Closed source app (releases on GitHub, but no source code)
-zsp publish -s github.com/user/app -m playstore
-
-# Publish local APK with repository metadata
-zsp publish app.apk -r github.com/user/app
-
-# Not sure what options to use? The interactive wizard helps you determine
-# the best command and/or creates a config file for you
 zsp publish --wizard
-
-# Publish from config file
-zsp publish zapstore.yaml
 ```
 
-At any point, run the help command or the wizard:
-
-```bash
-zsp --help
-zsp publish --wizard  # Interactive mode to determine best options
-```
+The interactive wizard guides you through the setup process and helps determine the best options for your app.
 
 ---
 
@@ -130,7 +105,7 @@ release_source: https://example.com/downloads/app.apk
 Publish a local APK file.
 
 ```yaml
-local: ./build/outputs/apk/release/app-release.apk
+release_source: ./build/outputs/apk/release/app-release.apk
 repository: https://github.com/user/app
 ```
 
@@ -194,11 +169,9 @@ repository: https://github.com/user/app
 repository: https://github.com/user/app
 
 # Where to fetch APKs (if different from repository)
-# Can be URL string or object with type/asset_url for web scraping
+# Can be URL string, local path, or object with type/asset_url for web scraping
+# Local paths: ./build/app-release.apk, ../builds/*.apk
 release_source: https://f-droid.org/packages/com.example.app
-
-# Local APK path (takes priority over remote sources)
-local: ./build/app-release.apk
 
 # Regex pattern to filter APK assets from releases
 # (rarely needed - system auto-selects best arm64-v8a APK)

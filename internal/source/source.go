@@ -82,7 +82,11 @@ func NewWithOptions(cfg *config.Config, opts Options) (Source, error) {
 
 	switch sourceType {
 	case config.SourceLocal:
-		return NewLocalWithBase(cfg.Local, opts.BaseDir)
+		localPath := ""
+		if cfg.ReleaseSource != nil {
+			localPath = cfg.ReleaseSource.LocalPath
+		}
+		return NewLocalWithBase(localPath, opts.BaseDir)
 	case config.SourceGitHub:
 		gh, err := NewGitHub(cfg)
 		if err != nil {

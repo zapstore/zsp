@@ -369,7 +369,7 @@ func fetchAPKInfoForWizard(cfg *config.Config, matchPattern string) *config.APKB
 // loadAPKConfig creates config from a local APK path with optional -r and -s flags.
 func loadAPKConfig(opts *cli.PublishOptions, apkPath string) (*config.Config, error) {
 	cfg := &config.Config{
-		Local: apkPath,
+		ReleaseSource: &config.ReleaseSource{LocalPath: apkPath},
 	}
 
 	if opts.RepoURL != "" {

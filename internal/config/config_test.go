@@ -30,16 +30,17 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name: "minimal local",
-			yaml: `local: ./build/app.apk`,
+			yaml: `release_source: ./build/app.apk`,
 			check: func(c *Config) bool {
-				return c.Local == "./build/app.apk" &&
+				return c.ReleaseSource != nil &&
+					c.ReleaseSource.LocalPath == "./build/app.apk" &&
 					c.GetSourceType() == SourceLocal
 			},
 		},
 		{
 			name: "local takes precedence",
 			yaml: `
-local: ./app.apk
+release_source: ./app.apk
 repository: https://github.com/user/app
 `,
 			check: func(c *Config) bool {
@@ -280,8 +281,8 @@ func TestValidate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "with local",
-			config:  Config{Local: "./app.apk"},
+			name:    "with local release_source",
+			config:  Config{ReleaseSource: &ReleaseSource{LocalPath: "./app.apk"}},
 			wantErr: false,
 		},
 	}
@@ -441,18 +442,17 @@ func TestGetGitHubRepo(t *testing.T) {
 }
 
 func TestSourcePrecedence(t *testing.T) {
-	// Test that local > release_source > repository
+	// Test that release_source > repository
 	tests := []struct {
 		name   string
 		config Config
 		want   SourceType
 	}{
 		{
-			name: "local wins over all",
+			name: "local release_source wins over repository",
 			config: Config{
-				Local:         "./app.apk",
 				Repository:    "https://github.com/user/app",
-				ReleaseSource: &ReleaseSource{URL: "https://gitlab.com/user/releases"},
+				ReleaseSource: &ReleaseSource{LocalPath: "./app.apk"},
 			},
 			want: SourceLocal,
 		},
@@ -710,9 +710,11 @@ description: |
 		},
 		{
 			name: "local glob pattern",
-			yaml: `local: "./builds/*.apk"`,
+			yaml: `release_source: "./builds/*.apk"`,
 			check: func(c *Config) bool {
-				return c.Local == "./builds/*.apk" && c.GetSourceType() == SourceLocal
+				return c.ReleaseSource != nil &&
+					c.ReleaseSource.LocalPath == "./builds/*.apk" &&
+					c.GetSourceType() == SourceLocal
 			},
 		},
 		{
@@ -880,8 +882,8 @@ func TestValidateConfigCases(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "local only passes",
-			config:  Config{Local: "./app.apk"},
+			name:    "local release_source only passes",
+			config:  Config{ReleaseSource: &ReleaseSource{LocalPath: "./app.apk"}},
 			wantErr: false,
 		},
 		{
@@ -923,11 +925,10 @@ func TestValidateConfigCases(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "all three sources set (local takes precedence)",
+			name: "local release_source with repository set",
 			config: Config{
-				Local:         "./app.apk",
 				Repository:    "https://github.com/user/app",
-				ReleaseSource: &ReleaseSource{URL: "https://gitlab.com/user/releases"},
+				ReleaseSource: &ReleaseSource{LocalPath: "./app.apk"},
 			},
 			wantErr: false,
 		},

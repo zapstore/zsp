@@ -20,7 +20,7 @@ func TestNewSourceFromConfig(t *testing.T) {
 		{
 			name: "local source",
 			cfg: &config.Config{
-				Local: "../../testdata/apks/sample.apk",
+				ReleaseSource: &config.ReleaseSource{LocalPath: "../../testdata/apks/sample.apk"},
 			},
 			wantType: config.SourceLocal,
 			wantErr:  false,
@@ -167,7 +167,7 @@ func TestNewWithOptions(t *testing.T) {
 		{
 			name: "local with base dir",
 			cfg: &config.Config{
-				Local: "../apks/sample.apk",
+				ReleaseSource: &config.ReleaseSource{LocalPath: "../apks/sample.apk"},
 			},
 			opts: Options{
 				BaseDir: "../../testdata",

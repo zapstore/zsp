@@ -1,2 +1,2 @@
 # Minimal local config - just a path to APK(s)
-local: "../apks/mempal-*.apk"
+release_source: "../apks/mempal-*.apk"

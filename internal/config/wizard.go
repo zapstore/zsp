@@ -101,18 +101,18 @@ repoLoop:
 
 		// Reset config for retry
 		cfg.Repository = ""
-		cfg.Local = ""
+		cfg.ReleaseSource = nil
 
 		// Detect source type
 		sourceType = DetectSourceType(source)
 		if sourceType == SourceUnknown {
 			// Check if it's a local path
 			if _, err := os.Stat(source); err == nil {
-				cfg.Local = source
+				cfg.ReleaseSource = &ReleaseSource{LocalPath: source}
 				sourceType = SourceLocal
 			} else if strings.Contains(source, "*") {
 				// Glob pattern
-				cfg.Local = source
+				cfg.ReleaseSource = &ReleaseSource{LocalPath: source}
 				sourceType = SourceLocal
 			} else {
 				// Assume it's a URL, add https:// if needed
@@ -239,14 +239,14 @@ repoLoop:
 				return nil, err
 			}
 
-			if source == "" {
-				// Release source is required if no repo
-				if cfg.Repository == "" && cfg.Local == "" {
-					fmt.Printf("%s Release source is required when no repository is specified\n", ui.Warning("⚠"))
-					continue
-				}
-				break
+		if source == "" {
+			// Release source is required if no repo
+			if cfg.Repository == "" && cfg.ReleaseSource == nil {
+				fmt.Printf("%s Release source is required when no repository is specified\n", ui.Warning("⚠"))
+				continue
 			}
+			break
+		}
 
 			// Ensure URL has scheme
 			if !strings.Contains(source, "://") {
@@ -277,14 +277,14 @@ repoLoop:
 	appName := opts.AppName
 	if packageID == "" && opts.FetchAPKInfo != nil {
 		tempCfg := &Config{
-			Repository: cfg.Repository,
-			Local:      cfg.Local,
+			Repository:    cfg.Repository,
+			ReleaseSource: cfg.ReleaseSource,
 		}
 		if releaseSourceURL != "" {
 			tempCfg.ReleaseSource = &ReleaseSource{URL: releaseSourceURL}
 		}
 		// Only fetch if we have a source
-		if tempCfg.Repository != "" || tempCfg.Local != "" || tempCfg.ReleaseSource != nil {
+		if tempCfg.Repository != "" || tempCfg.ReleaseSource != nil {
 			if info := opts.FetchAPKInfo(tempCfg, ""); info != nil {
 				packageID = info.PackageID
 				appName = info.AppName
@@ -516,8 +516,8 @@ func buildCommand(cfg *Config, releaseSource, match string, metadataSources []st
 		// Strip https:// for cleaner display
 		repo = strings.TrimPrefix(repo, "https://")
 		parts = append(parts, fmt.Sprintf("-r %s", repo))
-	} else if cfg.Local != "" {
-		parts = append(parts, cfg.Local)
+	} else if cfg.ReleaseSource != nil && cfg.ReleaseSource.IsLocal() {
+		parts = append(parts, cfg.ReleaseSource.LocalPath)
 	}
 
 	// Add release source if different from repository

@@ -1,5 +1,5 @@
 # Full local config with all options
-local: "../apks/sample.apk"
+release_source: "../apks/sample.apk"
 
 # App metadata (overrides APK-extracted values)
 name: Sample App
