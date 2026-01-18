@@ -28,17 +28,18 @@ type Publisher struct {
 	signer    nostr.Signer
 
 	// Computed during workflow
-	release       *source.Release
-	selectedAsset *source.Asset
-	apkPath       string
-	apkInfo       *apk.APKInfo
-	iconURL       string
-	imageURLs     []string
-	releaseNotes  string
-	preDownloaded *PreDownloadedImages
-	events        *nostr.EventSet
-	blossomURL    string
-	browserPort   int
+	release           *source.Release
+	selectedAsset     *source.Asset
+	apkPath           string
+	apkInfo           *apk.APKInfo
+	iconURL           string
+	imageURLs         []string
+	releaseNotes      string
+	preDownloaded     *PreDownloadedImages
+	events            *nostr.EventSet
+	blossomURL        string
+	browserPort       int
+	skipMetadataFetch bool
 }
 
 // NewPublisher creates a new publish workflow.
@@ -46,7 +47,7 @@ func NewPublisher(opts *cli.Options, cfg *config.Config) (*Publisher, error) {
 	// Create source with base directory for relative paths
 	src, err := source.NewWithOptions(cfg, source.Options{
 		BaseDir:   cfg.BaseDir,
-		SkipCache: opts.OverwriteRelease,
+		SkipCache: opts.Publish.OverwriteRelease,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create source: %w", err)
@@ -75,12 +76,12 @@ func NewPublisher(opts *cli.Options, cfg *config.Config) (*Publisher, error) {
 func (p *Publisher) Execute(ctx context.Context) error {
 	// Determine total steps based on mode
 	totalSteps := 4
-	if p.opts.DryRun {
+	if p.opts.Publish.DryRun {
 		totalSteps = 2
 	}
 
 	var steps *ui.StepTracker
-	if p.opts.ShouldShowSpinners() {
+	if p.opts.Publish.ShouldShowSpinners() {
 		steps = ui.NewStepTracker(totalSteps)
 	}
 
@@ -106,7 +107,7 @@ func (p *Publisher) Execute(ctx context.Context) error {
 	}
 
 	// Step 3: Sign & Upload (skip in dry run)
-	if steps != nil && !p.opts.DryRun {
+	if steps != nil && !p.opts.Publish.DryRun {
 		steps.StartStep("Sign & Upload")
 	}
 	if err := p.signAndUpload(ctx); err != nil {
@@ -124,7 +125,7 @@ func (p *Publisher) Execute(ctx context.Context) error {
 	}
 
 	// Hash confirmation
-	if !p.opts.Yes {
+	if !p.opts.Publish.Yes {
 		isClosedSource := p.cfg.Repository == ""
 		confirmed, err := confirmHash(p.apkInfo.SHA256, isClosedSource)
 		if err != nil {
@@ -146,7 +147,7 @@ func (p *Publisher) Execute(ctx context.Context) error {
 
 // fetchAssets fetches and selects the APK to publish.
 func (p *Publisher) fetchAssets(ctx context.Context) error {
-	if p.opts.Verbose {
+	if p.opts.Global.Verbose {
 		fmt.Printf("Source type: %s\n", p.src.Type())
 	}
 
@@ -175,7 +176,7 @@ func (p *Publisher) fetchRelease(ctx context.Context) (*source.Release, error) {
 	})
 
 	if err == source.ErrNotModified {
-		if p.opts.ShouldShowSpinners() {
+		if p.opts.Publish.ShouldShowSpinners() {
 			ui.PrintSuccess("Release unchanged, nothing to do")
 			fmt.Println("  Release has not changed since last publish. Use --overwrite-release to publish anyway.")
 		}
@@ -186,7 +187,7 @@ func (p *Publisher) fetchRelease(ctx context.Context) (*source.Release, error) {
 		return nil, fmt.Errorf("failed to fetch release: %w", err)
 	}
 
-	if p.opts.ShouldShowSpinners() {
+	if p.opts.Publish.ShouldShowSpinners() {
 		if release.Version != "" {
 			ui.PrintSuccess(fmt.Sprintf("Found release %s with %d assets", release.Version, len(release.Assets)))
 		} else {
@@ -219,7 +220,7 @@ func (p *Publisher) selectAPK(ctx context.Context) (*source.Asset, error) {
 
 	// Single APK - use it
 	if len(apkAssets) == 1 {
-		if p.opts.ShouldShowSpinners() {
+		if p.opts.Publish.ShouldShowSpinners() {
 			ui.PrintSuccess(fmt.Sprintf("Selected %s", apkAssets[0].Name))
 		}
 		return apkAssets[0], nil
@@ -228,7 +229,7 @@ func (p *Publisher) selectAPK(ctx context.Context) (*source.Asset, error) {
 	// Multiple APKs - rank and select
 	ranked := picker.DefaultModel.RankAssets(apkAssets)
 
-	if p.opts.Verbose {
+	if p.opts.Global.Verbose {
 		fmt.Println("  Ranked APKs:")
 		for i, sa := range ranked {
 			fmt.Printf("    %d. %s (score: %.2f)\n", i+1, sa.Asset.Name, sa.Score)
@@ -236,12 +237,12 @@ func (p *Publisher) selectAPK(ctx context.Context) (*source.Asset, error) {
 	}
 
 	// Interactive selection if not quiet mode
-	if p.opts.IsInteractive() && len(ranked) > 1 {
+	if p.opts.Publish.IsInteractive() && len(ranked) > 1 {
 		return selectAPKInteractive(ranked)
 	}
 
 	// Auto-select best match
-	if p.opts.ShouldShowSpinners() {
+	if p.opts.Publish.ShouldShowSpinners() {
 		ui.PrintSuccess(fmt.Sprintf("Selected %s (best match)", ranked[0].Asset.Name))
 	}
 	return ranked[0].Asset, nil
@@ -270,7 +271,7 @@ func (p *Publisher) downloadAndParseAPK(ctx context.Context) error {
 		return fmt.Errorf("APK does not support arm64-v8a architecture (found: %v)", p.apkInfo.Architectures)
 	}
 
-	if p.opts.ShouldShowSpinners() {
+	if p.opts.Publish.ShouldShowSpinners() {
 		ui.PrintSuccess("Parsed and verified APK")
 	}
 
@@ -280,7 +281,7 @@ func (p *Publisher) downloadAndParseAPK(ctx context.Context) error {
 	}
 
 	// Display APK summary
-	if p.opts.ShouldShowSpinners() {
+	if p.opts.Publish.ShouldShowSpinners() {
 		ui.PrintSectionHeader("APK Summary")
 		ui.PrintKeyValue("Name", p.apkInfo.Label)
 		ui.PrintKeyValue("App ID", p.apkInfo.PackageID)
@@ -296,7 +297,7 @@ func (p *Publisher) downloadAndParseAPK(ctx context.Context) error {
 // getAPKPath returns the local path to the APK, downloading if necessary.
 func (p *Publisher) getAPKPath(ctx context.Context) (string, error) {
 	if p.selectedAsset.LocalPath != "" {
-		if p.opts.ShouldShowSpinners() {
+		if p.opts.Publish.ShouldShowSpinners() {
 			ui.PrintSuccess("Using local APK file")
 		}
 		return p.selectedAsset.LocalPath, nil
@@ -305,7 +306,7 @@ func (p *Publisher) getAPKPath(ctx context.Context) (string, error) {
 	// Check download cache
 	if cachedPath := source.GetCachedDownload(p.selectedAsset.URL, p.selectedAsset.Name); cachedPath != "" {
 		p.selectedAsset.LocalPath = cachedPath
-		if p.opts.ShouldShowSpinners() {
+		if p.opts.Publish.ShouldShowSpinners() {
 			ui.PrintSuccess("Using cached APK")
 		}
 		return cachedPath, nil
@@ -314,7 +315,7 @@ func (p *Publisher) getAPKPath(ctx context.Context) (string, error) {
 	// Download
 	var tracker *ui.DownloadTracker
 	var progressCallback source.DownloadProgress
-	if p.opts.ShouldShowSpinners() {
+	if p.opts.Publish.ShouldShowSpinners() {
 		tracker = ui.NewDownloadTracker(fmt.Sprintf("Downloading %s", p.selectedAsset.Name), p.selectedAsset.Size)
 		progressCallback = tracker.Callback()
 	}
@@ -332,20 +333,20 @@ func (p *Publisher) getAPKPath(ctx context.Context) (string, error) {
 
 // checkExistingAsset checks if the release already exists on relays.
 func (p *Publisher) checkExistingAsset(ctx context.Context) error {
-	if p.opts.OverwriteRelease || p.opts.DryRun {
+	if p.opts.Publish.OverwriteRelease || p.opts.Publish.DryRun {
 		return nil
 	}
 
 	existingAsset, err := p.publisher.CheckExistingAsset(ctx, p.apkInfo.PackageID, p.apkInfo.VersionName)
 	if err != nil {
-		if p.opts.Verbose {
+		if p.opts.Global.Verbose {
 			fmt.Printf("  Could not check relays: %v\n", err)
 		}
 		return nil
 	}
 
 	if existingAsset != nil {
-		if p.opts.ShouldShowSpinners() {
+		if p.opts.Publish.ShouldShowSpinners() {
 			ui.PrintWarning(fmt.Sprintf("Asset %s@%s already exists on %s",
 				p.apkInfo.PackageID, p.apkInfo.VersionName, existingAsset.RelayURL))
 			fmt.Println("  Use --overwrite-release to publish anyway.")
@@ -359,16 +360,15 @@ func (p *Publisher) checkExistingAsset(ctx context.Context) error {
 // gatherMetadata fetches metadata from external sources.
 func (p *Publisher) gatherMetadata(ctx context.Context) error {
 	// Check if app already exists on relays
-	skipMetadataFetch := false
-	if !p.opts.OverwriteApp && !p.opts.DryRun {
+	if !p.opts.Publish.OverwriteApp && !p.opts.Publish.DryRun {
 		existingApp, err := p.publisher.CheckExistingApp(ctx, p.apkInfo.PackageID)
 		if err != nil {
-			if p.opts.Verbose {
+			if p.opts.Global.Verbose {
 				fmt.Printf("  Could not check for existing app: %v\n", err)
 			}
 		} else if existingApp != nil {
-			skipMetadataFetch = true
-			if p.opts.ShouldShowSpinners() {
+			p.skipMetadataFetch = true
+			if p.opts.Publish.ShouldShowSpinners() {
 				ui.PrintInfo(fmt.Sprintf("App %s already exists on %s, skipping metadata fetch",
 					p.apkInfo.PackageID, existingApp.RelayURL))
 				fmt.Println("  Use --overwrite-app to re-fetch metadata from sources.")
@@ -377,7 +377,7 @@ func (p *Publisher) gatherMetadata(ctx context.Context) error {
 	}
 
 	// Fetch metadata from external sources
-	if !skipMetadataFetch {
+	if !p.skipMetadataFetch {
 		if err := p.fetchExternalMetadata(ctx); err != nil {
 			return err
 		}
@@ -399,13 +399,13 @@ func (p *Publisher) gatherMetadata(ctx context.Context) error {
 
 // fetchExternalMetadata fetches metadata from configured sources.
 func (p *Publisher) fetchExternalMetadata(ctx context.Context) error {
-	metadataSources := p.opts.Metadata
+	metadataSources := p.opts.Publish.Metadata
 	if len(metadataSources) == 0 {
 		metadataSources = source.DefaultMetadataSources(p.cfg)
 	}
 
 	if len(metadataSources) == 0 {
-		if p.opts.ShouldShowSpinners() {
+		if p.opts.Publish.ShouldShowSpinners() {
 			ui.PrintInfo("No external metadata sources configured")
 		}
 		return nil
@@ -423,11 +423,11 @@ func (p *Publisher) fetchExternalMetadata(ctx context.Context) error {
 		return fmt.Sprintf("Fetched metadata from %s", strings.Join(metadataSources, ", "))
 	})
 
-	if err != nil && p.opts.Verbose {
+	if err != nil && p.opts.Global.Verbose {
 		fmt.Printf("    %v\n", err)
 	}
 
-	if p.opts.Verbose && err == nil {
+	if p.opts.Global.Verbose && err == nil {
 		fmt.Printf("    name=%q, description=%d chars, tags=%v\n",
 			p.cfg.Name, len(p.cfg.Description), p.cfg.Tags)
 	}
@@ -454,15 +454,17 @@ func (p *Publisher) preDownloadImages(ctx context.Context) error {
 
 // handlePreview shows the browser preview if requested.
 func (p *Publisher) handlePreview(ctx context.Context) error {
-	if p.opts.Quiet || p.opts.Yes || p.opts.SkipPreview {
+	// Skip preview if metadata fetch was skipped (incomplete data)
+	if p.opts.Publish.Quiet || p.opts.Publish.Yes || p.opts.Publish.SkipPreview || p.skipMetadataFetch {
 		return nil
 	}
 
 	defaultPort := nostr.DefaultPreviewPort
-	if p.opts.Port != 0 {
-		defaultPort = p.opts.Port
+	if p.opts.Publish.Port != 0 {
+		defaultPort = p.opts.Publish.Port
 	}
 
+	fmt.Println()
 	confirmed, port, err := ui.ConfirmWithPort("Preview release in browser?", defaultPort)
 	if err != nil {
 		return fmt.Errorf("prompt failed: %w", err)
@@ -540,12 +542,12 @@ func (p *Publisher) signAndUpload(ctx context.Context) error {
 func (p *Publisher) createSigner(ctx context.Context) error {
 	var signWith string
 
-	if p.opts.DryRun {
+	if p.opts.Publish.DryRun {
 		signWith = nostr.TestNsec
 	} else {
 		signWith = config.GetSignWith()
 		if signWith == "" {
-			if p.opts.Quiet {
+			if p.opts.Publish.Quiet {
 				return fmt.Errorf("SIGN_WITH environment variable is required")
 			}
 			ui.PrintSectionHeader("Signing Setup")
@@ -559,7 +561,7 @@ func (p *Publisher) createSigner(ctx context.Context) error {
 
 	// Determine port for browser signer
 	signerPort := p.browserPort
-	if signWith == "browser" && p.browserPort == 0 && p.opts.IsInteractive() {
+	if signWith == "browser" && p.browserPort == 0 && p.opts.Publish.IsInteractive() {
 		port, err := ui.ConfirmWithPortYesOnly("Browser signing port?", nostr.DefaultNIP07Port)
 		if err != nil {
 			return fmt.Errorf("prompt failed: %w", err)
@@ -575,7 +577,7 @@ func (p *Publisher) createSigner(ctx context.Context) error {
 		return fmt.Errorf("failed to create signer: %w", err)
 	}
 
-	if p.opts.Verbose {
+	if p.opts.Global.Verbose {
 		fmt.Printf("Signer type: %v, pubkey: %s...\n", p.signer.Type(), p.signer.PublicKey()[:16])
 	}
 
@@ -584,7 +586,7 @@ func (p *Publisher) createSigner(ctx context.Context) error {
 
 // isDryRun returns true if this is a dry run.
 func (p *Publisher) isDryRun() bool {
-	return p.opts.DryRun || (p.signer != nil && p.signWithTestKey())
+	return p.opts.Publish.DryRun || (p.signer != nil && p.signWithTestKey())
 }
 
 // signWithTestKey returns true if using the test key.
@@ -610,9 +612,10 @@ func (p *Publisher) buildEventsWithoutUpload(ctx context.Context) error {
 		ImageURLs:    p.imageURLs,
 		Changelog:    p.releaseNotes,
 		Variant:      p.matchVariant(),
-		Commit:       p.cfg.Commit,
+		Commit:       p.opts.Publish.Commit,
+		Channel:      p.opts.Publish.Channel,
 		ReleaseURL:   p.getReleaseURL(),
-		LegacyFormat: p.opts.Legacy,
+		LegacyFormat: p.opts.Publish.Legacy,
 	})
 
 	relayHint := p.getRelayHint()
@@ -641,9 +644,10 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 			RelayHint:     relayHint,
 			PreDownloaded: p.preDownloaded,
 			Variant:       p.matchVariant(),
-			Commit:        p.cfg.Commit,
+			Commit:        p.opts.Publish.Commit,
+			Channel:       p.opts.Publish.Channel,
 			Opts:          p.opts,
-			Legacy:        p.opts.Legacy,
+			Legacy:        p.opts.Publish.Legacy,
 		})
 		return err
 	}
@@ -672,9 +676,10 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 		ImageURLs:    p.imageURLs,
 		Changelog:    p.releaseNotes,
 		Variant:      p.matchVariant(),
-		Commit:       p.cfg.Commit,
+		Commit:       p.opts.Publish.Commit,
+		Channel:      p.opts.Publish.Channel,
 		ReleaseURL:   p.getReleaseURL(),
-		LegacyFormat: p.opts.Legacy,
+		LegacyFormat: p.opts.Publish.Legacy,
 	})
 
 	return nostr.SignEventSet(ctx, p.signer, p.events, relayHint)
@@ -721,7 +726,7 @@ func (p *Publisher) matchVariant() string {
 
 // outputDryRun outputs events in dry run mode.
 func (p *Publisher) outputDryRun() error {
-	if p.opts.ShouldShowSpinners() {
+	if p.opts.Publish.ShouldShowSpinners() {
 		fmt.Println()
 		fmt.Println(ui.Dim("─────────────────────────────────────────────────────────────────────"))
 		fmt.Println(ui.Warning("You are in dry run mode. These events are signed with a dummy key."))
@@ -729,7 +734,7 @@ func (p *Publisher) outputDryRun() error {
 		fmt.Println(ui.Dim("─────────────────────────────────────────────────────────────────────"))
 	}
 
-	if p.opts.IsInteractive() {
+	if p.opts.Publish.IsInteractive() {
 		confirmed, err := ui.Confirm("View events?", true)
 		if err != nil {
 			return fmt.Errorf("confirmation failed: %w", err)
@@ -745,12 +750,12 @@ func (p *Publisher) outputDryRun() error {
 
 // outputNpubEvents outputs unsigned events for npub signer.
 func (p *Publisher) outputNpubEvents() error {
-	if p.opts.ShouldShowSpinners() {
+	if p.opts.Publish.ShouldShowSpinners() {
 		fmt.Println()
 		ui.PrintInfo("npub mode - outputting unsigned events for external signing")
 	}
 	OutputEvents(p.events)
-	if p.opts.ShouldShowSpinners() {
+	if p.opts.Publish.ShouldShowSpinners() {
 		ui.PrintCompletionSummary(true, "Unsigned events generated - sign externally before publishing")
 	}
 	return nil
@@ -759,7 +764,7 @@ func (p *Publisher) outputNpubEvents() error {
 // publishToRelays publishes events to configured relays.
 func (p *Publisher) publishToRelays(ctx context.Context) error {
 	// Confirm before publishing
-	if !p.opts.Yes {
+	if !p.opts.Publish.Yes {
 		confirmed, err := confirmPublish(p.events, p.publisher.RelayURLs())
 		if err != nil {
 			return fmt.Errorf("confirmation failed: %w", err)
@@ -773,7 +778,7 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 
 	// Publish with spinner
 	var publishSpinner *ui.Spinner
-	if p.opts.ShouldShowSpinners() {
+	if p.opts.Publish.ShouldShowSpinners() {
 		publishSpinner = ui.NewSpinner(fmt.Sprintf("Publishing to %d relays...", len(p.publisher.RelayURLs())))
 		publishSpinner.Start()
 	}
@@ -792,7 +797,7 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 	for eventType, eventResults := range results {
 		for _, r := range eventResults {
 			if r.Success {
-				if p.opts.Verbose {
+				if p.opts.Global.Verbose {
 					failures = append(failures, fmt.Sprintf("    %s -> %s: OK", eventType, r.RelayURL))
 				}
 			} else {
@@ -820,13 +825,13 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 		p.deleteCachedAPK()
 	} else {
 		p.clearCache()
-		if p.opts.Verbose {
+		if p.opts.Global.Verbose {
 			fmt.Println("  Cleared release cache for retry")
 		}
 	}
 
 	// Print completion summary
-	if p.opts.ShouldShowSpinners() {
+	if p.opts.Publish.ShouldShowSpinners() {
 		if allSuccess {
 			ui.PrintCompletionSummary(true, fmt.Sprintf("Published %s v%s to %s",
 				p.apkInfo.PackageID, p.apkInfo.VersionName, strings.Join(p.publisher.RelayURLs(), ", ")))

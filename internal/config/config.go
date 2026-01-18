@@ -53,13 +53,6 @@ type Config struct {
 	// Changelog is deprecated, use ReleaseNotes instead
 	Changelog string `yaml:"changelog,omitempty"`
 
-	// ReleaseChannel specifies the release channel: main (default), beta, nightly, dev
-	ReleaseChannel string `yaml:"release_channel,omitempty"`
-
-	// Commit is the git commit hash for reproducible builds
-	// If not set, can be prompted interactively (unless -y)
-	Commit string `yaml:"commit,omitempty"`
-
 	// SupportedNIPs lists Nostr NIPs supported by this application
 	SupportedNIPs []string `yaml:"supported_nips,omitempty"`
 
@@ -91,7 +84,7 @@ type NIP34RepoPointer struct {
 }
 
 // ReleaseSource represents a release source configuration.
-// It can be a simple URL string or a web source config with asset_url pattern.
+// It can be a simple URL string or a web source config with version extractors.
 type ReleaseSource struct {
 	// Simple URL mode (GitHub, GitLab, Gitea, F-Droid)
 	URL string
@@ -101,17 +94,58 @@ type ReleaseSource struct {
 	// Useful for self-hosted GitLab/Gitea/Forgejo instances
 	Type string
 
-	// Web source mode - AssetURL is a regex pattern to find APK URLs
-	// in the response (headers, body). Version is extracted from downloaded APK.
+	// Web source mode - version extractors and asset URL template
 	IsWebSource bool
-	AssetURL    string `yaml:"asset_url,omitempty"` // Regex pattern to match APK URL
+
+	// Version extractors (mutually exclusive, pick one)
+	VersionHTML     *HTMLExtractor     // Extract version from HTML using CSS selector
+	VersionJSON     *JSONExtractor     // Extract version from JSON API using JSONPath
+	VersionRedirect *RedirectExtractor // Extract version from HTTP redirect header
+
+	// AssetURL is the download URL template for the APK.
+	// Can contain {version} placeholder which is replaced with the extracted version.
+	// If no version extractor is set, this is the direct download URL and
+	// HTTP caching (ETag/Last-Modified) is used to detect changes.
+	AssetURL string
+}
+
+// HTMLExtractor extracts version from an HTML page using CSS selector.
+type HTMLExtractor struct {
+	Selector  string `yaml:"selector"`  // CSS selector to find the element
+	Attribute string `yaml:"attribute"` // Attribute to extract: "text", "href", "data-version", etc.
+	Pattern   string `yaml:"pattern"`   // Regex with capture group for version (e.g., "v([0-9.]+)")
+}
+
+// JSONExtractor extracts version from a JSON API response using JSONPath.
+type JSONExtractor struct {
+	Path    string `yaml:"path"`    // JSONPath expression (e.g., "$.latest.version")
+	Pattern string `yaml:"pattern"` // Optional regex with capture group for version
+}
+
+// RedirectExtractor extracts version from an HTTP redirect header.
+type RedirectExtractor struct {
+	Header  string `yaml:"header"`  // Header to check (usually "location")
+	Pattern string `yaml:"pattern"` // Regex with capture group for version
 }
 
 // webReleaseSource is used for YAML unmarshaling of complex release_source.
 type webReleaseSource struct {
-	URL      string `yaml:"url"`
-	Type     string `yaml:"type,omitempty"`      // Explicit source type override
-	AssetURL string `yaml:"asset_url,omitempty"` // Regex pattern for APK URL
+	URL             string             `yaml:"url"`
+	Type            string             `yaml:"type,omitempty"`
+	AssetURL        string             `yaml:"asset_url,omitempty"`
+	VersionHTML     *HTMLExtractor     `yaml:"version_html,omitempty"`
+	VersionJSON     *JSONExtractor     `yaml:"version_json,omitempty"`
+	VersionRedirect *RedirectExtractor `yaml:"version_redirect,omitempty"`
+}
+
+// HasVersionExtractor returns true if any version extractor is configured.
+func (r *ReleaseSource) HasVersionExtractor() bool {
+	return r.VersionHTML != nil || r.VersionJSON != nil || r.VersionRedirect != nil
+}
+
+// HasVersionPlaceholder returns true if AssetURL contains {version} placeholder.
+func (r *ReleaseSource) HasVersionPlaceholder() bool {
+	return strings.Contains(r.AssetURL, "{version}")
 }
 
 // SourceType represents the type of source for APK fetching.
@@ -286,7 +320,7 @@ func (c *Config) parseReleaseSource() error {
 		// treat it as a web source with the URL as the asset_url.
 		// This allows: release_source: https://example.com/app.apk
 		// to be shorthand for: release_source: { asset_url: https://example.com/app.apk }
-		// Note: URL is left empty so we don't try to scrape a page - we use asset_url directly.
+		// Uses HTTP caching (ETag/Last-Modified) to detect changes.
 		if DetectSourceType(urlStr) == SourceUnknown {
 			c.ReleaseSource = &ReleaseSource{
 				IsWebSource: true,
@@ -303,14 +337,37 @@ func (c *Config) parseReleaseSource() error {
 			return fmt.Errorf("failed to parse release_source config: %w", err)
 		}
 
-		// Web source mode requires asset_url (regex pattern for APK URL)
+		// Web source mode if asset_url is set (with or without version extractors)
 		isWebSource := web.AssetURL != ""
 
+		// Validate: only one version extractor allowed
+		extractorCount := 0
+		if web.VersionHTML != nil {
+			extractorCount++
+		}
+		if web.VersionJSON != nil {
+			extractorCount++
+		}
+		if web.VersionRedirect != nil {
+			extractorCount++
+		}
+		if extractorCount > 1 {
+			return fmt.Errorf("release_source: only one version extractor allowed (version_html, version_json, or version_redirect)")
+		}
+
+		// If version extractor is set, url is required (the page to extract from)
+		if extractorCount > 0 && web.URL == "" {
+			return fmt.Errorf("release_source: url is required when using version extractors")
+		}
+
 		c.ReleaseSource = &ReleaseSource{
-			URL:         web.URL,
-			Type:        web.Type,
-			IsWebSource: isWebSource,
-			AssetURL:    web.AssetURL,
+			URL:             web.URL,
+			Type:            web.Type,
+			IsWebSource:     isWebSource,
+			AssetURL:        web.AssetURL,
+			VersionHTML:     web.VersionHTML,
+			VersionJSON:     web.VersionJSON,
+			VersionRedirect: web.VersionRedirect,
 		}
 
 	default:
@@ -340,11 +397,10 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// Validate release channel if specified
-	if c.ReleaseChannel != "" {
-		validChannels := map[string]bool{"main": true, "beta": true, "nightly": true, "dev": true}
-		if !validChannels[c.ReleaseChannel] {
-			return fmt.Errorf("invalid release_channel %q: must be one of main, beta, nightly, dev", c.ReleaseChannel)
+	// Validate web source version extractors
+	if c.ReleaseSource != nil && c.ReleaseSource.IsWebSource {
+		if err := c.ReleaseSource.Validate(); err != nil {
+			return fmt.Errorf("invalid release_source: %w", err)
 		}
 	}
 
@@ -354,6 +410,60 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("invalid variant %q regex pattern %q: %w", name, pattern, err)
 		}
 	}
+
+	return nil
+}
+
+// Validate checks if the ReleaseSource configuration is valid.
+func (r *ReleaseSource) Validate() error {
+	if !r.IsWebSource {
+		return nil
+	}
+
+	// Validate version_html
+	if r.VersionHTML != nil {
+		if r.VersionHTML.Selector == "" {
+			return fmt.Errorf("version_html: selector is required")
+		}
+		if r.VersionHTML.Attribute == "" {
+			return fmt.Errorf("version_html: attribute is required")
+		}
+		if r.VersionHTML.Pattern == "" {
+			return fmt.Errorf("version_html: pattern is required")
+		}
+		if _, err := regexp.Compile(r.VersionHTML.Pattern); err != nil {
+			return fmt.Errorf("version_html: invalid pattern: %w", err)
+		}
+	}
+
+	// Validate version_json
+	if r.VersionJSON != nil {
+		if r.VersionJSON.Path == "" {
+			return fmt.Errorf("version_json: path is required")
+		}
+		if r.VersionJSON.Pattern != "" {
+			if _, err := regexp.Compile(r.VersionJSON.Pattern); err != nil {
+				return fmt.Errorf("version_json: invalid pattern: %w", err)
+			}
+		}
+	}
+
+	// Validate version_redirect
+	if r.VersionRedirect != nil {
+		if r.VersionRedirect.Header == "" {
+			return fmt.Errorf("version_redirect: header is required")
+		}
+		if r.VersionRedirect.Pattern == "" {
+			return fmt.Errorf("version_redirect: pattern is required")
+		}
+		if _, err := regexp.Compile(r.VersionRedirect.Pattern); err != nil {
+			return fmt.Errorf("version_redirect: invalid pattern: %w", err)
+		}
+	}
+
+	// If version extractor is set and asset_url has {version}, that's the expected case
+	// If version extractor is set but no {version} placeholder, warn (but don't error)
+	// If no version extractor and no {version} placeholder, uses HTTP caching (valid)
 
 	return nil
 }

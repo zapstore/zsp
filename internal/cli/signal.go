@@ -1,25 +1,39 @@
+// Package cli handles command-line interface concerns.
 package cli
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 )
 
+// GracefulShutdownTimeout is the time allowed for graceful shutdown before force exit.
+const GracefulShutdownTimeout = 3 * time.Second
+
 // SignalHandler manages graceful shutdown and signal handling.
+// It provides a context that is cancelled on first Ctrl+C, and forces
+// exit on second Ctrl+C or after the graceful shutdown timeout.
 type SignalHandler struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	sigCh      chan os.Signal
 	shutdownCh chan struct{}
 	once       sync.Once
+
+	// Cleanup functions to run on shutdown
+	cleanupMu sync.Mutex
+	cleanups  []func()
 }
 
 // NewSignalHandler creates a new signal handler with a cancellable context.
+// The handler:
+//   - First Ctrl+C: cancels context, starts graceful shutdown
+//   - Second Ctrl+C: forces immediate exit with code 130
+//   - After GracefulShutdownTimeout: forces exit if still running
 func NewSignalHandler() *SignalHandler {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -38,148 +52,154 @@ func NewSignalHandler() *SignalHandler {
 }
 
 // Context returns the handler's context, which is cancelled on shutdown.
+// Pass this context to all operations that should be cancellable.
 func (h *SignalHandler) Context() context.Context {
 	return h.ctx
 }
 
-// ShutdownCh returns a channel that's closed when shutdown is triggered.
-func (h *SignalHandler) ShutdownCh() <-chan struct{} {
+// Done returns a channel that's closed when shutdown is triggered.
+func (h *SignalHandler) Done() <-chan struct{} {
 	return h.shutdownCh
 }
 
-// Shutdown triggers a graceful shutdown.
+// IsShuttingDown returns true if shutdown has been triggered.
+func (h *SignalHandler) IsShuttingDown() bool {
+	select {
+	case <-h.shutdownCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// OnCleanup registers a function to be called during graceful shutdown.
+// Cleanup functions are called in reverse order of registration (LIFO).
+func (h *SignalHandler) OnCleanup(fn func()) {
+	h.cleanupMu.Lock()
+	defer h.cleanupMu.Unlock()
+	h.cleanups = append(h.cleanups, fn)
+}
+
+// Shutdown triggers a graceful shutdown programmatically.
 func (h *SignalHandler) Shutdown() {
+	h.initiateShutdown("Shutting down...")
+}
+
+// initiateShutdown begins the shutdown process with a message.
+func (h *SignalHandler) initiateShutdown(message string) {
 	h.once.Do(func() {
+		fmt.Fprintln(os.Stderr, "\n"+message)
 		close(h.shutdownCh)
 		h.cancel()
+		h.runCleanups()
 	})
+}
+
+// runCleanups executes registered cleanup functions in reverse order.
+func (h *SignalHandler) runCleanups() {
+	h.cleanupMu.Lock()
+	cleanups := make([]func(), len(h.cleanups))
+	copy(cleanups, h.cleanups)
+	h.cleanupMu.Unlock()
+
+	// Run in reverse order (LIFO)
+	for i := len(cleanups) - 1; i >= 0; i-- {
+		cleanups[i]()
+	}
 }
 
 // watch monitors for signals and triggers shutdown.
 func (h *SignalHandler) watch() {
 	for {
 		select {
-		case <-h.sigCh:
+		case sig := <-h.sigCh:
+			if sig == nil {
+				// Channel closed, stop watching
+				return
+			}
 			select {
 			case <-h.shutdownCh:
 				// Already shutting down, force exit on second signal
 				fmt.Fprintln(os.Stderr, "\nForce quit")
 				os.Exit(130)
 			default:
-				fmt.Fprintln(os.Stderr, "\nInterrupted")
-				h.Shutdown()
+				// First signal - initiate graceful shutdown
+				h.initiateShutdown("Interrupted")
+
+				// Start timeout for force exit
+				go func() {
+					select {
+					case <-time.After(GracefulShutdownTimeout):
+						fmt.Fprintln(os.Stderr, "\nShutdown timeout, forcing exit")
+						os.Exit(130)
+					case <-h.ctx.Done():
+						// Context was cancelled elsewhere, normal exit path
+					}
+				}()
 			}
 		case <-h.ctx.Done():
-			// Context was cancelled elsewhere
+			// Context was cancelled elsewhere (e.g., normal program completion)
 			return
 		}
 	}
 }
 
 // Stop releases resources and stops watching for signals.
+// Call this in a defer after NewSignalHandler.
 func (h *SignalHandler) Stop() {
 	signal.Stop(h.sigCh)
 	close(h.sigCh)
 }
 
-// StdinReader provides non-blocking stdin reading that respects context cancellation.
-type StdinReader struct {
-	lines chan string
-	errs  chan error
-	done  chan struct{}
+// --- Non-blocking stdin utilities ---
+
+// readLineResult holds the result of a non-blocking line read.
+type readLineResult struct {
+	line string
+	err  error
 }
 
-// NewStdinReader creates a new non-blocking stdin reader.
-// The goroutine reading stdin will be abandoned (not joined) when done is called,
-// since Go's stdin reading cannot be interrupted.
-func NewStdinReader() *StdinReader {
-	r := &StdinReader{
-		lines: make(chan string, 1),
-		errs:  make(chan error, 1),
-		done:  make(chan struct{}),
-	}
-
-	go r.readLoop()
-
-	return r
-}
-
-// readLoop continuously reads lines from stdin.
-// Note: This goroutine cannot be cleanly stopped since bufio.Reader.ReadString
-// blocks and cannot be interrupted. It will be abandoned on shutdown.
-func (r *StdinReader) readLoop() {
-	reader := bufio.NewReader(os.Stdin)
-	for {
-		select {
-		case <-r.done:
-			return
-		default:
-		}
-
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			select {
-			case r.errs <- err:
-			case <-r.done:
+// readLineAsync reads a line from stdin in a goroutine using raw os.Stdin.Read().
+// Does NOT use bufio to avoid buffering conflicts with other stdin readers.
+// The goroutine is abandoned if context is cancelled (Go stdin reads cannot be interrupted).
+func readLineAsync() <-chan readLineResult {
+	ch := make(chan readLineResult, 1)
+	go func() {
+		var line []byte
+		buf := make([]byte, 1)
+		for {
+			n, err := os.Stdin.Read(buf)
+			if err != nil {
+				ch <- readLineResult{err: err}
 				return
 			}
-			return
+			if n > 0 {
+				if buf[0] == '\n' {
+					ch <- readLineResult{line: string(line)}
+					return
+				}
+				if buf[0] != '\r' { // Skip carriage return
+					line = append(line, buf[0])
+				}
+			}
 		}
-
-		select {
-		case r.lines <- line:
-		case <-r.done:
-			return
-		}
-	}
-}
-
-// ReadLine reads a line from stdin with context support.
-// Returns the line (without newline), or an error if context is cancelled or EOF.
-func (r *StdinReader) ReadLine(ctx context.Context) (string, error) {
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case err := <-r.errs:
-		return "", err
-	case line := <-r.lines:
-		// Trim the newline
-		if len(line) > 0 && line[len(line)-1] == '\n' {
-			line = line[:len(line)-1]
-		}
-		return line, nil
-	}
+	}()
+	return ch
 }
 
 // WaitForEnter waits for the user to press Enter, with context support.
-func (r *StdinReader) WaitForEnter(ctx context.Context) error {
-	_, err := r.ReadLine(ctx)
-	return err
-}
-
-// Close signals the reader to stop. Note that the underlying goroutine
-// may not immediately exit due to blocking stdin read.
-func (r *StdinReader) Close() {
+// Returns context.Canceled if the context is cancelled.
+func WaitForEnter(ctx context.Context) error {
+	resultCh := readLineAsync()
 	select {
-	case <-r.done:
-		// Already closed
-	default:
-		close(r.done)
+	case <-ctx.Done():
+		return ctx.Err()
+	case result := <-resultCh:
+		return result.err
 	}
 }
 
-// WaitForEnterWithContext waits for Enter key or context cancellation.
-// This is a convenience function that creates a temporary reader.
+// WaitForEnterWithContext is an alias for WaitForEnter for backwards compatibility.
 func WaitForEnterWithContext(ctx context.Context) error {
-	reader := NewStdinReader()
-	defer reader.Close()
-	return reader.WaitForEnter(ctx)
-}
-
-// PromptWithContext displays a prompt and waits for input with context support.
-func PromptWithContext(ctx context.Context, prompt string) (string, error) {
-	fmt.Print(prompt)
-	reader := NewStdinReader()
-	defer reader.Close()
-	return reader.ReadLine(ctx)
+	return WaitForEnter(ctx)
 }

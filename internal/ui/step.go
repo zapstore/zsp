@@ -19,6 +19,35 @@ const Logo = `
            P U B L I S H E R
 `
 
+// Version holds the application version, set at startup.
+var Version = "dev"
+
+// SetVersion sets the application version for logo rendering.
+func SetVersion(v string) {
+	Version = v
+}
+
+// RenderLogo returns the styled logo with version underneath.
+func RenderLogo() string {
+	var result strings.Builder
+	for _, line := range strings.Split(Logo, "\n") {
+		if line != "" {
+			result.WriteString(LogoStyle.Render(line) + "\n")
+		}
+	}
+	// Add blank line before version
+	result.WriteString("\n")
+	// Add "v" prefix only if not already present
+	v := Version
+	if !strings.HasPrefix(v, "v") {
+		v = "v" + v
+	}
+	result.WriteString(v + "\n")
+	// Add blank line after version
+	result.WriteString("\n")
+	return result.String()
+}
+
 // StepTracker tracks progress through numbered steps in the CLI flow.
 type StepTracker struct {
 	current int
@@ -77,7 +106,7 @@ func (s *StepTracker) printBanner() {
 		fmt.Fprintln(s.writer, "=== ZAPSTORE ===")
 		return
 	}
-	fmt.Fprint(s.writer, LogoStyle.Render(Logo))
+	fmt.Fprint(s.writer, RenderLogo())
 }
 
 // SetTotal updates the total number of steps (useful when steps are conditional).

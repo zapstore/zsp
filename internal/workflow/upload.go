@@ -51,6 +51,7 @@ type UploadParams struct {
 	PreDownloaded *PreDownloadedImages
 	Variant       string
 	Commit        string
+	Channel       string
 	Opts          *cli.Options
 	Legacy        bool
 }
@@ -83,7 +84,7 @@ func PreDownloadImages(ctx context.Context, cfg *config.Config, opts *cli.Option
 	remoteImages := countRemoteImages(cfg.Images)
 	if remoteImages > 0 {
 		var spinner *ui.Spinner
-		if opts.ShouldShowSpinners() {
+		if opts.Publish.ShouldShowSpinners() {
 			spinner = ui.NewSpinner(fmt.Sprintf("Downloading 0/%d screenshots...", remoteImages))
 			spinner.Start()
 		}
@@ -126,7 +127,7 @@ func PreDownloadImages(ctx context.Context, cfg *config.Config, opts *cli.Option
 // downloadImageWithSpinner downloads an image with spinner feedback.
 func downloadImageWithSpinner(ctx context.Context, url, imageType string, opts *cli.Options) (*DownloadedImage, error) {
 	var spinner *ui.Spinner
-	if opts.ShouldShowSpinners() {
+	if opts.Publish.ShouldShowSpinners() {
 		spinner = ui.NewSpinner(fmt.Sprintf("Downloading %s...", imageType))
 		spinner.Start()
 	}
@@ -178,7 +179,7 @@ func resolveIconURL(ctx context.Context, cfg *config.Config, apkInfo *apk.APKInf
 	if cfg.Icon != "" {
 		if isRemoteURL(cfg.Icon) {
 			var spinner *ui.Spinner
-			if opts.ShouldShowSpinners() {
+			if opts.Publish.ShouldShowSpinners() {
 				spinner = ui.NewSpinner("Fetching icon (for hash)...")
 				spinner.Start()
 			}
@@ -300,6 +301,7 @@ func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.Ev
 		Changelog:    releaseNotes,
 		Variant:      params.Variant,
 		Commit:       params.Commit,
+		Channel:      params.Channel,
 		ReleaseURL:   releaseURL,
 		LegacyFormat: params.Legacy,
 	})
@@ -324,7 +326,7 @@ func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.Ev
 
 	// Batch sign everything
 	var signSpinner *ui.Spinner
-	if params.Opts.ShouldShowSpinners() {
+	if params.Opts.Publish.ShouldShowSpinners() {
 		signSpinner = ui.NewSpinner(fmt.Sprintf("Signing %d events...", len(allEvents)))
 		signSpinner.Start()
 	}
@@ -418,7 +420,7 @@ func uploadIcon(ctx context.Context, params UploadParams) (string, error) {
 // uploadIconData uploads pre-downloaded icon data.
 func uploadIconData(ctx context.Context, client *blossom.Client, signer nostr.Signer, img *DownloadedImage, opts *cli.Options) (string, error) {
 	var spinner *ui.Spinner
-	if opts.ShouldShowSpinners() {
+	if opts.Publish.ShouldShowSpinners() {
 		spinner = ui.NewSpinner("Uploading icon...")
 		spinner.Start()
 	}
@@ -445,7 +447,7 @@ func uploadIconData(ctx context.Context, client *blossom.Client, signer nostr.Si
 // downloadAndUploadIcon downloads and uploads a remote icon.
 func downloadAndUploadIcon(ctx context.Context, client *blossom.Client, signer nostr.Signer, url string, opts *cli.Options) (string, error) {
 	var spinner *ui.Spinner
-	if opts.ShouldShowSpinners() {
+	if opts.Publish.ShouldShowSpinners() {
 		spinner = ui.NewSpinner("Fetching icon...")
 		spinner.Start()
 	}
@@ -494,7 +496,7 @@ func uploadLocalIcon(ctx context.Context, client *blossom.Client, signer nostr.S
 	mimeType := detectImageMimeType(fullPath)
 
 	var spinner *ui.Spinner
-	if opts.ShouldShowSpinners() {
+	if opts.Publish.ShouldShowSpinners() {
 		spinner = ui.NewSpinner("Uploading icon...")
 		spinner.Start()
 	}
@@ -524,7 +526,7 @@ func uploadAPKIcon(ctx context.Context, client *blossom.Client, signer nostr.Sig
 	hashStr := hex.EncodeToString(hash[:])
 
 	var spinner *ui.Spinner
-	if opts.ShouldShowSpinners() {
+	if opts.Publish.ShouldShowSpinners() {
 		spinner = ui.NewSpinner("Uploading icon...")
 		spinner.Start()
 	}
@@ -555,7 +557,7 @@ func uploadPreDownloadedImages(ctx context.Context, params UploadParams) ([]stri
 
 	for i, img := range params.PreDownloaded.Images {
 		var spinner *ui.Spinner
-		if params.Opts.ShouldShowSpinners() {
+		if params.Opts.Publish.ShouldShowSpinners() {
 			spinner = ui.NewSpinner(fmt.Sprintf("Uploading screenshot (%d/%d)...", i+1, total))
 			spinner.Start()
 		}
@@ -602,7 +604,7 @@ func uploadConfigImages(ctx context.Context, params UploadParams) ([]string, err
 			// Download and upload
 			url, err := downloadAndUploadImage(ctx, params.Client, params.Signer, img, i+1, total, params.Opts)
 			if err != nil {
-				if params.Opts.Verbose {
+				if params.Opts.Global.Verbose {
 					fmt.Printf("  Warning: failed to upload screenshot: %v\n", err)
 				}
 				continue
@@ -623,7 +625,7 @@ func uploadConfigImages(ctx context.Context, params UploadParams) ([]string, err
 // downloadAndUploadImage downloads and uploads a remote image.
 func downloadAndUploadImage(ctx context.Context, client *blossom.Client, signer nostr.Signer, url string, index, total int, opts *cli.Options) (string, error) {
 	var spinner *ui.Spinner
-	if opts.ShouldShowSpinners() {
+	if opts.Publish.ShouldShowSpinners() {
 		spinner = ui.NewSpinner(fmt.Sprintf("Fetching screenshot (%d/%d)...", index, total))
 		spinner.Start()
 	}
@@ -672,7 +674,7 @@ func uploadLocalImage(ctx context.Context, client *blossom.Client, signer nostr.
 	mimeType := detectImageMimeType(fullPath)
 
 	var spinner *ui.Spinner
-	if opts.ShouldShowSpinners() {
+	if opts.Publish.ShouldShowSpinners() {
 		spinner = ui.NewSpinner(fmt.Sprintf("Uploading image %s...", imgPath))
 		spinner.Start()
 	}
@@ -700,7 +702,7 @@ func uploadLocalImage(ctx context.Context, client *blossom.Client, signer nostr.
 func uploadAPK(ctx context.Context, params UploadParams) error {
 	var tracker *ui.DownloadTracker
 	var uploadCallback func(uploaded, total int64)
-	if params.Opts.ShouldShowSpinners() {
+	if params.Opts.Publish.ShouldShowSpinners() {
 		fileInfo, _ := os.Stat(params.APKPath)
 		var size int64
 		if fileInfo != nil {
@@ -873,7 +875,7 @@ func checkUploadsExist(ctx context.Context, client *blossom.Client, uploads []up
 	}
 
 	var spinner *ui.Spinner
-	if opts.ShouldShowSpinners() {
+	if opts.Publish.ShouldShowSpinners() {
 		spinner = ui.NewSpinner(fmt.Sprintf("Checking %d files...", len(nonAPKHashes)))
 		spinner.Start()
 	}
@@ -903,7 +905,7 @@ func performUploads(ctx context.Context, client *blossom.Client, uploads []uploa
 		if u.isAPK {
 			var tracker *ui.DownloadTracker
 			var callback func(uploaded, total int64)
-			if opts.ShouldShowSpinners() {
+			if opts.Publish.ShouldShowSpinners() {
 				fileInfo, _ := os.Stat(u.apkPath)
 				var size int64
 				if fileInfo != nil {
@@ -928,12 +930,12 @@ func performUploads(ctx context.Context, client *blossom.Client, uploads []uploa
 		} else {
 			existed := existsMap[u.hash]
 			if existed {
-				if opts.ShouldShowSpinners() {
+				if opts.Publish.ShouldShowSpinners() {
 					ui.PrintSuccess(fmt.Sprintf("%s already exists (%s/%s)", u.uploadType, client.ServerURL(), u.hash))
 				}
 			} else {
 				var spinner *ui.Spinner
-				if opts.ShouldShowSpinners() {
+				if opts.Publish.ShouldShowSpinners() {
 					spinner = ui.NewSpinner(fmt.Sprintf("Uploading %s...", u.uploadType))
 					spinner.Start()
 				}

@@ -405,6 +405,7 @@ type BuildEventSetParams struct {
 	Changelog    string // Release notes (from remote source or local file)
 	Variant      string // Explicit variant name (from config variants map)
 	Commit       string // Git commit hash for reproducible builds
+	Channel      string // Release channel: main (default), beta, nightly, dev
 	ReleaseURL   string // Release page URL (for legacy format url/r tags)
 	LegacyFormat bool   // Use legacy event format (kind 1063, different tags)
 }
@@ -472,7 +473,7 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 	}
 
 	// Determine release channel (default: main)
-	channel := cfg.ReleaseChannel
+	channel := params.Channel
 	if channel == "" {
 		channel = "main"
 	}

@@ -16,7 +16,7 @@ import (
 // Returns the result and any error from the function.
 func WithSpinner[T any](opts *cli.Options, message string, fn func() (T, error)) (T, error) {
 	var zero T
-	if !opts.ShouldShowSpinners() {
+	if !opts.Publish.ShouldShowSpinners() {
 		return fn()
 	}
 
@@ -35,7 +35,7 @@ func WithSpinner[T any](opts *cli.Options, message string, fn func() (T, error))
 
 // WithSpinnerMsg executes a function with spinner feedback and custom success message.
 func WithSpinnerMsg(opts *cli.Options, message string, fn func() error, successMsg func(error) string) error {
-	if !opts.ShouldShowSpinners() {
+	if !opts.Publish.ShouldShowSpinners() {
 		return fn()
 	}
 
@@ -57,6 +57,7 @@ func WithSpinnerMsg(opts *cli.Options, message string, fn func() error, successM
 // selectAPKInteractive prompts the user to select an APK from a ranked list.
 func selectAPKInteractive(ranked []picker.ScoredAsset) (*source.Asset, error) {
 	ui.PrintSectionHeader("Select APK")
+	fmt.Printf("  %s\n", ui.Dim("Zapstore only supports arm64-v8a, always prefer that architecture."))
 
 	options := make([]string, len(ranked))
 	for i, sa := range ranked {

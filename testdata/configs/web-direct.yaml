@@ -1,0 +1,10 @@
+# Web source with direct APK URL (no version extraction)
+# Uses HTTP caching (ETag/Last-Modified) to detect changes
+# Version is extracted from the downloaded APK
+name: ProtonDrive
+
+release_source:
+  asset_url: https://protonapps.com/protondrive-android
+
+metadata_sources:
+  - playstore

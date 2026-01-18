@@ -8,31 +8,38 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/PaesslerAG/jsonpath"
+	"github.com/PuerkitoBio/goquery"
 	"github.com/zapstore/zsp/internal/config"
 )
 
-// Web implements Source for web scraping.
+// Web implements Source for web scraping with version extraction.
 type Web struct {
 	cfg       *config.Config
 	client    *http.Client
 	cacheDir  string
-	SkipCache bool // Set to true to bypass URL cache
+	SkipCache bool // Set to true to bypass version/HTTP cache
 
-	// pendingURLs holds URLs from the last fetch, not yet committed to disk.
+	// pendingCache holds the cache from the last fetch, not yet committed to disk.
 	// Call CommitCache() after successful publishing to persist it.
-	pendingURLs []string
+	pendingCache *webCache
 }
 
-// webCache stores the last downloaded asset URLs for a web source.
+// webCache stores version and HTTP caching information for a web source.
 type webCache struct {
-	AssetURLs []string `json:"asset_urls"`
+	// Version-based caching (when version extractor is configured)
+	Version  string `json:"version,omitempty"`
+	AssetURL string `json:"asset_url,omitempty"`
+
+	// HTTP caching (for versionless URLs - ETag/Last-Modified)
+	ETag         string `json:"etag,omitempty"`
+	LastModified string `json:"last_modified,omitempty"`
 }
 
 // NewWeb creates a new web scraping source.
@@ -71,7 +78,7 @@ func (w *Web) cacheFilePath() string {
 	return filepath.Join(w.cacheDir, hex.EncodeToString(h[:8])+".json")
 }
 
-// loadCache reads the cached URL data from disk.
+// loadCache reads the cached data from disk.
 func (w *Web) loadCache() *webCache {
 	data, err := os.ReadFile(w.cacheFilePath())
 	if err != nil {
@@ -84,22 +91,21 @@ func (w *Web) loadCache() *webCache {
 	return &cache
 }
 
-// saveCache writes the asset URLs to disk.
-func (w *Web) saveCache(assetURLs []string) error {
+// saveCache writes the cache data to disk.
+func (w *Web) saveCache(cache *webCache) error {
 	if err := os.MkdirAll(w.cacheDir, 0755); err != nil {
 		return err
 	}
-	cache := webCache{AssetURLs: assetURLs}
-	data, err := json.Marshal(&cache)
+	data, err := json.Marshal(cache)
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(w.cacheFilePath(), data, 0644)
 }
 
-// ClearCache removes the cached URL data.
+// ClearCache removes the cached data.
 func (w *Web) ClearCache() error {
-	w.pendingURLs = nil // Clear pending cache
+	w.pendingCache = nil // Clear pending cache
 	cachePath := w.cacheFilePath()
 	err := os.Remove(cachePath)
 	if os.IsNotExist(err) {
@@ -109,182 +115,328 @@ func (w *Web) ClearCache() error {
 }
 
 // CommitCache saves the pending cache to disk.
-// This should be called after successful publishing to persist the URLs.
+// This should be called after successful publishing to persist the cache.
 func (w *Web) CommitCache() error {
-	if len(w.pendingURLs) == 0 {
+	if w.pendingCache == nil {
 		return nil // Nothing to commit
 	}
-	err := w.saveCache(w.pendingURLs)
+	err := w.saveCache(w.pendingCache)
 	if err == nil {
-		w.pendingURLs = nil // Clear pending after successful commit
+		w.pendingCache = nil // Clear pending after successful commit
 	}
 	return err
 }
 
-// FetchLatestRelease fetches the latest release via web scraping.
-// It finds URLs matching the asset_url pattern and returns them as assets.
-// Version is left empty - it will be extracted from the APK after download.
+// FetchLatestRelease fetches the latest release from a web source.
 //
-// If URL is empty, asset_url is used directly as the download URL (no page scraping).
-// If URL is set, the page is fetched and asset_url is used as a regex pattern to find APK URLs.
+// The method supports three modes:
+//
+// 1. Version extraction mode (version_html, version_json, or version_redirect):
+//   - Fetches the URL and extracts version using the configured extractor
+//   - Substitutes {version} in asset_url to get the download URL
+//   - Caches by version - skips if version hasn't changed
+//
+// 2. Direct URL mode (asset_url only, no version extractor):
+//   - Uses asset_url directly as the download URL
+//   - Uses HTTP caching (ETag/Last-Modified) to detect changes
+//   - Version is extracted from the downloaded APK
+//
+// 3. Direct URL shorthand (release_source: "https://example.com/app.apk"):
+//   - Same as mode 2, but specified as a simple string
 func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	repo := w.cfg.ReleaseSource
 
-	var matchedURLs []string
+	var version string
+	var assetURL string
+	var newCache *webCache
 
-	if repo.URL == "" {
-		// Direct mode: use asset_url as the download URL directly (no scraping)
-		matchedURLs = []string{repo.AssetURL}
+	if repo.HasVersionExtractor() {
+		// Mode 1: Extract version from page, construct asset URL
+		var err error
+		version, err = w.extractVersion(ctx, repo)
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract version: %w", err)
+		}
+
+		// Substitute {version} in asset_url
+		assetURL = strings.ReplaceAll(repo.AssetURL, "{version}", version)
+
+		// Check cache - if version hasn't changed, skip
+		if !w.SkipCache {
+			cache := w.loadCache()
+			if cache != nil && cache.Version == version {
+				return nil, ErrNotModified
+			}
+		}
+
+		newCache = &webCache{
+			Version:  version,
+			AssetURL: assetURL,
+		}
 	} else {
-		// Scraping mode: fetch the page and find URLs matching the pattern
-		pattern, err := regexp.Compile(repo.AssetURL)
-		if err != nil {
-			return nil, fmt.Errorf("invalid asset_url pattern: %w", err)
-		}
+		// Mode 2/3: Direct URL, use HTTP caching
+		assetURL = repo.AssetURL
 
-		matchedURLs, err = w.findMatchingURLs(ctx, repo.URL, pattern)
-		if err != nil {
-			return nil, err
-		}
-
-		if len(matchedURLs) == 0 {
-			return nil, fmt.Errorf("no URLs matching pattern %q found", repo.AssetURL)
-		}
-	}
-
-	// Check cache - if all matched URLs were already processed, skip
-	if !w.SkipCache {
+		// Check for changes using HTTP caching headers
 		cache := w.loadCache()
-		if cache != nil && urlsEqual(matchedURLs, cache.AssetURLs) {
-			return nil, ErrNotModified
+		if !w.SkipCache && cache != nil {
+			modified, etag, lastMod, err := w.checkHTTPCacheHeaders(ctx, assetURL, cache.ETag, cache.LastModified)
+			if err != nil {
+				return nil, fmt.Errorf("failed to check for updates: %w", err)
+			}
+			if !modified {
+				return nil, ErrNotModified
+			}
+			// Store new headers for later commit
+			newCache = &webCache{
+				ETag:         etag,
+				LastModified: lastMod,
+			}
+		} else {
+			// No cache, fetch headers for future use
+			_, etag, lastMod, err := w.checkHTTPCacheHeaders(ctx, assetURL, "", "")
+			if err != nil {
+				// Non-fatal - we can still download without caching
+				newCache = &webCache{}
+			} else {
+				newCache = &webCache{
+					ETag:         etag,
+					LastModified: lastMod,
+				}
+			}
 		}
+
+		// Version will be extracted from APK after download
+		version = ""
 	}
 
-	// Store URLs for later commit (after successful publish).
-	// Don't save to disk yet - call CommitCache() after successful publishing.
-	w.pendingURLs = matchedURLs
+	// Store cache for later commit
+	w.pendingCache = newCache
 
-	// Convert to assets
-	assets := make([]*Asset, 0, len(matchedURLs))
-	for _, u := range matchedURLs {
-		assets = append(assets, &Asset{
-			Name: filepath.Base(u),
-			URL:  u,
-		})
+	// Create asset
+	asset := &Asset{
+		Name: filepath.Base(assetURL),
+		URL:  assetURL,
 	}
-
-	// Filter out APKs with unsupported architectures (x86, x86_64, etc.)
-	assets = FilterUnsupportedArchitectures(assets)
 
 	return &Release{
-		Version: "", // Will be filled from APK after download
-		Assets:  assets,
+		Version: version,
+		Assets:  []*Asset{asset},
 	}, nil
 }
 
-// findMatchingURLs searches for URLs matching the pattern in headers and body.
-func (w *Web) findMatchingURLs(ctx context.Context, pageURL string, pattern *regexp.Regexp) ([]string, error) {
-	// Track redirects
-	var redirectURLs []string
+// extractVersion extracts the version string using the configured extractor.
+func (w *Web) extractVersion(ctx context.Context, repo *config.ReleaseSource) (string, error) {
+	if repo.VersionHTML != nil {
+		return w.extractVersionHTML(ctx, repo.URL, repo.VersionHTML)
+	}
+	if repo.VersionJSON != nil {
+		return w.extractVersionJSON(ctx, repo.URL, repo.VersionJSON)
+	}
+	if repo.VersionRedirect != nil {
+		return w.extractVersionRedirect(ctx, repo.URL, repo.VersionRedirect)
+	}
+	return "", fmt.Errorf("no version extractor configured")
+}
+
+// extractVersionHTML extracts version from an HTML page using CSS selector.
+func (w *Web) extractVersionHTML(ctx context.Context, pageURL string, ext *config.HTMLExtractor) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", pageURL, nil)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := w.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch page: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("page fetch failed with status %d", resp.StatusCode)
+	}
+
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse HTML: %w", err)
+	}
+
+	// Find element using CSS selector
+	sel := doc.Find(ext.Selector)
+	if sel.Length() == 0 {
+		return "", fmt.Errorf("no element found matching selector %q", ext.Selector)
+	}
+
+	// Extract attribute value
+	var value string
+	switch strings.ToLower(ext.Attribute) {
+	case "text":
+		value = strings.TrimSpace(sel.First().Text())
+	default:
+		var exists bool
+		value, exists = sel.First().Attr(ext.Attribute)
+		if !exists {
+			return "", fmt.Errorf("attribute %q not found on element", ext.Attribute)
+		}
+	}
+
+	// Apply pattern to extract version
+	return extractWithPattern(value, ext.Pattern)
+}
+
+// extractVersionJSON extracts version from a JSON API using JSONPath.
+func (w *Web) extractVersionJSON(ctx context.Context, apiURL string, ext *config.JSONExtractor) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := w.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("API fetch failed with status %d", resp.StatusCode)
+	}
+
+	// Parse JSON
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return "", fmt.Errorf("failed to parse JSON: %w", err)
+	}
+
+	// Evaluate JSONPath
+	result, err := jsonpath.Get(ext.Path, data)
+	if err != nil {
+		return "", fmt.Errorf("JSONPath %q failed: %w", ext.Path, err)
+	}
+
+	// Convert result to string
+	var value string
+	switch v := result.(type) {
+	case string:
+		value = v
+	case float64:
+		// Handle numeric versions (e.g., 1.0 becomes "1")
+		if v == float64(int64(v)) {
+			value = fmt.Sprintf("%d", int64(v))
+		} else {
+			value = fmt.Sprintf("%g", v)
+		}
+	default:
+		value = fmt.Sprintf("%v", v)
+	}
+
+	// Apply optional pattern
+	if ext.Pattern != "" {
+		return extractWithPattern(value, ext.Pattern)
+	}
+	return value, nil
+}
+
+// extractVersionRedirect extracts version from HTTP redirect headers.
+func (w *Web) extractVersionRedirect(ctx context.Context, pageURL string, ext *config.RedirectExtractor) (string, error) {
+	// Don't follow redirects - we want to capture the redirect header
 	client := &http.Client{
 		Timeout: 30 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			redirectURLs = append(redirectURLs, req.URL.String())
-			return nil
+			return http.ErrUseLastResponse // Stop at first redirect
 		},
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", pageURL, nil)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch page: %w", err)
+		return "", fmt.Errorf("failed to fetch page: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("page fetch failed with status %d", resp.StatusCode)
+	// Check if we got a redirect
+	if resp.StatusCode < 300 || resp.StatusCode >= 400 {
+		return "", fmt.Errorf("expected redirect, got status %d", resp.StatusCode)
 	}
 
-	var matches []string
-	seen := make(map[string]bool)
-
-	addMatch := func(u string) {
-		resolved := resolveAssetURL(pageURL, u)
-		if !seen[resolved] {
-			seen[resolved] = true
-			matches = append(matches, resolved)
+	// Get the header value
+	headerName := strings.ToLower(ext.Header)
+	var value string
+	for name, values := range resp.Header {
+		if strings.ToLower(name) == headerName && len(values) > 0 {
+			value = values[0]
+			break
 		}
 	}
 
-	// 1. Check redirect chain
-	for _, u := range redirectURLs {
-		if pattern.MatchString(u) {
-			addMatch(u)
-		}
+	if value == "" {
+		return "", fmt.Errorf("header %q not found in response", ext.Header)
 	}
 
-	// 2. Check final URL
-	if pattern.MatchString(resp.Request.URL.String()) {
-		addMatch(resp.Request.URL.String())
-	}
-
-	// 3. Check Location header (for non-followed redirects)
-	if loc := resp.Header.Get("Location"); loc != "" && pattern.MatchString(loc) {
-		addMatch(loc)
-	}
-
-	// 4. Search body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read page: %w", err)
-	}
-
-	bodyMatches := pattern.FindAllString(string(body), -1)
-	for _, m := range bodyMatches {
-		addMatch(m)
-	}
-
-	return matches, nil
+	// Apply pattern to extract version
+	return extractWithPattern(value, ext.Pattern)
 }
 
-// resolveAssetURL resolves a potentially relative URL against a base URL.
-func resolveAssetURL(baseURL, matchedURL string) string {
-	// If already absolute, use as-is
-	if strings.HasPrefix(matchedURL, "http://") || strings.HasPrefix(matchedURL, "https://") {
-		return matchedURL
+// extractWithPattern applies a regex pattern to extract a version string.
+// The pattern should have at least one capture group.
+func extractWithPattern(value, pattern string) (string, error) {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return "", fmt.Errorf("invalid pattern %q: %w", pattern, err)
 	}
 
-	// Resolve relative to base URL
-	base, err := url.Parse(baseURL)
-	if err != nil {
-		return matchedURL
+	matches := re.FindStringSubmatch(value)
+	if len(matches) < 2 {
+		return "", fmt.Errorf("pattern %q did not match value %q", pattern, value)
 	}
-	ref, err := url.Parse(matchedURL)
-	if err != nil {
-		return matchedURL
-	}
-	return base.ResolveReference(ref).String()
+
+	return matches[1], nil
 }
 
-// urlsEqual checks if two URL slices contain the same URLs (order-independent).
-func urlsEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
+// checkHTTPCacheHeaders checks if a resource has been modified using ETag/Last-Modified.
+// Returns (modified, newETag, newLastModified, error).
+func (w *Web) checkHTTPCacheHeaders(ctx context.Context, url, etag, lastModified string) (bool, string, string, error) {
+	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
+	if err != nil {
+		return true, "", "", err
 	}
-	aSet := make(map[string]bool)
-	for _, u := range a {
-		aSet[u] = true
+
+	// Add conditional headers if we have cached values
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
 	}
-	for _, u := range b {
-		if !aSet[u] {
-			return false
-		}
+	if lastModified != "" {
+		req.Header.Set("If-Modified-Since", lastModified)
 	}
-	return true
+
+	resp, err := w.client.Do(req)
+	if err != nil {
+		return true, "", "", fmt.Errorf("HEAD request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// 304 Not Modified means resource hasn't changed
+	if resp.StatusCode == http.StatusNotModified {
+		return false, etag, lastModified, nil
+	}
+
+	// Get new caching headers
+	newETag := resp.Header.Get("ETag")
+	newLastMod := resp.Header.Get("Last-Modified")
+
+	// If we had old values and they match new ones, not modified
+	if etag != "" && newETag != "" && etag == newETag {
+		return false, newETag, newLastMod, nil
+	}
+	if lastModified != "" && newLastMod != "" && lastModified == newLastMod {
+		return false, newETag, newLastMod, nil
+	}
+
+	return true, newETag, newLastMod, nil
 }
 
 // Download downloads an APK from the web.

@@ -61,78 +61,74 @@ func main() {
 func run(sigHandler *cli.SignalHandler) int {
 	ctx := sigHandler.Context()
 
-	// Parse CLI flags
-	opts, args := cli.ParseFlags()
+	// Set the global UI context so prompts respect Ctrl+C
+	ui.SetContext(ctx)
 
-	// Handle help flag
-	if opts.Help {
-		help.HandleHelp(nil)
-		return 0
-	}
+	// Parse CLI command and flags
+	opts := cli.ParseCommand()
 
-	// Handle version flag
-	if opts.Version {
-		fmt.Print(ui.Title(ui.Logo))
-		fmt.Printf("zsp version %s\n", getVersion())
-		return 0
-	}
+	// Set version for UI rendering
+	ui.SetVersion(getVersion())
 
-	// Handle no-color flag
-	if opts.NoColor {
+	// Handle no-color flag (global)
+	if opts.Global.NoColor {
 		ui.SetNoColor(true)
 	}
 
-	// Handle extract-apk flag
-	if opts.ExtractAPK {
-		if len(args) == 0 || !strings.HasSuffix(strings.ToLower(args[0]), ".apk") {
-			fmt.Fprintln(os.Stderr, "Error: --extract-apk requires a local APK file as argument")
-			return 1
-		}
-		if err := extractAPKMetadata(args[0]); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return 1
-		}
+	// Handle version flag
+	if opts.Global.Version {
+		fmt.Print(ui.RenderLogo())
 		return 0
 	}
 
-	// Handle check-apk flag
-	if opts.CheckAPK {
-		if err := checkAPK(ctx, opts, args); err != nil {
+	// Handle help flag at root or for subcommand
+	if opts.Global.Help {
+		help.HandleHelp(opts.Command, opts.Args)
+		return 0
+	}
+
+	// Dispatch to subcommand
+	switch opts.Command {
+	case cli.CommandPublish:
+		return runPublishCommand(ctx, opts)
+	case cli.CommandIdentity:
+		return runIdentityCommand(ctx, opts)
+	case cli.CommandAPK:
+		return runAPKCommand(ctx, opts)
+	default:
+		// No subcommand - show help
+		help.HandleHelp(cli.CommandNone, nil)
+		return 0
+	}
+}
+
+// runPublishCommand handles the publish subcommand.
+func runPublishCommand(ctx context.Context, opts *cli.Options) int {
+	// Handle no-color for subcommand
+	if opts.Global.NoColor {
+		ui.SetNoColor(true)
+	}
+
+	// Handle --check flag (validates config without publishing)
+	if opts.Publish.Check {
+		if err := checkAPK(ctx, opts); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
 		return 0
 	}
 
-	// Handle --link-identity flag
-	if opts.LinkIdentity != "" {
-		if err := runLinkIdentity(ctx, opts); err != nil {
-			if errors.Is(err, identity.ErrJKSFormat) {
-				fmt.Fprint(os.Stderr, identity.JKSConversionHelp(opts.LinkIdentity))
-				return 1
-			}
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return 1
-		}
-		return 0
-	}
-
-	// Handle --verify-identity flag
-	if opts.VerifyIdentity != "" {
-		if err := runVerifyIdentity(ctx, opts); err != nil {
-			if errors.Is(err, identity.ErrJKSFormat) {
-				fmt.Fprint(os.Stderr, identity.JKSConversionHelp(opts.VerifyIdentity))
-				return 1
-			}
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return 1
-		}
-		return 0
-	}
-
 	// Load configuration
-	cfg, err := loadConfig(opts, args)
+	cfg, err := loadConfig(&opts.Publish, opts.Args)
 	if err != nil {
+		// Wizard completed successfully - user should run the displayed command
+		if errors.Is(err, config.ErrWizardComplete) {
+			return 0
+		}
+		// User interrupted with Ctrl+C
+		if errors.Is(err, ui.ErrInterrupted) {
+			return 130
+		}
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 1
 	}
@@ -143,12 +139,15 @@ func run(sigHandler *cli.SignalHandler) int {
 		return 1
 	}
 
-	// Apply CLI flag overrides
-	if opts.Match != "" {
-		cfg.Match = opts.Match
+	// Validate CLI options
+	if err := opts.Publish.ValidateChannel(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
 	}
-	if opts.Commit != "" {
-		cfg.Commit = opts.Commit
+
+	// Apply CLI flag overrides
+	if opts.Publish.Match != "" {
+		cfg.Match = opts.Publish.Match
 	}
 
 	// Run the publish workflow
@@ -166,6 +165,74 @@ func run(sigHandler *cli.SignalHandler) int {
 	return 0
 }
 
+// runIdentityCommand handles the identity subcommand.
+func runIdentityCommand(ctx context.Context, opts *cli.Options) int {
+	// Handle no-color for subcommand
+	if opts.Global.NoColor {
+		ui.SetNoColor(true)
+	}
+
+	// Determine which identity operation
+	if opts.Identity.LinkKey != "" {
+		if err := runLinkKey(ctx, opts); err != nil {
+			if errors.Is(err, ui.ErrInterrupted) || errors.Is(err, context.Canceled) {
+				return 130
+			}
+			if errors.Is(err, identity.ErrJKSFormat) {
+				fmt.Fprint(os.Stderr, identity.JKSConversionHelp(opts.Identity.LinkKey))
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	if opts.Identity.Verify != "" {
+		if err := runVerifyIdentity(ctx, opts); err != nil {
+			if errors.Is(err, ui.ErrInterrupted) || errors.Is(err, context.Canceled) {
+				return 130
+			}
+			if errors.Is(err, identity.ErrJKSFormat) {
+				fmt.Fprint(os.Stderr, identity.JKSConversionHelp(opts.Identity.Verify))
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	// No operation specified - show help
+	help.HandleHelp(cli.CommandIdentity, nil)
+	return 0
+}
+
+// runAPKCommand handles the apk subcommand.
+func runAPKCommand(ctx context.Context, opts *cli.Options) int {
+	// Handle no-color for subcommand
+	if opts.Global.NoColor {
+		ui.SetNoColor(true)
+	}
+
+	if opts.APK.Extract {
+		if len(opts.Args) == 0 || !strings.HasSuffix(strings.ToLower(opts.Args[0]), ".apk") {
+			fmt.Fprintln(os.Stderr, "Error: --extract requires a local APK file as argument")
+			fmt.Fprintln(os.Stderr, "Usage: zsp apk --extract <file.apk>")
+			return 1
+		}
+		if err := extractAPKMetadata(opts.Args[0]); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	// No operation specified - show help
+	help.HandleHelp(cli.CommandAPK, nil)
+	return 0
+}
+
 // runPublish executes the publish workflow.
 func runPublish(ctx context.Context, opts *cli.Options, cfg *config.Config) error {
 	pub, err := workflow.NewPublisher(opts, cfg)
@@ -178,7 +245,7 @@ func runPublish(ctx context.Context, opts *cli.Options, cfg *config.Config) erro
 }
 
 // loadConfig loads configuration from various sources.
-func loadConfig(opts *cli.Options, args []string) (*config.Config, error) {
+func loadConfig(opts *cli.PublishOptions, args []string) (*config.Config, error) {
 	// --wizard flag: run wizard with optional existing config as defaults
 	if opts.Wizard {
 		if opts.Quiet {
@@ -192,7 +259,9 @@ func loadConfig(opts *cli.Options, args []string) (*config.Config, error) {
 		if cfg, err := config.Load(configPath); err == nil {
 			defaults = cfg
 		}
-		return config.RunWizard(defaults)
+		return config.RunWizardWithOptions(defaults, config.WizardOptions{
+			FetchAPKInfo: fetchAPKInfoForWizard,
+		})
 	}
 
 	// Quick mode with APK file as positional argument
@@ -223,14 +292,82 @@ func loadConfig(opts *cli.Options, args []string) (*config.Config, error) {
 
 	// Launch interactive wizard
 	if opts.Quiet {
-		return nil, fmt.Errorf("no configuration provided. Use 'zsp <config.yaml>' or 'zsp -r <repo-url>'")
+		return nil, fmt.Errorf("no configuration provided. Use 'zsp publish <config.yaml>' or 'zsp publish -r <repo-url>'")
 	}
 
-	return config.RunWizard(nil)
+	return config.RunWizardWithOptions(nil, config.WizardOptions{
+		FetchAPKInfo: fetchAPKInfoForWizard,
+	})
+}
+
+// fetchAPKInfoForWizard downloads the APK and extracts basic info.
+// This is passed as a callback to the wizard since config package can't import source/picker/apk.
+func fetchAPKInfoForWizard(cfg *config.Config, matchPattern string) *config.APKBasicInfo {
+	ctx := ui.GetContext()
+
+	spinner := ui.NewSpinner("Fetching APK to detect app info...")
+	spinner.Start()
+
+	src, err := source.NewWithOptions(cfg, source.Options{})
+	if err != nil {
+		spinner.StopWithWarning("Could not create source")
+		return nil
+	}
+
+	release, err := src.FetchLatestRelease(ctx)
+	if err != nil {
+		spinner.StopWithWarning("Could not fetch release")
+		return nil
+	}
+
+	// Filter to APKs
+	apkAssets := picker.FilterAPKs(release.Assets)
+	if len(apkAssets) == 0 {
+		spinner.StopWithWarning("No APK found in release")
+		return nil
+	}
+
+	// Apply match pattern if specified
+	if matchPattern != "" {
+		apkAssets, err = picker.FilterByMatch(apkAssets, matchPattern)
+		if err != nil || len(apkAssets) == 0 {
+			spinner.StopWithWarning("No APK matches pattern")
+			return nil
+		}
+	}
+
+	// Pick the best APK
+	var selectedAsset *source.Asset
+	if len(apkAssets) == 1 {
+		selectedAsset = apkAssets[0]
+	} else {
+		ranked := picker.DefaultModel.RankAssets(apkAssets)
+		selectedAsset = ranked[0].Asset
+	}
+
+	// Download the APK
+	apkPath, err := src.Download(ctx, selectedAsset, "", nil)
+	if err != nil {
+		spinner.StopWithWarning("Could not download APK")
+		return nil
+	}
+
+	// Parse the APK
+	apkInfo, err := apk.Parse(apkPath)
+	if err != nil {
+		spinner.StopWithWarning("Could not parse APK")
+		return nil
+	}
+
+	spinner.StopWithSuccess(fmt.Sprintf("Found app: %s", apkInfo.PackageID))
+	return &config.APKBasicInfo{
+		PackageID: apkInfo.PackageID,
+		AppName:   apkInfo.Label,
+	}
 }
 
 // loadAPKConfig creates config from a local APK path with optional -r and -s flags.
-func loadAPKConfig(opts *cli.Options, apkPath string) (*config.Config, error) {
+func loadAPKConfig(opts *cli.PublishOptions, apkPath string) (*config.Config, error) {
 	cfg := &config.Config{
 		Local: apkPath,
 	}
@@ -255,7 +392,7 @@ func loadAPKConfig(opts *cli.Options, apkPath string) (*config.Config, error) {
 }
 
 // loadRepoConfig creates config from -r flag.
-func loadRepoConfig(opts *cli.Options) (*config.Config, error) {
+func loadRepoConfig(opts *cli.PublishOptions) (*config.Config, error) {
 	repoURL := normalizeRepoURL(opts.RepoURL)
 	if err := config.ValidateURL(repoURL); err != nil {
 		return nil, fmt.Errorf("invalid -r URL: %w", err)
@@ -320,8 +457,19 @@ func extractAPKMetadata(apkPath string) error {
 }
 
 // checkAPK verifies that a configuration correctly fetches and processes an arm64-v8a APK.
-func checkAPK(ctx context.Context, opts *cli.Options, args []string) error {
-	cfg, err := loadConfig(opts, args)
+func checkAPK(ctx context.Context, opts *cli.Options) error {
+	// For check, we need to load config from args
+	var cfg *config.Config
+	var err error
+
+	if len(opts.Args) > 0 {
+		cfg, err = config.Load(opts.Args[0])
+	} else if _, statErr := os.Stat("zapstore.yaml"); statErr == nil {
+		cfg, err = config.Load("zapstore.yaml")
+	} else {
+		return fmt.Errorf("no configuration provided. Use 'zsp publish --check <config.yaml>'")
+	}
+
 	if err != nil {
 		return err
 	}
@@ -389,9 +537,9 @@ func checkAPK(ctx context.Context, opts *cli.Options, args []string) error {
 	return nil
 }
 
-// runLinkIdentity handles the --link-identity flag for cryptographic identity proofs (NIP-C1).
-func runLinkIdentity(ctx context.Context, opts *cli.Options) error {
-	filePath := opts.LinkIdentity
+// runLinkKey handles the --link-key flag for cryptographic identity proofs (NIP-C1).
+func runLinkKey(ctx context.Context, opts *cli.Options) error {
+	filePath := opts.Identity.LinkKey
 
 	// Check file exists
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
@@ -399,9 +547,9 @@ func runLinkIdentity(ctx context.Context, opts *cli.Options) error {
 	}
 
 	// Parse expiry duration
-	expiry, err := cli.ParseExpiryDuration(opts.IdentityExpiry)
+	expiry, err := cli.ParseExpiryDuration(opts.Identity.LinkKeyExpiry)
 	if err != nil {
-		return fmt.Errorf("invalid --identity-expiry: %w", err)
+		return fmt.Errorf("invalid --link-key-expiry: %w", err)
 	}
 
 	// 1. Load x509 key and certificate based on file type
@@ -424,9 +572,6 @@ func runLinkIdentity(ctx context.Context, opts *cli.Options) error {
 	// 2. Get signWith config
 	signWith := config.GetSignWith()
 	if signWith == "" {
-		if opts.Quiet {
-			return fmt.Errorf("SIGN_WITH environment variable is required")
-		}
 		ui.PrintSectionHeader("Signing Setup")
 		signWith, err = config.PromptSignWith()
 		if err != nil {
@@ -435,7 +580,7 @@ func runLinkIdentity(ctx context.Context, opts *cli.Options) error {
 	}
 
 	// 3. Create publisher with identity-specific relays
-	publisher := nostrpkg.NewPublisher(opts.IdentityRelays)
+	publisher := nostrpkg.NewPublisher(opts.Identity.Relays)
 
 	// 4. Try to get pubkey without opening browser (for nsec/npub/hex)
 	// This allows checking existing proofs BEFORE browser opens
@@ -456,9 +601,7 @@ func runLinkIdentity(ctx context.Context, opts *cli.Options) error {
 	}
 
 	// 5. Create signer (browser opens here for browser signers)
-	signer, err := nostrpkg.NewSignerWithOptions(ctx, signWith, nostrpkg.SignerOptions{
-		Port: opts.Port,
-	})
+	signer, err := nostrpkg.NewSignerWithOptions(ctx, signWith, nostrpkg.SignerOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to create signer: %w", err)
 	}
@@ -503,7 +646,7 @@ func runLinkIdentity(ctx context.Context, opts *cli.Options) error {
 	signSpinner.StopWithSuccess("Signed identity event")
 
 	// 9. Dry run: show event and exit
-	if opts.DryRun {
+	if opts.Identity.DryRun {
 		fmt.Println()
 		fmt.Println(ui.Dim("─────────────────────────────────────────────────────────────────────"))
 		fmt.Println(ui.Warning("You are in dry run mode. Event was NOT published."))
@@ -520,53 +663,48 @@ func runLinkIdentity(ctx context.Context, opts *cli.Options) error {
 		return fmt.Errorf("failed to encode public key: %w", err)
 	}
 
-	// 10. Interactive menu for preview/publish (like main workflow)
-	if !opts.Yes {
-		ui.PrintSectionHeader("Ready to Publish")
-		fmt.Printf("  SPKIFP: %s\n", proof.SPKIFP)
-		fmt.Printf("  Nostr pubkey: %s\n", npub)
-		fmt.Printf("  Created: %s\n", proof.CreatedAtTime().Format("2006-01-02 15:04:05 UTC"))
-		fmt.Printf("  Expires: %s\n", proof.ExpiryTime().Format("2006-01-02 15:04:05 UTC"))
-		fmt.Printf("  Target: %s\n", strings.Join(opts.IdentityRelays, ", "))
-		fmt.Println()
+	// 10. Interactive menu for preview/publish
+	ui.PrintSectionHeader("Ready to Publish")
+	fmt.Printf("  SPKIFP: %s\n", proof.SPKIFP)
+	fmt.Printf("  Nostr pubkey: %s\n", npub)
+	fmt.Printf("  Created: %s\n", proof.CreatedAtTime().Format("2006-01-02 15:04:05 UTC"))
+	fmt.Printf("  Expires: %s\n", proof.ExpiryTime().Format("2006-01-02 15:04:05 UTC"))
+	fmt.Printf("  Target: %s\n", strings.Join(opts.Identity.Relays, ", "))
+	fmt.Println()
 
-		for {
-			options := []string{
-				"Preview event (JSON)",
-				"Publish now",
-				"Exit without publishing",
-			}
+	for {
+		options := []string{
+			"Preview event (JSON)",
+			"Publish now",
+			"Exit without publishing",
+		}
 
-			idx, err := ui.SelectOption("Choose an option:", options, 1)
-			if err != nil {
-				return fmt.Errorf("selection failed: %w", err)
-			}
+		idx, err := ui.SelectOption("Choose an option:", options, 1)
+		if err != nil {
+			return fmt.Errorf("selection failed: %w", err)
+		}
 
-			switch idx {
-			case 0:
-				// Preview JSON
-				fmt.Println()
-				fmt.Printf("%s\n", ui.Bold("Kind 30509 (Cryptographic Identity Proof):"))
-				printIdentityEventJSON(identityEvent)
-				fmt.Println()
-			case 1:
-				// Publish
-				return publishIdentityProof(ctx, publisher, identityEvent, opts)
-			case 2:
-				// Exit
-				fmt.Println(ui.Warning("Aborted - identity proof was NOT published"))
-				return nil
-			}
+		switch idx {
+		case 0:
+			// Preview JSON
+			fmt.Println()
+			fmt.Printf("%s\n", ui.Bold("Kind 30509 (Cryptographic Identity Proof):"))
+			printIdentityEventJSON(identityEvent)
+			fmt.Println()
+		case 1:
+			// Publish
+			return publishIdentityProof(ctx, publisher, identityEvent, opts)
+		case 2:
+			// Exit
+			fmt.Println(ui.Warning("Aborted - identity proof was NOT published"))
+			return nil
 		}
 	}
-
-	// Auto-publish with -y flag
-	return publishIdentityProof(ctx, publisher, identityEvent, opts)
 }
 
 // publishIdentityProof publishes the identity proof event to relays.
 func publishIdentityProof(ctx context.Context, publisher *nostrpkg.Publisher, event *nostr.Event, opts *cli.Options) error {
-	publishSpinner := ui.NewSpinner(fmt.Sprintf("Publishing to %d relays...", len(opts.IdentityRelays)))
+	publishSpinner := ui.NewSpinner(fmt.Sprintf("Publishing to %d relays...", len(opts.Identity.Relays)))
 	publishSpinner.Start()
 
 	results := publisher.Publish(ctx, event)
@@ -617,9 +755,9 @@ func printIdentityEventJSON(event *nostr.Event) {
 	fmt.Println(ui.ColorizeJSON(string(data)))
 }
 
-// runVerifyIdentity handles the --verify-identity flag to verify cryptographic identity proofs (NIP-C1).
+// runVerifyIdentity handles the --verify flag to verify cryptographic identity proofs (NIP-C1).
 func runVerifyIdentity(ctx context.Context, opts *cli.Options) error {
-	filePath := opts.VerifyIdentity
+	filePath := opts.Identity.Verify
 
 	// Check file exists
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
@@ -694,9 +832,6 @@ func runVerifyIdentity(ctx context.Context, opts *cli.Options) error {
 		// For certificate files, use SIGN_WITH
 		signWith := config.GetSignWith()
 		if signWith == "" {
-			if opts.Quiet {
-				return fmt.Errorf("SIGN_WITH environment variable is required")
-			}
 			ui.PrintSectionHeader("Signing Setup")
 			signWith, err = config.PromptSignWith()
 			if err != nil {
@@ -705,9 +840,7 @@ func runVerifyIdentity(ctx context.Context, opts *cli.Options) error {
 		}
 
 		// Create signer to get public key
-		signer, err := nostrpkg.NewSignerWithOptions(ctx, signWith, nostrpkg.SignerOptions{
-			Port: opts.Port,
-		})
+		signer, err := nostrpkg.NewSignerWithOptions(ctx, signWith, nostrpkg.SignerOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to create signer: %w", err)
 		}
@@ -725,10 +858,10 @@ func runVerifyIdentity(ctx context.Context, opts *cli.Options) error {
 	fmt.Println()
 	ui.PrintSectionHeader("Fetching Identity Proof")
 	fmt.Printf("  Nostr pubkey: %s\n", npub)
-	fmt.Printf("  Relays: %v\n", opts.IdentityRelays)
+	fmt.Printf("  Relays: %v\n", opts.Identity.Relays)
 
 	// 5. Fetch identity proof for this SPKIFP from relays
-	publisher := nostrpkg.NewPublisher(opts.IdentityRelays)
+	publisher := nostrpkg.NewPublisher(opts.Identity.Relays)
 	identityEvent, err := publisher.FetchIdentityProof(ctx, pubkeyHex, certSPKIFP)
 	if err != nil {
 		return fmt.Errorf("failed to fetch identity proof: %w", err)

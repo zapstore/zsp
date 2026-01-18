@@ -1,0 +1,10 @@
+# Web source with JSON API version extraction
+# Version is extracted from a JSON API endpoint using JSONPath
+name: Example App
+
+release_source:
+  url: https://api.example.com/releases/latest
+  version_json:
+    path: "$.tag_name"
+    pattern: "v([0-9.]+)"
+  asset_url: https://releases.example.com/app-v{version}.apk

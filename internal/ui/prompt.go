@@ -1,26 +1,78 @@
 package ui
 
 import (
-	"bufio"
 	"fmt"
+	"io"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"golang.org/x/term"
 )
 
+// readLineResult holds the result of a non-blocking line read.
+type readLineResult struct {
+	line string
+	err  error
+}
+
+// readLineAsync reads a line from stdin in a goroutine using raw os.Stdin.Read().
+// Does NOT use bufio to avoid buffering conflicts with bubbletea.
+// The goroutine is abandoned if context is cancelled (Go stdin reads cannot be interrupted).
+func readLineAsync() <-chan readLineResult {
+	ch := make(chan readLineResult, 1)
+	go func() {
+		var line []byte
+		buf := make([]byte, 1)
+		for {
+			n, err := os.Stdin.Read(buf)
+			if err != nil {
+				if err == io.EOF && len(line) > 0 {
+					ch <- readLineResult{line: strings.TrimSpace(string(line))}
+					return
+				}
+				ch <- readLineResult{err: err}
+				return
+			}
+			if n > 0 {
+				if buf[0] == '\n' {
+					ch <- readLineResult{line: strings.TrimSpace(string(line))}
+					return
+				}
+				if buf[0] != '\r' { // Skip carriage return
+					line = append(line, buf[0])
+				}
+			}
+		}
+	}()
+	return ch
+}
+
 // Prompt asks for user input with a prompt message.
+// Returns ErrInterrupted if Ctrl+C is pressed.
 func Prompt(message string) (string, error) {
-	fmt.Print(message)
-	reader := bufio.NewReader(os.Stdin)
-	input, err := reader.ReadString('\n')
-	if err != nil {
-		return "", err
+	ctx := GetContext()
+
+	// Check if already interrupted before prompting
+	if IsInterrupted() {
+		return "", ErrInterrupted
 	}
-	return strings.TrimSpace(input), nil
+
+	fmt.Print(message)
+
+	// Read in goroutine so we can select on context cancellation
+	resultCh := readLineAsync()
+
+	select {
+	case <-ctx.Done():
+		fmt.Println() // Print newline for clean output
+		return "", ErrInterrupted
+	case result := <-resultCh:
+		if result.err != nil {
+			return "", result.err
+		}
+		return result.line, nil
+	}
 }
 
 // PromptDefault asks for user input with a default value.
@@ -75,33 +127,45 @@ func SelectMultiple(message string, options []string) ([]int, error) {
 	return SelectMultipleWithArrows(message, options)
 }
 
+// SelectMultipleWithDefaults presents a list of options with some pre-selected.
+// preselected is a list of indices to pre-select.
+func SelectMultipleWithDefaults(message string, options []string, preselected []int) ([]int, error) {
+	return SelectMultiplePreselected(message, options, preselected)
+}
+
 // PromptSecret asks for secret input (like passwords or keys).
 // Note: This doesn't actually hide input - for that we'd need terminal raw mode.
 func PromptSecret(message string) (string, error) {
-	fmt.Print(message + ": ")
-	reader := bufio.NewReader(os.Stdin)
-	input, err := reader.ReadString('\n')
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(input), nil
+	return Prompt(message + ": ")
 }
 
 // PromptPassword asks for password input with hidden characters.
-// Handles Ctrl+C gracefully by restoring terminal state.
+// Returns ErrInterrupted if Ctrl+C is pressed.
 func PromptPassword(message string) (string, error) {
+	ctx := GetContext()
+
+	// Check if already interrupted
+	if IsInterrupted() {
+		return "", ErrInterrupted
+	}
+
 	fmt.Print(message + ": ")
 
 	// Check if stdin is a terminal
 	fd := int(os.Stdin.Fd())
 	if !term.IsTerminal(fd) {
 		// Fall back to regular input if not a terminal
-		reader := bufio.NewReader(os.Stdin)
-		input, err := reader.ReadString('\n')
-		if err != nil {
-			return "", err
+		resultCh := readLineAsync()
+		select {
+		case <-ctx.Done():
+			fmt.Println()
+			return "", ErrInterrupted
+		case result := <-resultCh:
+			if result.err != nil {
+				return "", result.err
+			}
+			return result.line, nil
 		}
-		return strings.TrimSpace(input), nil
 	}
 
 	// Save terminal state before reading password
@@ -109,11 +173,6 @@ func PromptPassword(message string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
-	// Set up signal handler to restore terminal on Ctrl+C
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
 
 	// Channel to receive password result
 	resultCh := make(chan struct {
@@ -130,15 +189,11 @@ func PromptPassword(message string) (string, error) {
 	}()
 
 	select {
-	case sig := <-sigCh:
-		// Restore terminal state before exiting
+	case <-ctx.Done():
+		// Restore terminal state before returning
 		term.Restore(fd, oldState)
 		fmt.Println() // Print newline
-		// Re-raise the signal so the main handler can catch it
-		signal.Stop(sigCh)
-		p, _ := os.FindProcess(os.Getpid())
-		p.Signal(sig)
-		return "", fmt.Errorf("interrupted")
+		return "", ErrInterrupted
 	case result := <-resultCh:
 		fmt.Println() // Print newline after password entry
 		if result.err != nil {

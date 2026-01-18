@@ -1,7 +1,11 @@
-# Web source with HTML page scraping
-# APK URL pattern is matched in the page body
+# Web source with HTML version extraction
+# Version is extracted from the page using CSS selector, then used in asset_url
 repository: https://github.com/AntennaPod/AntennaPod
 
 release_source:
   url: https://f-droid.org/packages/de.danoeh.antennapod/
-  asset_url: https://f-droid\.org/repo/de\.danoeh\.antennapod_[0-9]+\.apk
+  version_html:
+    selector: ".package-version-header"
+    attribute: text
+    pattern: "([0-9.]+)"
+  asset_url: https://f-droid.org/repo/de.danoeh.antennapod_{version}.apk

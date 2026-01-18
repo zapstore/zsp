@@ -161,23 +161,34 @@ func (m selectModel) View() string {
 }
 
 // Select presents a list of options for arrow-key selection.
-// Returns the selected index and nil error on success, or -1 and error if aborted.
+// Returns the selected index and nil error on success, or -1 and ErrInterrupted if aborted.
 func Select(title string, options []string, recommended int) (int, error) {
+	ctx := GetContext()
+
+	// Check if already interrupted
+	if IsInterrupted() {
+		return -1, ErrInterrupted
+	}
+
 	if len(options) == 0 {
 		return -1, fmt.Errorf("no options provided")
 	}
 
 	m := newSelectModel(title, options, recommended)
-	p := tea.NewProgram(m)
+	p := tea.NewProgram(m, tea.WithContext(ctx))
 
 	finalModel, err := p.Run()
 	if err != nil {
+		// Check if context was cancelled
+		if ctx.Err() != nil {
+			return -1, ErrInterrupted
+		}
 		return -1, fmt.Errorf("selector failed: %w", err)
 	}
 
 	result := finalModel.(selectModel)
 	if result.aborted {
-		return -1, fmt.Errorf("selection aborted")
+		return -1, ErrInterrupted
 	}
 
 	return result.selected, nil
@@ -186,21 +197,38 @@ func Select(title string, options []string, recommended int) (int, error) {
 // SelectMultipleWithArrows presents a list of options for multiple selection with arrow keys.
 // Space toggles selection, Enter confirms.
 func SelectMultipleWithArrows(title string, options []string) ([]int, error) {
+	return SelectMultiplePreselected(title, options, nil)
+}
+
+// SelectMultiplePreselected presents a list of options with some pre-selected.
+// preselected is a list of indices to pre-select.
+func SelectMultiplePreselected(title string, options []string, preselected []int) ([]int, error) {
+	ctx := GetContext()
+
+	// Check if already interrupted
+	if IsInterrupted() {
+		return nil, ErrInterrupted
+	}
+
 	if len(options) == 0 {
 		return nil, fmt.Errorf("no options provided")
 	}
 
-	m := newMultiSelectModel(title, options)
-	p := tea.NewProgram(m)
+	m := newMultiSelectModelWithPreselected(title, options, preselected)
+	p := tea.NewProgram(m, tea.WithContext(ctx))
 
 	finalModel, err := p.Run()
 	if err != nil {
+		// Check if context was cancelled
+		if ctx.Err() != nil {
+			return nil, ErrInterrupted
+		}
 		return nil, fmt.Errorf("selector failed: %w", err)
 	}
 
 	result := finalModel.(multiSelectModel)
 	if result.aborted {
-		return nil, fmt.Errorf("selection aborted")
+		return nil, ErrInterrupted
 	}
 
 	return result.getSelected(), nil
@@ -217,6 +245,10 @@ type multiSelectModel struct {
 }
 
 func newMultiSelectModel(title string, options []string) multiSelectModel {
+	return newMultiSelectModelWithPreselected(title, options, nil)
+}
+
+func newMultiSelectModelWithPreselected(title string, options []string, preselected []int) multiSelectModel {
 	styles := selectStyles{
 		title:       lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#e0e0e0")),
 		cursor:      lipgloss.NewStyle().Foreground(lipgloss.Color("#6b8c6b")), // Muted green
@@ -237,10 +269,18 @@ func newMultiSelectModel(title string, options []string) multiSelectModel {
 		}
 	}
 
+	// Initialize selected map with preselected indices
+	selected := make(map[int]bool)
+	for _, idx := range preselected {
+		if idx >= 0 && idx < len(options) {
+			selected[idx] = true
+		}
+	}
+
 	return multiSelectModel{
 		title:    title,
 		options:  options,
-		selected: make(map[int]bool),
+		selected: selected,
 		styles:   styles,
 	}
 }

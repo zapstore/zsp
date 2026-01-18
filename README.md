@@ -29,26 +29,31 @@ Download from [releases](https://github.com/zapstore/zsp/releases).
 # Set your signing key
 export SIGN_WITH=nsec1...
 
-# Publish from GitHub
-zsp -r github.com/user/app
+# Publish from GitHub (open source - repository has releases)
+zsp publish -r github.com/user/app
 
 # Publish from GitHub pulling metadata from Play Store
-zsp -r github.com/user/app -m playstore
+zsp publish -r github.com/user/app -m playstore
 
-# Publish local APK
-zsp app.apk -r github.com/user/app
+# Closed source app (releases on GitHub, but no source code)
+zsp publish -s github.com/user/app -m playstore
 
-# Need more options? The interactive wizard helps you create a config file
-zsp
+# Publish local APK with repository metadata
+zsp publish app.apk -r github.com/user/app
+
+# Not sure what options to use? The interactive wizard helps you determine
+# the best command and/or creates a config file for you
+zsp publish --wizard
 
 # Publish from config file
-zsp zapstore.yaml
+zsp publish zapstore.yaml
 ```
 
-At any point, run the (actually helpful) help command:
+At any point, run the help command or the wizard:
 
 ```bash
 zsp --help
+zsp publish --wizard  # Interactive mode to determine best options
 ```
 
 ---
@@ -196,6 +201,7 @@ release_source: https://f-droid.org/packages/com.example.app
 local: ./build/app-release.apk
 
 # Regex pattern to filter APK assets from releases
+# (rarely needed - system auto-selects best arm64-v8a APK)
 match: ".*arm64.*\\.apk$"
 
 # ═══════════════════════════════════════════════════════════════════
@@ -281,6 +287,7 @@ variants:
 # ═══════════════════════════════════════════════════════════════════
 
 # External sources for metadata enrichment
+# Note: metadata is only fetched for new apps or when --overwrite-app is set
 metadata_sources:
   - playstore
   - fdroid
@@ -296,7 +303,7 @@ metadata_sources:
 zsp [config.yaml]              # Config file (default: ./zapstore.yaml)
 zsp <app.apk> [-r <repo>]      # Local APK with optional source repo
 zsp -r <repo>                  # Fetch latest release from repo
-zsp <app.apk> --extract-apk    # Extract APK metadata as JSON
+zsp apk --extract <app.apk>    # Extract APK metadata as JSON
 zsp                            # Interactive wizard
 zsp --wizard                   # Wizard with existing config as defaults
 ```
@@ -305,9 +312,9 @@ zsp --wizard                   # Wizard with existing config as defaults
 
 | Flag | Description |
 |------|-------------|
-| `-r <url>` | Repository URL (GitHub/GitLab/F-Droid/Codeberg) |
-| `-s <url>` | Release source URL (defaults to -r) |
-| `-m <source>` | Fetch metadata from source (repeatable) |
+| `-r <url>` | Source code repository URL (GitHub/GitLab/Codeberg). Also fetches releases from here unless `-s` is specified. |
+| `-s <url>` | Release/download source URL (F-Droid, web page, etc). Use alone for closed-source apps. |
+| `-m <source>` | Fetch metadata from source (repeatable). Only fetched for new apps or when `--overwrite-app` is set. |
 | `-y` | Auto-confirm all prompts |
 | `-n`, `--dry-run` | Parse & build events without publishing |
 | `-h`, `--help` | Show help |
@@ -315,15 +322,14 @@ zsp --wizard                   # Wizard with existing config as defaults
 
 | Flag | Description |
 |------|-------------|
-| `--wizard` | Run interactive wizard |
-| `--match <pattern>` | Regex pattern to filter APK assets |
+| `--wizard` | Run interactive wizard (recommended for first-time setup) |
+| `--match <pattern>` | Regex pattern to filter APK assets (rarely needed - system auto-selects best APK) |
 | `--commit <hash>` | Git commit hash for reproducible builds |
-| `--extract-apk` | Extract APK metadata as JSON |
-| `--check-apk` | Verify config fetches arm64-v8a APK (exit 0=success) |
+| `--check` | Verify config fetches arm64-v8a APK (exit 0=success) |
 | `--skip-preview` | Skip the browser preview prompt |
 | `--port <port>` | Custom port for browser preview/signing |
 | `--overwrite-release` | Bypass cache, re-publish unchanged release |
-| `--overwrite-app` | Re-fetch metadata for existing app |
+| `--overwrite-app` | Re-fetch metadata even if app exists on relays (default: false for existing apps, true for new apps) |
 | `--quiet` | Minimal output, no prompts (implies -y) |
 | `--verbose` | Debug output |
 | `--no-color` | Disable colored output |
@@ -505,7 +511,7 @@ match: "^(?!.*debug).*\\.apk$"
 Verify your config fetches a valid APK without publishing:
 
 ```bash
-zsp --check-apk zapstore.yaml
+zsp publish --check zapstore.yaml
 # Exit 0 = success, prints package ID
 # Exit 1 = failure
 ```
@@ -579,7 +585,7 @@ repository: naddr1qqxnzd3exsmnjd3exqunjv...
 ### Extract APK Metadata
 
 ```bash
-zsp --extract-apk app.apk
+zsp apk --extract app.apk
 ```
 
 Outputs JSON with package ID, version, certificate hash, architectures, permissions, and extracts icon to disk.
