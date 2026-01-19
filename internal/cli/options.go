@@ -182,6 +182,7 @@ func parsePublishFlags(opts *Options, args []string) {
 	fs.BoolVar(&opts.Publish.DryRun, "dry-run", false, "Do everything except upload/publish")
 	fs.BoolVar(&opts.Publish.DryRun, "n", false, "Do everything except upload/publish (alias)")
 	fs.BoolVar(&opts.Publish.Quiet, "quiet", false, "Minimal output, no prompts (implies -y)")
+	fs.BoolVar(&opts.Publish.Quiet, "q", false, "Minimal output, no prompts (alias)")
 	fs.BoolVar(&opts.Global.Verbose, "verbose", false, "Debug output")
 	fs.BoolVar(&opts.Global.NoColor, "no-color", false, "Disable colored output")
 	fs.BoolVar(&opts.Publish.SkipPreview, "skip-preview", false, "Skip the browser preview prompt")
