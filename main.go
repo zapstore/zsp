@@ -493,6 +493,23 @@ func checkAPK(ctx context.Context, opts *cli.Options) error {
 
 	apkAssets := picker.FilterAPKs(release.Assets)
 	if len(apkAssets) == 0 {
+		if opts.Global.Verbose {
+			fmt.Fprintf(os.Stderr, "Release: %s\n", release.Version)
+			if release.TagName != "" && release.TagName != release.Version {
+				fmt.Fprintf(os.Stderr, "Tag: %s\n", release.TagName)
+			}
+			if release.URL != "" {
+				fmt.Fprintf(os.Stderr, "URL: %s\n", release.URL)
+			}
+			if len(release.Assets) == 0 {
+				fmt.Fprintf(os.Stderr, "Assets: (none)\n")
+			} else {
+				fmt.Fprintf(os.Stderr, "Assets (%d):\n", len(release.Assets))
+				for _, asset := range release.Assets {
+					fmt.Fprintf(os.Stderr, "  - %s\n", asset.Name)
+				}
+			}
+		}
 		return fmt.Errorf("no APK files found in release")
 	}
 

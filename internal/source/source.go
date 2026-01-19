@@ -21,6 +21,10 @@ import (
 // We only want arm64-v8a. Filter out x86, x86_64 (Intel/AMD) and armeabi/armeabi-v7a (32-bit ARM).
 var unsupportedArchRegex = regexp.MustCompile(`(?i)[-_\.](x86_64|x86|i686|i386|amd64|armeabi-v7a|armeabi)[-_\.]`)
 
+// maxReleasesToCheck is the maximum number of releases to iterate through
+// when looking for one with valid APKs (some repos publish desktop and mobile separately).
+const maxReleasesToCheck = 10
+
 // Asset represents a downloadable APK asset.
 type Asset struct {
 	Name        string // Filename
@@ -28,6 +32,7 @@ type Asset struct {
 	Size        int64  // Size in bytes (0 if unknown)
 	LocalPath   string // Local file path (set after download or for local sources)
 	ContentType string // MIME type (if known)
+	ExcludeURL  bool   // If true, don't include URL in event (use Blossom URL only)
 }
 
 // Release represents a release containing one or more APK assets.
@@ -164,7 +169,7 @@ func DownloadHTTP(ctx context.Context, client *http.Client, url, destPath string
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download failed with status %d", resp.StatusCode)
+		return fmt.Errorf("download failed with status %d: %s", resp.StatusCode, url)
 	}
 
 	// Use Content-Length from response if available, otherwise use expected size
@@ -220,6 +225,19 @@ func HasUnsupportedArchitecture(filename string) bool {
 		return false
 	}
 	return unsupportedArchRegex.MatchString(filename)
+}
+
+// hasValidAPKs returns true if the assets contain at least one APK file.
+// Used to determine if a release is a valid mobile release (vs desktop-only).
+func hasValidAPKs(assets []*Asset) bool {
+	for _, asset := range assets {
+		name := strings.ToLower(asset.Name)
+		url := strings.ToLower(asset.URL)
+		if strings.HasSuffix(name, ".apk") || strings.HasSuffix(url, ".apk") {
+			return true
+		}
+	}
+	return false
 }
 
 // DownloadCacheDir returns the directory for caching downloaded APKs.

@@ -77,60 +77,17 @@ type giteaAsset struct {
 	BrowserDownloadURL string `json:"browser_download_url"`
 }
 
-// FetchLatestRelease fetches the latest release from a Gitea-compatible forge.
+// FetchLatestRelease fetches the latest release from a Gitea-compatible forge that contains valid APKs.
+// Iterates through up to 10 releases to find one with APK assets (for repos that
+// publish desktop and mobile releases separately).
 func (g *Gitea) FetchLatestRelease(ctx context.Context) (*Release, error) {
-	// Gitea API: GET /api/v1/repos/{owner}/{repo}/releases/latest
-	// Falls back to listing releases if latest endpoint doesn't exist
-	apiURL := fmt.Sprintf("%s/api/v1/repos/%s/%s/releases/latest", g.baseURL, g.owner, g.repo)
-
-	release, err := g.fetchRelease(ctx, apiURL)
-	if err != nil {
-		// Some older Gitea versions don't have /latest endpoint
-		// Fall back to listing all releases and taking the first
-		return g.fetchLatestFromList(ctx)
-	}
-
-	return release, nil
+	// Fetch multiple releases to find one with valid APKs
+	return g.fetchLatestFromList(ctx)
 }
 
-// fetchRelease fetches a single release from the given API URL.
-func (g *Gitea) fetchRelease(ctx context.Context, apiURL string) (*Release, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Accept", "application/json")
-	if g.token != "" {
-		req.Header.Set("Authorization", "token "+g.token)
-	}
-
-	resp, err := g.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch release: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("no releases found for %s/%s", g.owner, g.repo)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("Gitea API error (status %d): %s", resp.StatusCode, string(body))
-	}
-
-	var gtRelease giteaRelease
-	if err := json.NewDecoder(resp.Body).Decode(&gtRelease); err != nil {
-		return nil, fmt.Errorf("failed to parse release: %w", err)
-	}
-
-	return g.convertRelease(&gtRelease), nil
-}
-
-// fetchLatestFromList fetches all releases and returns the latest non-draft one.
+// fetchLatestFromList fetches releases and returns the first one with valid APKs.
 func (g *Gitea) fetchLatestFromList(ctx context.Context) (*Release, error) {
-	apiURL := fmt.Sprintf("%s/api/v1/repos/%s/%s/releases", g.baseURL, g.owner, g.repo)
+	apiURL := fmt.Sprintf("%s/api/v1/repos/%s/%s/releases?limit=%d", g.baseURL, g.owner, g.repo, maxReleasesToCheck)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 	if err != nil {
@@ -162,18 +119,22 @@ func (g *Gitea) fetchLatestFromList(ctx context.Context) (*Release, error) {
 		return nil, fmt.Errorf("failed to parse releases: %w", err)
 	}
 
-	// Find the first non-draft release
-	for _, r := range releases {
-		if !r.Draft {
-			return g.convertRelease(&r), nil
-		}
-	}
-
 	if len(releases) == 0 {
 		return nil, fmt.Errorf("no releases found for %s/%s", g.owner, g.repo)
 	}
 
-	return nil, fmt.Errorf("no published releases found for %s/%s (all are drafts)", g.owner, g.repo)
+	// Find the first non-draft release with valid APKs
+	for _, r := range releases {
+		if r.Draft {
+			continue
+		}
+		release := g.convertRelease(&r)
+		if hasValidAPKs(release.Assets) {
+			return release, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no releases with valid APKs found in the last %d releases for %s/%s", maxReleasesToCheck, g.owner, g.repo)
 }
 
 // convertRelease converts a Gitea release to our Release type.
@@ -248,7 +209,7 @@ func (g *Gitea) Download(ctx context.Context, asset *Asset, destDir string, prog
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download failed with status %d", resp.StatusCode)
+		return "", fmt.Errorf("download failed with status %d: %s", resp.StatusCode, asset.URL)
 	}
 
 	// Use Content-Length from response if available, otherwise use asset size

@@ -1040,7 +1040,7 @@ func downloadRemoteImage(ctx context.Context, url string) (data []byte, hashStr 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", "", fmt.Errorf("download failed with status %d", resp.StatusCode)
+		return nil, "", "", fmt.Errorf("download failed with status %d: %s", resp.StatusCode, url)
 	}
 
 	data, err = io.ReadAll(resp.Body)

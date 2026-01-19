@@ -3,8 +3,8 @@
 name: Example App
 
 release_source:
-  url: https://api.example.com/releases/latest
-  version_json:
+  version:
+    url: https://api.example.com/releases/latest
     path: "$.tag_name"
-    pattern: "v([0-9.]+)"
+    match: "v([0-9.]+)"
   asset_url: https://releases.example.com/app-v{version}.apk

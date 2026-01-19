@@ -169,12 +169,15 @@ type githubAsset struct {
 	ContentType        string `json:"content_type"`
 }
 
-// FetchLatestRelease fetches the latest release from GitHub.
+// FetchLatestRelease fetches the latest release from GitHub that contains valid APKs.
+// Iterates through up to 10 releases to find one with APK assets (for repos that
+// publish desktop and mobile releases separately).
 // Uses conditional requests (ETag/If-None-Match) to reduce rate limit usage.
-// Returns ErrNotModified if the release hasn't changed since the last check.
+// Returns ErrNotModified if the releases haven't changed since the last check.
 // Set SkipCache field to true to bypass the ETag check and always fetch fresh data.
 func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", g.owner, g.repo)
+	// Fetch multiple releases to find one with valid APKs
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases?per_page=%d", g.owner, g.repo, maxReleasesToCheck)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -196,11 +199,11 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 
 	resp, err := g.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch release: %w", err)
+		return nil, fmt.Errorf("failed to fetch releases: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Handle 304 Not Modified - no new release since last check
+	// Handle 304 Not Modified - no new releases since last check
 	if resp.StatusCode == http.StatusNotModified {
 		return nil, ErrNotModified
 	}
@@ -222,9 +225,33 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		return nil, fmt.Errorf("GitHub API error (status %d): %s", resp.StatusCode, string(body))
 	}
 
-	var ghRelease githubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&ghRelease); err != nil {
-		return nil, fmt.Errorf("failed to parse release: %w", err)
+	var releases []githubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+		return nil, fmt.Errorf("failed to parse releases: %w", err)
+	}
+
+	if len(releases) == 0 {
+		return nil, fmt.Errorf("no releases found for %s/%s", g.owner, g.repo)
+	}
+
+	// Find the first release with valid APKs
+	var selectedRelease *githubRelease
+	for i := range releases {
+		ghRelease := &releases[i]
+		// Skip drafts and prereleases
+		if ghRelease.Draft {
+			continue
+		}
+
+		release := g.convertRelease(ghRelease)
+		if hasValidAPKs(release.Assets) {
+			selectedRelease = ghRelease
+			break
+		}
+	}
+
+	if selectedRelease == nil {
+		return nil, fmt.Errorf("no releases with valid APKs found in the last %d releases for %s/%s", maxReleasesToCheck, g.owner, g.repo)
 	}
 
 	// Store ETag and release data for later commit (after successful publish).
@@ -232,11 +259,11 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	if etag := resp.Header.Get("ETag"); etag != "" {
 		g.pending = &pendingCache{
 			ETag:    etag,
-			Release: &ghRelease,
+			Release: selectedRelease,
 		}
 	}
 
-	return g.convertRelease(&ghRelease), nil
+	return g.convertRelease(selectedRelease), nil
 }
 
 // convertRelease converts a GitHub release to our Release type.
@@ -313,7 +340,7 @@ func (g *GitHub) Download(ctx context.Context, asset *Asset, destDir string, pro
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download failed with status %d", resp.StatusCode)
+		return "", fmt.Errorf("download failed with status %d: %s", resp.StatusCode, asset.URL)
 	}
 
 	// Use Content-Length from response if available, otherwise use asset size

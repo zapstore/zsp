@@ -96,13 +96,15 @@ type ReleaseSource struct {
 	// Useful for self-hosted GitLab/Gitea/Forgejo instances
 	Type string
 
-	// Web source mode - version extractors and asset URL template
+	// Web source mode - version extractor and asset URL template
 	IsWebSource bool
 
-	// Version extractors (mutually exclusive, pick one)
-	VersionHTML     *HTMLExtractor     // Extract version from HTML using CSS selector
-	VersionJSON     *JSONExtractor     // Extract version from JSON API using JSONPath
-	VersionRedirect *RedirectExtractor // Extract version from HTTP redirect header
+	// Version extractor (unified structure for HTML, JSON, and header modes)
+	// Mode is determined by which field is set:
+	//   - selector: HTML mode (CSS selector)
+	//   - path: JSON mode (JSONPath expression)
+	//   - header: Header mode (HTTP redirect header)
+	Version *VersionExtractor
 
 	// AssetURL is the download URL template for the APK.
 	// Can contain {version} placeholder which is replaced with the extracted version.
@@ -116,38 +118,41 @@ func (r *ReleaseSource) IsLocal() bool {
 	return r != nil && r.LocalPath != ""
 }
 
-// HTMLExtractor extracts version from an HTML page using CSS selector.
-type HTMLExtractor struct {
-	Selector  string `yaml:"selector"`  // CSS selector to find the element
-	Attribute string `yaml:"attribute"` // Attribute to extract: "text", "href", "data-version", etc.
-	Pattern   string `yaml:"pattern"`   // Regex with capture group for version (e.g., "v([0-9.]+)")
-}
+// VersionExtractor extracts version from a URL using one of three modes:
+//   - HTML mode: Uses CSS selector to find element, extracts attribute value
+//   - JSON mode: Uses JSONPath to extract value from JSON response
+//   - Header mode: Extracts value from HTTP redirect header
+//
+// Mode is determined by which field is set (selector, path, or header).
+type VersionExtractor struct {
+	URL string `yaml:"url"` // URL to fetch version from (required)
 
-// JSONExtractor extracts version from a JSON API response using JSONPath.
-type JSONExtractor struct {
-	Path    string `yaml:"path"`    // JSONPath expression (e.g., "$.latest.version")
-	Pattern string `yaml:"pattern"` // Optional regex with capture group for version
-}
+	// HTML mode fields
+	Selector  string `yaml:"selector,omitempty"`  // CSS selector to find the element
+	Attribute string `yaml:"attribute,omitempty"` // Attribute to extract (e.g., "href", "data-version"); omit for text content
 
-// RedirectExtractor extracts version from an HTTP redirect header.
-type RedirectExtractor struct {
-	Header  string `yaml:"header"`  // Header to check (usually "location")
-	Pattern string `yaml:"pattern"` // Regex with capture group for version
+	// JSON mode field
+	Path string `yaml:"path,omitempty"` // JSONPath expression (e.g., "$.tag_name")
+
+	// Header mode field
+	Header string `yaml:"header,omitempty"` // Header to check (usually "location")
+
+	// Pattern to extract version (regex with capture group)
+	// If omitted, the entire extracted value is used as the version
+	Match string `yaml:"match,omitempty"` // Regex with capture group for version (e.g., "v([0-9.]+)")
 }
 
 // webReleaseSource is used for YAML unmarshaling of complex release_source.
 type webReleaseSource struct {
-	URL             string             `yaml:"url"`
-	Type            string             `yaml:"type,omitempty"`
-	AssetURL        string             `yaml:"asset_url,omitempty"`
-	VersionHTML     *HTMLExtractor     `yaml:"version_html,omitempty"`
-	VersionJSON     *JSONExtractor     `yaml:"version_json,omitempty"`
-	VersionRedirect *RedirectExtractor `yaml:"version_redirect,omitempty"`
+	URL      string            `yaml:"url"`
+	Type     string            `yaml:"type,omitempty"`
+	AssetURL string            `yaml:"asset_url,omitempty"`
+	Version  *VersionExtractor `yaml:"version,omitempty"`
 }
 
-// HasVersionExtractor returns true if any version extractor is configured.
+// HasVersionExtractor returns true if a version extractor is configured.
 func (r *ReleaseSource) HasVersionExtractor() bool {
-	return r.VersionHTML != nil || r.VersionJSON != nil || r.VersionRedirect != nil
+	return r.Version != nil
 }
 
 // HasVersionPlaceholder returns true if AssetURL contains {version} placeholder.
@@ -347,37 +352,15 @@ func (c *Config) parseReleaseSource() error {
 			return fmt.Errorf("failed to parse release_source config: %w", err)
 		}
 
-		// Web source mode if asset_url is set (with or without version extractors)
+		// Web source mode if asset_url is set (with or without version extractor)
 		isWebSource := web.AssetURL != ""
 
-		// Validate: only one version extractor allowed
-		extractorCount := 0
-		if web.VersionHTML != nil {
-			extractorCount++
-		}
-		if web.VersionJSON != nil {
-			extractorCount++
-		}
-		if web.VersionRedirect != nil {
-			extractorCount++
-		}
-		if extractorCount > 1 {
-			return fmt.Errorf("release_source: only one version extractor allowed (version_html, version_json, or version_redirect)")
-		}
-
-		// If version extractor is set, url is required (the page to extract from)
-		if extractorCount > 0 && web.URL == "" {
-			return fmt.Errorf("release_source: url is required when using version extractors")
-		}
-
 		c.ReleaseSource = &ReleaseSource{
-			URL:             web.URL,
-			Type:            web.Type,
-			IsWebSource:     isWebSource,
-			AssetURL:        web.AssetURL,
-			VersionHTML:     web.VersionHTML,
-			VersionJSON:     web.VersionJSON,
-			VersionRedirect: web.VersionRedirect,
+			URL:         web.URL,
+			Type:        web.Type,
+			IsWebSource: isWebSource,
+			AssetURL:    web.AssetURL,
+			Version:     web.Version,
 		}
 
 	default:
@@ -451,52 +434,76 @@ func (r *ReleaseSource) Validate() error {
 		return nil
 	}
 
-	// Validate version_html
-	if r.VersionHTML != nil {
-		if r.VersionHTML.Selector == "" {
-			return fmt.Errorf("version_html: selector is required")
-		}
-		if r.VersionHTML.Attribute == "" {
-			return fmt.Errorf("version_html: attribute is required")
-		}
-		if r.VersionHTML.Pattern == "" {
-			return fmt.Errorf("version_html: pattern is required")
-		}
-		if _, err := regexp.Compile(r.VersionHTML.Pattern); err != nil {
-			return fmt.Errorf("version_html: invalid pattern: %w", err)
-		}
+	// Check if asset_url has {version} placeholder but no version extractor
+	if r.HasVersionPlaceholder() && r.Version == nil {
+		return fmt.Errorf("asset_url contains {version} placeholder but no version extractor is configured")
 	}
 
-	// Validate version_json
-	if r.VersionJSON != nil {
-		if r.VersionJSON.Path == "" {
-			return fmt.Errorf("version_json: path is required")
-		}
-		if r.VersionJSON.Pattern != "" {
-			if _, err := regexp.Compile(r.VersionJSON.Pattern); err != nil {
-				return fmt.Errorf("version_json: invalid pattern: %w", err)
-			}
+	// Validate version extractor if present
+	if r.Version != nil {
+		if err := r.Version.Validate(); err != nil {
+			return fmt.Errorf("version: %w", err)
 		}
 	}
-
-	// Validate version_redirect
-	if r.VersionRedirect != nil {
-		if r.VersionRedirect.Header == "" {
-			return fmt.Errorf("version_redirect: header is required")
-		}
-		if r.VersionRedirect.Pattern == "" {
-			return fmt.Errorf("version_redirect: pattern is required")
-		}
-		if _, err := regexp.Compile(r.VersionRedirect.Pattern); err != nil {
-			return fmt.Errorf("version_redirect: invalid pattern: %w", err)
-		}
-	}
-
-	// If version extractor is set and asset_url has {version}, that's the expected case
-	// If version extractor is set but no {version} placeholder, warn (but don't error)
-	// If no version extractor and no {version} placeholder, uses HTTP caching (valid)
 
 	return nil
+}
+
+// Validate checks if the VersionExtractor configuration is valid.
+func (v *VersionExtractor) Validate() error {
+	if v.URL == "" {
+		return fmt.Errorf("url is required")
+	}
+
+	// Determine mode and validate accordingly
+	mode := v.Mode()
+	if mode == "" {
+		return fmt.Errorf("must specify one of: selector (HTML), path (JSON), or header")
+	}
+
+	// match is optional for all modes - defaults to (.*) if omitted
+	switch mode {
+	case "html":
+		// attribute is optional - defaults to text extraction when omitted
+	case "json":
+		// path extracts the value directly
+	case "header":
+		// header value is used directly
+	}
+
+	// Validate match pattern if provided
+	if v.Match != "" {
+		if _, err := regexp.Compile(v.Match); err != nil {
+			return fmt.Errorf("invalid match pattern: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// Mode returns the extraction mode based on which field is set.
+// Returns "html", "json", "header", or "" if none/multiple set.
+func (v *VersionExtractor) Mode() string {
+	count := 0
+	mode := ""
+
+	if v.Selector != "" {
+		count++
+		mode = "html"
+	}
+	if v.Path != "" {
+		count++
+		mode = "json"
+	}
+	if v.Header != "" {
+		count++
+		mode = "header"
+	}
+
+	if count != 1 {
+		return ""
+	}
+	return mode
 }
 
 // ValidateURL checks if a string is a valid URL with http/https scheme.

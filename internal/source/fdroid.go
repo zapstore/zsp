@@ -180,7 +180,7 @@ func (f *FDroid) Download(ctx context.Context, asset *Asset, destDir string, pro
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download failed with status %d", resp.StatusCode)
+		return "", fmt.Errorf("download failed with status %d: %s", resp.StatusCode, asset.URL)
 	}
 
 	// Use Content-Length from response if available, otherwise use asset size

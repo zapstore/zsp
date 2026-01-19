@@ -81,11 +81,13 @@ type gitlabAssetLink struct {
 	LinkType       string `json:"link_type"`        // "other", "runbook", "image", "package"
 }
 
-// FetchLatestRelease fetches the latest release from GitLab.
+// FetchLatestRelease fetches the latest release from GitLab that contains valid APKs.
+// Iterates through up to 10 releases to find one with APK assets (for repos that
+// publish desktop and mobile releases separately).
 func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	// GitLab API: GET /projects/:id/releases
 	// Returns releases sorted by released_at descending
-	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/releases", g.baseURL, g.projectID)
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/releases?per_page=%d", g.baseURL, g.projectID, maxReleasesToCheck)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 	if err != nil {
@@ -116,9 +118,19 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		return nil, fmt.Errorf("no releases found")
 	}
 
-	// Take the first (latest) release
-	glRelease := releases[0]
+	// Find the first release with valid APKs
+	for _, glRelease := range releases {
+		release := g.convertRelease(&glRelease)
+		if hasValidAPKs(release.Assets) {
+			return release, nil
+		}
+	}
 
+	return nil, fmt.Errorf("no releases with valid APKs found in the last %d releases", maxReleasesToCheck)
+}
+
+// convertRelease converts a GitLab release to our Release type.
+func (g *GitLab) convertRelease(glRelease *gitlabRelease) *Release {
 	// Convert asset links to our Asset type
 	assets := make([]*Asset, 0, len(glRelease.Assets.Links))
 	for _, link := range glRelease.Assets.Links {
@@ -175,7 +187,7 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		Changelog: glRelease.Description,
 		Assets:    assets,
 		URL:       glRelease.Links.Self,
-	}, nil
+	}
 }
 
 // Download downloads an asset from GitLab.
@@ -214,7 +226,7 @@ func (g *GitLab) Download(ctx context.Context, asset *Asset, destDir string, pro
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download failed with status %d", resp.StatusCode)
+		return "", fmt.Errorf("download failed with status %d: %s", resp.StatusCode, asset.URL)
 	}
 
 	// Use Content-Length from response if available, otherwise use asset size

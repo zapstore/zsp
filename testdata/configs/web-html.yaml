@@ -3,9 +3,8 @@
 repository: https://github.com/AntennaPod/AntennaPod
 
 release_source:
-  url: https://f-droid.org/packages/de.danoeh.antennapod/
-  version_html:
+  version:
+    url: https://f-droid.org/packages/de.danoeh.antennapod/
     selector: ".package-version-header"
-    attribute: text
-    pattern: "([0-9.]+)"
+    match: "([0-9.]+)"
   asset_url: https://f-droid.org/repo/de.danoeh.antennapod_{version}.apk

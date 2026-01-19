@@ -37,9 +37,10 @@ type webCache struct {
 	Version  string `json:"version,omitempty"`
 	AssetURL string `json:"asset_url,omitempty"`
 
-	// HTTP caching (for versionless URLs - ETag/Last-Modified)
-	ETag         string `json:"etag,omitempty"`
-	LastModified string `json:"last_modified,omitempty"`
+	// HTTP caching (for versionless URLs - ETag/Last-Modified/Content-Length)
+	ETag          string `json:"etag,omitempty"`
+	LastModified  string `json:"last_modified,omitempty"`
+	ContentLength int64  `json:"content_length,omitempty"` // Fallback when ETag/Last-Modified unavailable
 }
 
 // NewWeb creates a new web scraping source.
@@ -174,13 +175,13 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 			AssetURL: assetURL,
 		}
 	} else {
-		// Mode 2/3: Direct URL, use HTTP caching
+		// Mode 2/3: Direct URL (versionless), use HTTP caching
 		assetURL = repo.AssetURL
 
 		// Check for changes using HTTP caching headers
 		cache := w.loadCache()
 		if !w.SkipCache && cache != nil {
-			modified, etag, lastMod, err := w.checkHTTPCacheHeaders(ctx, assetURL, cache.ETag, cache.LastModified)
+			modified, etag, lastMod, contentLen, err := w.checkHTTPCacheHeaders(ctx, assetURL, cache.ETag, cache.LastModified, cache.ContentLength)
 			if err != nil {
 				return nil, fmt.Errorf("failed to check for updates: %w", err)
 			}
@@ -189,19 +190,21 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 			}
 			// Store new headers for later commit
 			newCache = &webCache{
-				ETag:         etag,
-				LastModified: lastMod,
+				ETag:          etag,
+				LastModified:  lastMod,
+				ContentLength: contentLen,
 			}
 		} else {
 			// No cache, fetch headers for future use
-			_, etag, lastMod, err := w.checkHTTPCacheHeaders(ctx, assetURL, "", "")
+			_, etag, lastMod, contentLen, err := w.checkHTTPCacheHeaders(ctx, assetURL, "", "", 0)
 			if err != nil {
 				// Non-fatal - we can still download without caching
 				newCache = &webCache{}
 			} else {
 				newCache = &webCache{
-					ETag:         etag,
-					LastModified: lastMod,
+					ETag:          etag,
+					LastModified:  lastMod,
+					ContentLength: contentLen,
 				}
 			}
 		}
@@ -214,9 +217,14 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	w.pendingCache = newCache
 
 	// Create asset
+	// If asset_url doesn't have {version} placeholder, exclude original URL from event
+	// (only Blossom URL from x tag should be used). This applies even if there's a
+	// version extractor - the URL is static so shouldn't be advertised.
+	hasVersionPlaceholder := repo.HasVersionPlaceholder()
 	asset := &Asset{
-		Name: filepath.Base(assetURL),
-		URL:  assetURL,
+		Name:       filepath.Base(assetURL),
+		URL:        assetURL,
+		ExcludeURL: !hasVersionPlaceholder,
 	}
 
 	return &Release{
@@ -227,21 +235,26 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 
 // extractVersion extracts the version string using the configured extractor.
 func (w *Web) extractVersion(ctx context.Context, repo *config.ReleaseSource) (string, error) {
-	if repo.VersionHTML != nil {
-		return w.extractVersionHTML(ctx, repo.URL, repo.VersionHTML)
+	if repo.Version == nil {
+		return "", fmt.Errorf("no version extractor configured")
 	}
-	if repo.VersionJSON != nil {
-		return w.extractVersionJSON(ctx, repo.URL, repo.VersionJSON)
+
+	v := repo.Version
+	switch v.Mode() {
+	case "html":
+		return w.extractVersionHTML(ctx, v)
+	case "json":
+		return w.extractVersionJSON(ctx, v)
+	case "header":
+		return w.extractVersionHeader(ctx, v)
+	default:
+		return "", fmt.Errorf("invalid version extractor mode")
 	}
-	if repo.VersionRedirect != nil {
-		return w.extractVersionRedirect(ctx, repo.URL, repo.VersionRedirect)
-	}
-	return "", fmt.Errorf("no version extractor configured")
 }
 
 // extractVersionHTML extracts version from an HTML page using CSS selector.
-func (w *Web) extractVersionHTML(ctx context.Context, pageURL string, ext *config.HTMLExtractor) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", pageURL, nil)
+func (w *Web) extractVersionHTML(ctx context.Context, v *config.VersionExtractor) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", v.URL, nil)
 	if err != nil {
 		return "", err
 	}
@@ -262,31 +275,30 @@ func (w *Web) extractVersionHTML(ctx context.Context, pageURL string, ext *confi
 	}
 
 	// Find element using CSS selector
-	sel := doc.Find(ext.Selector)
+	sel := doc.Find(v.Selector)
 	if sel.Length() == 0 {
-		return "", fmt.Errorf("no element found matching selector %q", ext.Selector)
+		return "", fmt.Errorf("no element found matching selector %q", v.Selector)
 	}
 
-	// Extract attribute value
+	// Extract value: text content if attribute is empty, otherwise the specified attribute
 	var value string
-	switch strings.ToLower(ext.Attribute) {
-	case "text":
+	if v.Attribute == "" {
 		value = strings.TrimSpace(sel.First().Text())
-	default:
+	} else {
 		var exists bool
-		value, exists = sel.First().Attr(ext.Attribute)
+		value, exists = sel.First().Attr(v.Attribute)
 		if !exists {
-			return "", fmt.Errorf("attribute %q not found on element", ext.Attribute)
+			return "", fmt.Errorf("attribute %q not found on element", v.Attribute)
 		}
 	}
 
-	// Apply pattern to extract version
-	return extractWithPattern(value, ext.Pattern)
+	// Apply match pattern to extract version
+	return extractWithPattern(value, v.Match)
 }
 
 // extractVersionJSON extracts version from a JSON API using JSONPath.
-func (w *Web) extractVersionJSON(ctx context.Context, apiURL string, ext *config.JSONExtractor) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+func (w *Web) extractVersionJSON(ctx context.Context, v *config.VersionExtractor) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", v.URL, nil)
 	if err != nil {
 		return "", err
 	}
@@ -309,36 +321,36 @@ func (w *Web) extractVersionJSON(ctx context.Context, apiURL string, ext *config
 	}
 
 	// Evaluate JSONPath
-	result, err := jsonpath.Get(ext.Path, data)
+	result, err := jsonpath.Get(v.Path, data)
 	if err != nil {
-		return "", fmt.Errorf("JSONPath %q failed: %w", ext.Path, err)
+		return "", fmt.Errorf("JSONPath %q failed: %w", v.Path, err)
 	}
 
 	// Convert result to string
 	var value string
-	switch v := result.(type) {
+	switch val := result.(type) {
 	case string:
-		value = v
+		value = val
 	case float64:
 		// Handle numeric versions (e.g., 1.0 becomes "1")
-		if v == float64(int64(v)) {
-			value = fmt.Sprintf("%d", int64(v))
+		if val == float64(int64(val)) {
+			value = fmt.Sprintf("%d", int64(val))
 		} else {
-			value = fmt.Sprintf("%g", v)
+			value = fmt.Sprintf("%g", val)
 		}
 	default:
-		value = fmt.Sprintf("%v", v)
+		value = fmt.Sprintf("%v", val)
 	}
 
-	// Apply optional pattern
-	if ext.Pattern != "" {
-		return extractWithPattern(value, ext.Pattern)
+	// Apply optional match pattern
+	if v.Match != "" {
+		return extractWithPattern(value, v.Match)
 	}
 	return value, nil
 }
 
-// extractVersionRedirect extracts version from HTTP redirect headers.
-func (w *Web) extractVersionRedirect(ctx context.Context, pageURL string, ext *config.RedirectExtractor) (string, error) {
+// extractVersionHeader extracts version from HTTP redirect headers.
+func (w *Web) extractVersionHeader(ctx context.Context, v *config.VersionExtractor) (string, error) {
 	// Don't follow redirects - we want to capture the redirect header
 	client := &http.Client{
 		Timeout: 30 * time.Second,
@@ -347,7 +359,7 @@ func (w *Web) extractVersionRedirect(ctx context.Context, pageURL string, ext *c
 		},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", pageURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", v.URL, nil)
 	if err != nil {
 		return "", err
 	}
@@ -364,7 +376,7 @@ func (w *Web) extractVersionRedirect(ctx context.Context, pageURL string, ext *c
 	}
 
 	// Get the header value
-	headerName := strings.ToLower(ext.Header)
+	headerName := strings.ToLower(v.Header)
 	var value string
 	for name, values := range resp.Header {
 		if strings.ToLower(name) == headerName && len(values) > 0 {
@@ -374,16 +386,22 @@ func (w *Web) extractVersionRedirect(ctx context.Context, pageURL string, ext *c
 	}
 
 	if value == "" {
-		return "", fmt.Errorf("header %q not found in response", ext.Header)
+		return "", fmt.Errorf("header %q not found in response", v.Header)
 	}
 
-	// Apply pattern to extract version
-	return extractWithPattern(value, ext.Pattern)
+	// Apply match pattern to extract version
+	return extractWithPattern(value, v.Match)
 }
 
 // extractWithPattern applies a regex pattern to extract a version string.
 // The pattern should have at least one capture group.
+// If pattern is empty, returns the trimmed value as-is.
 func extractWithPattern(value, pattern string) (string, error) {
+	// If no pattern, return the value directly
+	if pattern == "" {
+		return strings.TrimSpace(value), nil
+	}
+
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return "", fmt.Errorf("invalid pattern %q: %w", pattern, err)
@@ -397,12 +415,12 @@ func extractWithPattern(value, pattern string) (string, error) {
 	return matches[1], nil
 }
 
-// checkHTTPCacheHeaders checks if a resource has been modified using ETag/Last-Modified.
-// Returns (modified, newETag, newLastModified, error).
-func (w *Web) checkHTTPCacheHeaders(ctx context.Context, url, etag, lastModified string) (bool, string, string, error) {
+// checkHTTPCacheHeaders checks if a resource has been modified using ETag/Last-Modified/Content-Length.
+// Returns (modified, newETag, newLastModified, newContentLength, error).
+func (w *Web) checkHTTPCacheHeaders(ctx context.Context, url, etag, lastModified string, contentLength int64) (bool, string, string, int64, error) {
 	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
 	if err != nil {
-		return true, "", "", err
+		return true, "", "", 0, err
 	}
 
 	// Add conditional headers if we have cached values
@@ -415,28 +433,36 @@ func (w *Web) checkHTTPCacheHeaders(ctx context.Context, url, etag, lastModified
 
 	resp, err := w.client.Do(req)
 	if err != nil {
-		return true, "", "", fmt.Errorf("HEAD request failed: %w", err)
+		return true, "", "", 0, fmt.Errorf("HEAD request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	// 304 Not Modified means resource hasn't changed
 	if resp.StatusCode == http.StatusNotModified {
-		return false, etag, lastModified, nil
+		return false, etag, lastModified, contentLength, nil
 	}
 
 	// Get new caching headers
 	newETag := resp.Header.Get("ETag")
 	newLastMod := resp.Header.Get("Last-Modified")
+	newContentLen := resp.ContentLength
 
 	// If we had old values and they match new ones, not modified
 	if etag != "" && newETag != "" && etag == newETag {
-		return false, newETag, newLastMod, nil
+		return false, newETag, newLastMod, newContentLen, nil
 	}
 	if lastModified != "" && newLastMod != "" && lastModified == newLastMod {
-		return false, newETag, newLastMod, nil
+		return false, newETag, newLastMod, newContentLen, nil
 	}
 
-	return true, newETag, newLastMod, nil
+	// Fallback: check Content-Length if no ETag/Last-Modified available
+	if etag == "" && lastModified == "" && contentLength > 0 && newContentLen > 0 {
+		if contentLength == newContentLen {
+			return false, newETag, newLastMod, newContentLen, nil
+		}
+	}
+
+	return true, newETag, newLastMod, newContentLen, nil
 }
 
 // Download downloads an APK from the web.
@@ -477,7 +503,7 @@ func (w *Web) Download(ctx context.Context, asset *Asset, destDir string, progre
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download failed with status %d", resp.StatusCode)
+		return "", fmt.Errorf("download failed with status %d: %s", resp.StatusCode, asset.URL)
 	}
 
 	// Use Content-Length from response if available, otherwise use asset size

@@ -1,12 +1,12 @@
-# Fountain - Podcast app with redirect-based version detection
+# Fountain - Podcast app with header-based version detection
 # The /apk URL redirects to a versioned URL, version is extracted from the Location header
 name: Fountain
 
 release_source:
-  url: https://fountain.fm/apk
-  version_redirect:
+  version:
+    url: https://fountain.fm/apk
     header: location
-    pattern: "fountain-([0-9.-]+)\\.apk"
+    match: "fountain-([0-9.-]+)\\.apk"
   asset_url: https://storage.googleapis.com/fountain-fm-builds/android/fountain-{version}.apk
 
 metadata_sources:

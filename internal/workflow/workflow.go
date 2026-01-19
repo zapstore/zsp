@@ -203,6 +203,23 @@ func (p *Publisher) selectAPK(ctx context.Context) (*source.Asset, error) {
 	// Filter to APKs only
 	apkAssets := picker.FilterAPKs(p.release.Assets)
 	if len(apkAssets) == 0 {
+		if p.opts.Global.Verbose {
+			fmt.Printf("Release: %s\n", p.release.Version)
+			if p.release.TagName != "" && p.release.TagName != p.release.Version {
+				fmt.Printf("Tag: %s\n", p.release.TagName)
+			}
+			if p.release.URL != "" {
+				fmt.Printf("URL: %s\n", p.release.URL)
+			}
+			if len(p.release.Assets) == 0 {
+				fmt.Println("Assets: (none)")
+			} else {
+				fmt.Printf("Assets (%d):\n", len(p.release.Assets))
+				for _, asset := range p.release.Assets {
+					fmt.Printf("  - %s\n", asset.Name)
+				}
+			}
+		}
 		return nil, fmt.Errorf("no APK files found in release")
 	}
 
@@ -313,6 +330,10 @@ func (p *Publisher) getAPKPath(ctx context.Context) (string, error) {
 	}
 
 	// Download
+	if p.opts.Global.Verbose {
+		fmt.Printf("  Download URL: %s\n", p.selectedAsset.URL)
+	}
+
 	var tracker *ui.DownloadTracker
 	var progressCallback source.DownloadProgress
 	if p.opts.Publish.ShouldShowSpinners() {
@@ -607,7 +628,7 @@ func (p *Publisher) buildEventsWithoutUpload(ctx context.Context) error {
 		APKInfo:      p.apkInfo,
 		Config:       p.cfg,
 		Pubkey:       p.signer.PublicKey(),
-		OriginalURL:  p.selectedAsset.URL,
+		OriginalURL:  p.getOriginalURL(),
 		IconURL:      p.iconURL,
 		ImageURLs:    p.imageURLs,
 		Changelog:    p.releaseNotes,
@@ -638,7 +659,7 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 			APKPath:       p.apkPath,
 			Release:       p.release,
 			Client:        client,
-			OriginalURL:   p.selectedAsset.URL,
+			OriginalURL:   p.getOriginalURL(),
 			BatchSigner:   batchSigner,
 			Pubkey:        p.signer.PublicKey(),
 			RelayHint:     relayHint,
@@ -671,7 +692,7 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 		APKInfo:      p.apkInfo,
 		Config:       p.cfg,
 		Pubkey:       p.signer.PublicKey(),
-		OriginalURL:  p.selectedAsset.URL,
+		OriginalURL:  p.getOriginalURL(),
 		IconURL:      p.iconURL,
 		ImageURLs:    p.imageURLs,
 		Changelog:    p.releaseNotes,
@@ -703,6 +724,19 @@ func (p *Publisher) getReleaseURL() string {
 		return p.release.URL
 	}
 	return ""
+}
+
+// getOriginalURL returns the original download URL for the asset.
+// Returns empty string if the asset's URL should be excluded from the event
+// (e.g., versionless web sources where only Blossom URL should be used).
+func (p *Publisher) getOriginalURL() string {
+	if p.selectedAsset == nil {
+		return ""
+	}
+	if p.selectedAsset.ExcludeURL {
+		return ""
+	}
+	return p.selectedAsset.URL
 }
 
 // matchVariant returns the variant name if the APK matches a variant pattern.

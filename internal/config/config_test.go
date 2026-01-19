@@ -132,18 +132,23 @@ release_source:
 			},
 		},
 		{
-			name: "release_source web with asset_url pattern",
+			name: "release_source web with version extractor",
 			yaml: `
 repository: https://github.com/user/app
 release_source:
-  url: https://example.com/releases
-  asset_url: https://example\.com/app_[0-9.]+\.apk
+  version:
+    url: https://example.com/releases
+    selector: ".version"
+    match: "([0-9.]+)"
+  asset_url: https://example.com/app_{version}.apk
 `,
 			check: func(c *Config) bool {
 				return c.ReleaseSource != nil &&
 					c.ReleaseSource.IsWebSource &&
-					c.ReleaseSource.URL == "https://example.com/releases" &&
-					c.ReleaseSource.AssetURL == "https://example\\.com/app_[0-9.]+\\.apk" &&
+					c.ReleaseSource.Version != nil &&
+					c.ReleaseSource.Version.URL == "https://example.com/releases" &&
+					c.ReleaseSource.Version.Selector == ".version" &&
+					c.ReleaseSource.AssetURL == "https://example.com/app_{version}.apk" &&
 					c.GetSourceType() == SourceWeb
 			},
 		},
@@ -476,7 +481,6 @@ func TestSourcePrecedence(t *testing.T) {
 			config: Config{
 				Repository: "https://github.com/user/app",
 				ReleaseSource: &ReleaseSource{
-					URL:         "https://example.com/releases",
 					IsWebSource: true,
 					AssetURL:    "https://example.com/app.apk",
 				},
@@ -732,11 +736,89 @@ match: "(?i).*-(arm64|universal).*\\.apk$"
 			yaml: `
 repository: https://github.com/user/app
 release_source:
-  url: https://example.com/releases
   asset_url: https://example.com/app.apk
 `,
 			check: func(c *Config) bool {
 				return c.ReleaseSource.IsWebSource && c.GetSourceType() == SourceWeb
+			},
+		},
+		{
+			name: "web source with version html extractor",
+			yaml: `
+repository: https://github.com/user/app
+release_source:
+  version:
+    url: https://example.com/releases
+    selector: ".version"
+    match: "([0-9.]+)"
+  asset_url: https://example.com/app-{version}.apk
+`,
+			check: func(c *Config) bool {
+				return c.ReleaseSource.IsWebSource &&
+					c.ReleaseSource.Version != nil &&
+					c.ReleaseSource.Version.Mode() == "html" &&
+					c.ReleaseSource.Version.Selector == ".version" &&
+					c.ReleaseSource.Version.Attribute == "" && // empty = text extraction
+					c.ReleaseSource.Version.Match == "([0-9.]+)"
+			},
+		},
+		{
+			name: "web source with version html extractor using attribute",
+			yaml: `
+repository: https://github.com/user/app
+release_source:
+  version:
+    url: https://example.com/releases
+    selector: "a.download"
+    attribute: href
+    match: "app-([0-9.]+)\\.apk"
+  asset_url: https://example.com/app-{version}.apk
+`,
+			check: func(c *Config) bool {
+				return c.ReleaseSource.IsWebSource &&
+					c.ReleaseSource.Version != nil &&
+					c.ReleaseSource.Version.Mode() == "html" &&
+					c.ReleaseSource.Version.Selector == "a.download" &&
+					c.ReleaseSource.Version.Attribute == "href" &&
+					c.ReleaseSource.Version.Match == "app-([0-9.]+)\\.apk"
+			},
+		},
+		{
+			name: "web source with version json extractor",
+			yaml: `
+repository: https://github.com/user/app
+release_source:
+  version:
+    url: https://api.example.com/releases
+    path: "$.tag_name"
+    match: "v([0-9.]+)"
+  asset_url: https://example.com/app-{version}.apk
+`,
+			check: func(c *Config) bool {
+				return c.ReleaseSource.IsWebSource &&
+					c.ReleaseSource.Version != nil &&
+					c.ReleaseSource.Version.Mode() == "json" &&
+					c.ReleaseSource.Version.Path == "$.tag_name" &&
+					c.ReleaseSource.Version.Match == "v([0-9.]+)"
+			},
+		},
+		{
+			name: "web source with version header extractor",
+			yaml: `
+repository: https://github.com/user/app
+release_source:
+  version:
+    url: https://example.com/download
+    header: location
+    match: "app-([0-9.]+)\\.apk"
+  asset_url: https://cdn.example.com/app-{version}.apk
+`,
+			check: func(c *Config) bool {
+				return c.ReleaseSource.IsWebSource &&
+					c.ReleaseSource.Version != nil &&
+					c.ReleaseSource.Version.Mode() == "header" &&
+					c.ReleaseSource.Version.Header == "location" &&
+					c.ReleaseSource.Version.Match == "app-([0-9.]+)\\.apk"
 			},
 		},
 		{
@@ -907,9 +989,33 @@ func TestValidateConfigCases(t *testing.T) {
 			name: "web source skips URL validation",
 			config: Config{
 				ReleaseSource: &ReleaseSource{
-					URL:         "https://example.com/releases",
 					IsWebSource: true,
 					AssetURL:    "https://example.com/app.apk",
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "web source with version placeholder but no version extractor fails",
+			config: Config{
+				ReleaseSource: &ReleaseSource{
+					IsWebSource: true,
+					AssetURL:    "https://example.com/app-{version}.apk",
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "web source with version extractor and placeholder passes",
+			config: Config{
+				ReleaseSource: &ReleaseSource{
+					IsWebSource: true,
+					Version: &VersionExtractor{
+						URL:      "https://example.com/releases",
+						Selector: ".version",
+						Match:    "([0-9.]+)",
+					},
+					AssetURL: "https://example.com/app-{version}.apk",
 				},
 			},
 			wantErr: false,
@@ -1088,8 +1194,10 @@ func TestLoadAllFixtures(t *testing.T) {
 		"self-hosted-gitlab.yaml", // Type override: gitlab
 		"self-hosted-gitea.yaml",  // Type override: gitea
 		// Web scraping extractors
-		"web-html.yaml",     // HTML selector extractor
-		"web-redirect.yaml", // Redirect header extractor (Fountain app)
+		"web-html.yaml",     // HTML selector extractor (version.selector)
+		"web-json.yaml",     // JSON API extractor (version.path)
+		"web-redirect.yaml", // Header extractor (version.header)
+		"web-direct.yaml",   // Direct URL (no version extraction)
 		// Features
 		"match-pattern.yaml",      // Asset match regex
 		"playstore-metadata.yaml", // Play Store metadata
