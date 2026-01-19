@@ -288,24 +288,27 @@ func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.Ev
 	}
 
 	var releaseURL string
+	var releaseTimestamp time.Time
 	if params.Release != nil {
 		releaseURL = params.Release.URL
+		releaseTimestamp = params.Release.CreatedAt
 	}
 
 	events := nostr.BuildEventSet(nostr.BuildEventSetParams{
-		APKInfo:       params.APKInfo,
-		Config:        params.Cfg,
-		Pubkey:        params.Pubkey,
-		OriginalURL:   params.OriginalURL,
-		BlossomServer: params.BlossomServer,
-		IconURL:       iconURL,
-		ImageURLs:     imageURLs,
-		Changelog:     releaseNotes,
-		Variant:       params.Variant,
-		Commit:        params.Commit,
-		Channel:       params.Channel,
-		ReleaseURL:    releaseURL,
-		LegacyFormat:  params.Legacy,
+		APKInfo:          params.APKInfo,
+		Config:           params.Cfg,
+		Pubkey:           params.Pubkey,
+		OriginalURL:      params.OriginalURL,
+		BlossomServer:    params.BlossomServer,
+		IconURL:          iconURL,
+		ImageURLs:        imageURLs,
+		Changelog:        releaseNotes,
+		Variant:          params.Variant,
+		Commit:           params.Commit,
+		Channel:          params.Channel,
+		ReleaseURL:       releaseURL,
+		LegacyFormat:     params.Legacy,
+		ReleaseTimestamp: releaseTimestamp,
 	})
 
 	// Pre-compute asset event IDs

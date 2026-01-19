@@ -58,6 +58,7 @@ type fdroidPackageVersion struct {
 	MinSdkVersion    int      `json:"minSdkVersion"`
 	TargetSdkVersion int      `json:"targetSdkVersion"`
 	NativeCodes      []string `json:"nativecode"`
+	Added            int64    `json:"added"` // Unix timestamp in milliseconds when version was added
 }
 
 // fdroidMetadata represents metadata from fdroiddata YAML files.
@@ -98,9 +99,16 @@ func (f *FDroid) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		},
 	}
 
+	// Convert added timestamp (milliseconds) to time.Time
+	var createdAt time.Time
+	if version.Added > 0 {
+		createdAt = time.UnixMilli(version.Added)
+	}
+
 	return &Release{
-		Version: version.VersionName,
-		Assets:  assets,
+		Version:   version.VersionName,
+		Assets:    assets,
+		CreatedAt: createdAt,
 	}, nil
 }
 

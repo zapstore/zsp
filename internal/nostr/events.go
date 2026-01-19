@@ -410,19 +410,20 @@ func archToPlatform(arch string) string {
 
 // BuildEventSetParams contains parameters for building an event set.
 type BuildEventSetParams struct {
-	APKInfo       *apk.APKInfo
-	Config        *config.Config
-	Pubkey        string
-	OriginalURL   string // Original download URL (from release source)
-	BlossomServer string // Blossom server URL (fallback when OriginalURL is empty)
-	IconURL       string
-	ImageURLs     []string
-	Changelog     string // Release notes (from remote source or local file)
-	Variant       string // Explicit variant name (from config variants map)
-	Commit        string // Git commit hash for reproducible builds
-	Channel       string // Release channel: main (default), beta, nightly, dev
-	ReleaseURL    string // Release page URL (for legacy format url/r tags)
-	LegacyFormat  bool   // Use legacy event format (kind 1063, different tags)
+	APKInfo          *apk.APKInfo
+	Config           *config.Config
+	Pubkey           string
+	OriginalURL      string    // Original download URL (from release source)
+	BlossomServer    string    // Blossom server URL (fallback when OriginalURL is empty)
+	IconURL          string
+	ImageURLs        []string
+	Changelog        string    // Release notes (from remote source or local file)
+	Variant          string    // Explicit variant name (from config variants map)
+	Commit           string    // Git commit hash for reproducible builds
+	Channel          string    // Release channel: main (default), beta, nightly, dev
+	ReleaseURL       string    // Release page URL (for legacy format url/r tags)
+	LegacyFormat     bool      // Use legacy event format (kind 1063, different tags)
+	ReleaseTimestamp time.Time // Release publish date (zero means use current time)
 }
 
 // BuildEventSet creates all events for an APK release.
@@ -534,11 +535,23 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		LegacyFormat:          legacyFormat,
 	}
 
-	return &EventSet{
+	eventSet := &EventSet{
 		AppMetadata:    BuildAppMetadataEvent(appMeta, params.Pubkey),
 		Release:        BuildReleaseEvent(releaseMeta, params.Pubkey),
 		SoftwareAssets: []*nostr.Event{BuildSoftwareAssetEvent(assetMeta, params.Pubkey)},
 	}
+
+	// If a release timestamp is provided, use it for release and asset events
+	// (AppMetadata uses current time as it represents when the metadata was updated)
+	if !params.ReleaseTimestamp.IsZero() {
+		ts := nostr.Timestamp(params.ReleaseTimestamp.Unix())
+		eventSet.Release.CreatedAt = ts
+		for _, asset := range eventSet.SoftwareAssets {
+			asset.CreatedAt = ts
+		}
+	}
+
+	return eventSet
 }
 
 // AddAssetReference adds an asset event ID reference to the Release event.

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/zapstore/zsp/internal/apk"
 	"github.com/zapstore/zsp/internal/config"
@@ -37,12 +38,13 @@ type Asset struct {
 
 // Release represents a release containing one or more APK assets.
 type Release struct {
-	Version    string   // Version string (e.g., "1.2.3" or "v1.2.3")
-	TagName    string   // Git tag name (if applicable)
-	Changelog  string   // Release notes/changelog
-	Assets     []*Asset // Available APK assets
-	PreRelease bool     // Whether this is a pre-release
-	URL        string   // Release page URL (e.g., https://github.com/user/repo/releases/tag/v1.0)
+	Version    string    // Version string (e.g., "1.2.3" or "v1.2.3")
+	TagName    string    // Git tag name (if applicable)
+	Changelog  string    // Release notes/changelog
+	Assets     []*Asset  // Available APK assets
+	PreRelease bool      // Whether this is a pre-release
+	URL        string    // Release page URL (e.g., https://github.com/user/repo/releases/tag/v1.0)
+	CreatedAt  time.Time // Release creation/publish date (zero if unknown)
 }
 
 // Source is the interface for APK sources.

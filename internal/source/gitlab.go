@@ -181,12 +181,21 @@ func (g *GitLab) convertRelease(glRelease *gitlabRelease) *Release {
 		version = version[1:]
 	}
 
+	// Parse release date from released_at (RFC 3339 format)
+	var createdAt time.Time
+	if glRelease.ReleasedAt != "" {
+		if t, err := time.Parse(time.RFC3339, glRelease.ReleasedAt); err == nil {
+			createdAt = t
+		}
+	}
+
 	return &Release{
 		Version:   version,
 		TagName:   glRelease.TagName,
 		Changelog: glRelease.Description,
 		Assets:    assets,
 		URL:       glRelease.Links.Self,
+		CreatedAt: createdAt,
 	}
 }
 

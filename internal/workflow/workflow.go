@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/zapstore/zsp/internal/apk"
 	"github.com/zapstore/zsp/internal/blossom"
@@ -630,19 +631,20 @@ func (p *Publisher) buildEventsWithoutUpload(ctx context.Context) error {
 	}
 
 	p.events = nostr.BuildEventSet(nostr.BuildEventSetParams{
-		APKInfo:       p.apkInfo,
-		Config:        p.cfg,
-		Pubkey:        p.signer.PublicKey(),
-		OriginalURL:   p.getOriginalURL(),
-		BlossomServer: p.blossomURL,
-		IconURL:       p.iconURL,
-		ImageURLs:     p.imageURLs,
-		Changelog:     p.releaseNotes,
-		Variant:       p.matchVariant(),
-		Commit:        p.opts.Publish.Commit,
-		Channel:       p.opts.Publish.Channel,
-		ReleaseURL:    p.getReleaseURL(),
-		LegacyFormat:  p.opts.Publish.Legacy,
+		APKInfo:          p.apkInfo,
+		Config:           p.cfg,
+		Pubkey:           p.signer.PublicKey(),
+		OriginalURL:      p.getOriginalURL(),
+		BlossomServer:    p.blossomURL,
+		IconURL:          p.iconURL,
+		ImageURLs:        p.imageURLs,
+		Changelog:        p.releaseNotes,
+		Variant:          p.matchVariant(),
+		Commit:           p.opts.Publish.Commit,
+		Channel:          p.opts.Publish.Channel,
+		ReleaseURL:       p.getReleaseURL(),
+		LegacyFormat:     p.opts.Publish.Legacy,
+		ReleaseTimestamp: p.getReleaseTimestamp(),
 	})
 
 	relayHint := p.getRelayHint()
@@ -696,19 +698,20 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 	}
 
 	p.events = nostr.BuildEventSet(nostr.BuildEventSetParams{
-		APKInfo:       p.apkInfo,
-		Config:        p.cfg,
-		Pubkey:        p.signer.PublicKey(),
-		OriginalURL:   p.getOriginalURL(),
-		BlossomServer: p.blossomURL,
-		IconURL:       p.iconURL,
-		ImageURLs:     p.imageURLs,
-		Changelog:     p.releaseNotes,
-		Variant:       p.matchVariant(),
-		Commit:        p.opts.Publish.Commit,
-		Channel:       p.opts.Publish.Channel,
-		ReleaseURL:    p.getReleaseURL(),
-		LegacyFormat:  p.opts.Publish.Legacy,
+		APKInfo:          p.apkInfo,
+		Config:           p.cfg,
+		Pubkey:           p.signer.PublicKey(),
+		OriginalURL:      p.getOriginalURL(),
+		BlossomServer:    p.blossomURL,
+		IconURL:          p.iconURL,
+		ImageURLs:        p.imageURLs,
+		Changelog:        p.releaseNotes,
+		Variant:          p.matchVariant(),
+		Commit:           p.opts.Publish.Commit,
+		Channel:          p.opts.Publish.Channel,
+		ReleaseURL:       p.getReleaseURL(),
+		LegacyFormat:     p.opts.Publish.Legacy,
+		ReleaseTimestamp: p.getReleaseTimestamp(),
 	})
 
 	return nostr.SignEventSet(ctx, p.signer, p.events, relayHint)
@@ -732,6 +735,15 @@ func (p *Publisher) getReleaseURL() string {
 		return p.release.URL
 	}
 	return ""
+}
+
+// getReleaseTimestamp returns the release creation/publish timestamp.
+// Returns zero time if unknown (current time will be used for events).
+func (p *Publisher) getReleaseTimestamp() time.Time {
+	if p.release != nil {
+		return p.release.CreatedAt
+	}
+	return time.Time{}
 }
 
 // getOriginalURL returns the original download URL for the asset.

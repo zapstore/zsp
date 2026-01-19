@@ -287,6 +287,14 @@ func (g *GitHub) convertRelease(ghRelease *githubRelease) *Release {
 		version = version[1:]
 	}
 
+	// Parse release date from published_at (RFC 3339 format)
+	var createdAt time.Time
+	if ghRelease.PublishedAt != "" {
+		if t, err := time.Parse(time.RFC3339, ghRelease.PublishedAt); err == nil {
+			createdAt = t
+		}
+	}
+
 	return &Release{
 		Version:    version,
 		TagName:    ghRelease.TagName,
@@ -294,6 +302,7 @@ func (g *GitHub) convertRelease(ghRelease *githubRelease) *Release {
 		Assets:     assets,
 		PreRelease: ghRelease.Prerelease,
 		URL:        ghRelease.HTMLURL,
+		CreatedAt:  createdAt,
 	}
 }
 

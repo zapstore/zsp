@@ -157,6 +157,18 @@ func (g *Gitea) convertRelease(gtRelease *giteaRelease) *Release {
 		version = version[1:]
 	}
 
+	// Parse release date from published_at (RFC 3339 format), fallback to created_at
+	var createdAt time.Time
+	dateStr := gtRelease.PublishedAt
+	if dateStr == "" {
+		dateStr = gtRelease.CreatedAt
+	}
+	if dateStr != "" {
+		if t, err := time.Parse(time.RFC3339, dateStr); err == nil {
+			createdAt = t
+		}
+	}
+
 	return &Release{
 		Version:    version,
 		TagName:    gtRelease.TagName,
@@ -164,6 +176,7 @@ func (g *Gitea) convertRelease(gtRelease *giteaRelease) *Release {
 		Assets:     assets,
 		PreRelease: gtRelease.Prerelease,
 		URL:        gtRelease.HTMLURL,
+		CreatedAt:  createdAt,
 	}
 }
 
