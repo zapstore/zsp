@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -61,6 +62,41 @@ func NewWeb(cfg *config.Config) (*Web, error) {
 		client:   &http.Client{Timeout: 30 * time.Second},
 		cacheDir: cacheDir,
 	}, nil
+}
+
+// resolveRedirects follows redirects and returns the final URL.
+// Uses HEAD request to avoid downloading the full content.
+func (w *Web) resolveRedirects(ctx context.Context, url string) (string, error) {
+	// Create a client that tracks redirects but still follows them
+	var finalURL string
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			finalURL = req.URL.String()
+			if len(via) >= 10 {
+				return fmt.Errorf("too many redirects")
+			}
+			return nil
+		},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve redirects: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// If no redirects occurred, finalURL won't be set
+	if finalURL == "" {
+		finalURL = url
+	}
+
+	return finalURL, nil
 }
 
 // Type returns the source type.
@@ -178,7 +214,14 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		// Mode 2/3: Direct URL (versionless), use HTTP caching
 		assetURL = repo.AssetURL
 
-		// Check for changes using HTTP caching headers
+		// Follow redirects to get the final URL (e.g., for GitHub release redirects)
+		finalURL, err := w.resolveRedirects(ctx, assetURL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve URL: %w", err)
+		}
+		assetURL = finalURL
+
+		// Check for changes using HTTP caching headers (on the final URL)
 		cache := w.loadCache()
 		if !w.SkipCache && cache != nil {
 			modified, etag, lastMod, contentLen, err := w.checkHTTPCacheHeaders(ctx, assetURL, cache.ETag, cache.LastModified, cache.ContentLength)
@@ -221,8 +264,15 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	// (only Blossom URL from x tag should be used). This applies even if there's a
 	// version extractor - the URL is static so shouldn't be advertised.
 	hasVersionPlaceholder := repo.HasVersionPlaceholder()
+
+	// Extract filename from URL path (without query parameters)
+	assetName := filepath.Base(assetURL)
+	if parsed, err := url.Parse(assetURL); err == nil {
+		assetName = filepath.Base(parsed.Path)
+	}
+
 	asset := &Asset{
-		Name:       filepath.Base(assetURL),
+		Name:       assetName,
 		URL:        assetURL,
 		ExcludeURL: !hasVersionPlaceholder,
 	}
