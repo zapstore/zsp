@@ -99,18 +99,32 @@ func BuildAppMetadataEvent(meta *AppMetadata, pubkey string) *nostr.Event {
 		// Legacy format: different tag order, a-tag points to release
 		tags = append(tags, nostr.Tag{"name", meta.Name})
 		tags = append(tags, nostr.Tag{"d", meta.PackageID})
+		if meta.Summary != "" {
+			tags = append(tags, nostr.Tag{"summary", meta.Summary})
+		}
 		if meta.Repository != "" {
 			tags = append(tags, nostr.Tag{"repository", meta.Repository})
+		}
+		if meta.Website != "" {
+			tags = append(tags, nostr.Tag{"url", meta.Website})
 		}
 		// Platform identifiers (f tags)
 		for _, platform := range meta.Platforms {
 			tags = append(tags, nostr.Tag{"f", platform})
+		}
+		// Category tags
+		for _, tag := range meta.Tags {
+			tags = append(tags, nostr.Tag{"t", tag})
 		}
 		if meta.License != "" {
 			tags = append(tags, nostr.Tag{"license", meta.License})
 		}
 		if meta.IconURL != "" {
 			tags = append(tags, nostr.Tag{"icon", meta.IconURL})
+		}
+		// Screenshots (image tags)
+		for _, url := range meta.ImageURLs {
+			tags = append(tags, nostr.Tag{"image", url})
 		}
 		// Legacy format: a-tag points to latest release (30063)
 		if meta.ReleaseVersion != "" {
