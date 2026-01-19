@@ -79,16 +79,17 @@ func DefaultMetadataSources(cfg *config.Config) []string {
 		addSource("gitlab")
 	case config.SourceFDroid:
 		addSource("fdroid")
-	default:
-		// For local, web, or unknown sources, check repository URL for base metadata
-		if cfg.Repository != "" {
-			repoType := config.DetectSourceType(cfg.Repository)
-			switch repoType {
-			case config.SourceGitHub:
-				addSource("github")
-			case config.SourceGitLab:
-				addSource("gitlab")
-			}
+	}
+
+	// Also check repository URL for additional metadata (e.g., when release_source
+	// is F-Droid but repository is GitHub, we want both metadata sources)
+	if cfg.Repository != "" {
+		repoType := config.DetectSourceType(cfg.Repository)
+		switch repoType {
+		case config.SourceGitHub:
+			addSource("github")
+		case config.SourceGitLab:
+			addSource("gitlab")
 		}
 	}
 
