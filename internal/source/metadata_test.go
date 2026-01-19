@@ -93,7 +93,7 @@ func TestDefaultMetadataSources(t *testing.T) {
 				ReleaseSource:   &config.ReleaseSource{URL: "https://f-droid.org/packages/de.danoeh.antennapod"},
 				MetadataSources: []string{"playstore"},
 			},
-			wantLen: 2, // fdroid (from release_source) + playstore
+			wantLen: 3, // fdroid (from release_source) + github (from repository) + playstore
 		},
 	}
 

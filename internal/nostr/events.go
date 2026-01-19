@@ -410,18 +410,19 @@ func archToPlatform(arch string) string {
 
 // BuildEventSetParams contains parameters for building an event set.
 type BuildEventSetParams struct {
-	APKInfo      *apk.APKInfo
-	Config       *config.Config
-	Pubkey       string
-	OriginalURL  string // Original download URL (from release source)
-	IconURL      string
-	ImageURLs    []string
-	Changelog    string // Release notes (from remote source or local file)
-	Variant      string // Explicit variant name (from config variants map)
-	Commit       string // Git commit hash for reproducible builds
-	Channel      string // Release channel: main (default), beta, nightly, dev
-	ReleaseURL   string // Release page URL (for legacy format url/r tags)
-	LegacyFormat bool   // Use legacy event format (kind 1063, different tags)
+	APKInfo       *apk.APKInfo
+	Config        *config.Config
+	Pubkey        string
+	OriginalURL   string // Original download URL (from release source)
+	BlossomServer string // Blossom server URL (fallback when OriginalURL is empty)
+	IconURL       string
+	ImageURLs     []string
+	Changelog     string // Release notes (from remote source or local file)
+	Variant       string // Explicit variant name (from config variants map)
+	Commit        string // Git commit hash for reproducible builds
+	Channel       string // Release channel: main (default), beta, nightly, dev
+	ReleaseURL    string // Release page URL (for legacy format url/r tags)
+	LegacyFormat  bool   // Use legacy event format (kind 1063, different tags)
 }
 
 // BuildEventSet creates all events for an APK release.
@@ -441,10 +442,15 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		name = apkInfo.PackageID
 	}
 
-	// Build APK URLs - use original URL only (blossom URL can be calculated from x tag)
+	// Build APK URLs - include original URL and/or Blossom URL
 	var apkURLs []string
 	if params.OriginalURL != "" {
 		apkURLs = append(apkURLs, params.OriginalURL)
+	}
+	// Always include Blossom URL as fallback (or primary if no original URL)
+	if params.BlossomServer != "" && apkInfo.SHA256 != "" {
+		blossomURL := params.BlossomServer + "/" + apkInfo.SHA256
+		apkURLs = append(apkURLs, blossomURL)
 	}
 
 	// Convert architectures to platform identifiers

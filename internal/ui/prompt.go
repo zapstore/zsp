@@ -4,11 +4,40 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 
 	"golang.org/x/term"
 )
+
+// HasDisplay returns true if a graphical display is available.
+// On Linux, this checks for DISPLAY or WAYLAND_DISPLAY environment variables.
+// On macOS and Windows, it generally assumes a display is available.
+func HasDisplay() bool {
+	switch runtime.GOOS {
+	case "linux":
+		// Linux requires X11 or Wayland display
+		if os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != "" {
+			return true
+		}
+		return false
+	case "darwin":
+		// macOS always has a display available unless in a headless server environment.
+		// Check if we're in a pure SSH session without any display access.
+		// SSH_TTY being set without DISPLAY suggests headless SSH access.
+		if os.Getenv("SSH_TTY") != "" && os.Getenv("DISPLAY") == "" {
+			return false
+		}
+		return true
+	case "windows":
+		// Windows generally always has a display available
+		return true
+	default:
+		// For other platforms, check DISPLAY as a fallback
+		return os.Getenv("DISPLAY") != ""
+	}
+}
 
 // readLineResult holds the result of a non-blocking line read.
 type readLineResult struct {

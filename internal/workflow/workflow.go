@@ -480,6 +480,11 @@ func (p *Publisher) handlePreview(ctx context.Context) error {
 		return nil
 	}
 
+	// Skip preview prompt if no graphical display is available
+	if !ui.HasDisplay() {
+		return nil
+	}
+
 	defaultPort := nostr.DefaultPreviewPort
 	if p.opts.Publish.Port != 0 {
 		defaultPort = p.opts.Publish.Port
@@ -625,18 +630,19 @@ func (p *Publisher) buildEventsWithoutUpload(ctx context.Context) error {
 	}
 
 	p.events = nostr.BuildEventSet(nostr.BuildEventSetParams{
-		APKInfo:      p.apkInfo,
-		Config:       p.cfg,
-		Pubkey:       p.signer.PublicKey(),
-		OriginalURL:  p.getOriginalURL(),
-		IconURL:      p.iconURL,
-		ImageURLs:    p.imageURLs,
-		Changelog:    p.releaseNotes,
-		Variant:      p.matchVariant(),
-		Commit:       p.opts.Publish.Commit,
-		Channel:      p.opts.Publish.Channel,
-		ReleaseURL:   p.getReleaseURL(),
-		LegacyFormat: p.opts.Publish.Legacy,
+		APKInfo:       p.apkInfo,
+		Config:        p.cfg,
+		Pubkey:        p.signer.PublicKey(),
+		OriginalURL:   p.getOriginalURL(),
+		BlossomServer: p.blossomURL,
+		IconURL:       p.iconURL,
+		ImageURLs:     p.imageURLs,
+		Changelog:     p.releaseNotes,
+		Variant:       p.matchVariant(),
+		Commit:        p.opts.Publish.Commit,
+		Channel:       p.opts.Publish.Channel,
+		ReleaseURL:    p.getReleaseURL(),
+		LegacyFormat:  p.opts.Publish.Legacy,
 	})
 
 	relayHint := p.getRelayHint()
@@ -660,6 +666,7 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 			Release:       p.release,
 			Client:        client,
 			OriginalURL:   p.getOriginalURL(),
+			BlossomServer: p.blossomURL,
 			BatchSigner:   batchSigner,
 			Pubkey:        p.signer.PublicKey(),
 			RelayHint:     relayHint,
@@ -689,18 +696,19 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 	}
 
 	p.events = nostr.BuildEventSet(nostr.BuildEventSetParams{
-		APKInfo:      p.apkInfo,
-		Config:       p.cfg,
-		Pubkey:       p.signer.PublicKey(),
-		OriginalURL:  p.getOriginalURL(),
-		IconURL:      p.iconURL,
-		ImageURLs:    p.imageURLs,
-		Changelog:    p.releaseNotes,
-		Variant:      p.matchVariant(),
-		Commit:       p.opts.Publish.Commit,
-		Channel:      p.opts.Publish.Channel,
-		ReleaseURL:   p.getReleaseURL(),
-		LegacyFormat: p.opts.Publish.Legacy,
+		APKInfo:       p.apkInfo,
+		Config:        p.cfg,
+		Pubkey:        p.signer.PublicKey(),
+		OriginalURL:   p.getOriginalURL(),
+		BlossomServer: p.blossomURL,
+		IconURL:       p.iconURL,
+		ImageURLs:     p.imageURLs,
+		Changelog:     p.releaseNotes,
+		Variant:       p.matchVariant(),
+		Commit:        p.opts.Publish.Commit,
+		Channel:       p.opts.Publish.Channel,
+		ReleaseURL:    p.getReleaseURL(),
+		LegacyFormat:  p.opts.Publish.Legacy,
 	})
 
 	return nostr.SignEventSet(ctx, p.signer, p.events, relayHint)

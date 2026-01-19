@@ -44,6 +44,7 @@ type UploadParams struct {
 	Release       *source.Release
 	Client        *blossom.Client
 	OriginalURL   string
+	BlossomServer string
 	BatchSigner   nostr.BatchSigner
 	Signer        nostr.Signer
 	Pubkey        string
@@ -292,18 +293,19 @@ func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.Ev
 	}
 
 	events := nostr.BuildEventSet(nostr.BuildEventSetParams{
-		APKInfo:      params.APKInfo,
-		Config:       params.Cfg,
-		Pubkey:       params.Pubkey,
-		OriginalURL:  params.OriginalURL,
-		IconURL:      iconURL,
-		ImageURLs:    imageURLs,
-		Changelog:    releaseNotes,
-		Variant:      params.Variant,
-		Commit:       params.Commit,
-		Channel:      params.Channel,
-		ReleaseURL:   releaseURL,
-		LegacyFormat: params.Legacy,
+		APKInfo:       params.APKInfo,
+		Config:        params.Cfg,
+		Pubkey:        params.Pubkey,
+		OriginalURL:   params.OriginalURL,
+		BlossomServer: params.BlossomServer,
+		IconURL:       iconURL,
+		ImageURLs:     imageURLs,
+		Changelog:     releaseNotes,
+		Variant:       params.Variant,
+		Commit:        params.Commit,
+		Channel:       params.Channel,
+		ReleaseURL:    releaseURL,
+		LegacyFormat:  params.Legacy,
 	})
 
 	// Pre-compute asset event IDs
