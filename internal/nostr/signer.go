@@ -187,9 +187,6 @@ type BunkerSigner struct {
 
 // NewBunkerSigner creates a signer from a bunker:// URL.
 func NewBunkerSigner(ctx context.Context, bunkerURL string) (*BunkerSigner, error) {
-	// Load or generate persistent client key
-	clientSecretKey := loadOrGenerateClientKey()
-
 	u, err := url.Parse(bunkerURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid bunker URL: %w", err)
@@ -198,6 +195,19 @@ func NewBunkerSigner(ctx context.Context, bunkerURL string) (*BunkerSigner, erro
 	secret := u.Query().Get("secret")
 	if secret == "" {
 		return nil, fmt.Errorf("bunker URL missing 'secret' parameter")
+	}
+
+	// Determine if we should reuse the client key or generate a new one.
+	// If the secret is high entropy (>= 32 chars, e.g. UUID, hex key), we assume
+	// it's a bearer token (Knox style) and use an ephemeral client key for privacy.
+	// If the secret is low entropy (< 32 chars, e.g. Amber pairing code), we assume
+	// it's a one-time pairing code that binds to the client key, so we MUST persist
+	// and reuse the client key.
+	var clientSecretKey string
+	if len(secret) < 32 {
+		clientSecretKey = loadOrGenerateClientKey()
+	} else {
+		clientSecretKey = nostr.GeneratePrivateKey()
 	}
 
 	targetPubkey := u.Host
