@@ -5,6 +5,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -184,16 +187,38 @@ type BunkerSigner struct {
 
 // NewBunkerSigner creates a signer from a bunker:// URL.
 func NewBunkerSigner(ctx context.Context, bunkerURL string) (*BunkerSigner, error) {
-	// Generate an ephemeral client secret key for bunker communication
-	clientSecretKey := nostr.GeneratePrivateKey()
+	// Load or generate persistent client key
+	clientSecretKey := loadOrGenerateClientKey()
 
-	// Connect to bunker
-	bunker, err := nip46.ConnectBunker(ctx, clientSecretKey, bunkerURL, nil, func(s string) {
-		// This is called when user needs to approve the connection
-		fmt.Printf("Bunker connection request: %s\n", s)
-	})
+	u, err := url.Parse(bunkerURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to bunker: %w", err)
+		return nil, fmt.Errorf("invalid bunker URL: %w", err)
+	}
+
+	secret := u.Query().Get("secret")
+	if secret == "" {
+		return nil, fmt.Errorf("bunker URL missing 'secret' parameter")
+	}
+
+	targetPubkey := u.Host
+	if targetPubkey == "" {
+		targetPubkey = u.Opaque
+	}
+	relays := u.Query()["relay"]
+
+	// Create BunkerClient manually to allow custom 'connect' call
+	bunker := nip46.NewBunker(ctx, clientSecretKey, targetPubkey, relays, nil, func(s string) {
+		fmt.Printf("Bunker auth url: %s\n", s)
+	})
+
+	// Explicitly connect with permissions
+	perms := "get_public_key,sign_event,nip04_encrypt,nip04_decrypt"
+	_, err = bunker.RPC(ctx, "connect", []string{targetPubkey, secret, perms})
+	if err != nil {
+		// If "already connected" error, ignore it as we might be reusing a session
+		if !strings.Contains(err.Error(), "already connected") {
+			return nil, fmt.Errorf("failed to connect to bunker: %w", err)
+		}
 	}
 
 	// Get public key
@@ -206,6 +231,35 @@ func NewBunkerSigner(ctx context.Context, bunkerURL string) (*BunkerSigner, erro
 		bunker:    bunker,
 		publicKey: pubkey,
 	}, nil
+}
+
+func loadOrGenerateClientKey() string {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		// Fallback to ephemeral if we can't get config dir
+		return nostr.GeneratePrivateKey()
+	}
+	
+	zspDir := filepath.Join(configDir, "zsp")
+	if err := os.MkdirAll(zspDir, 0700); err != nil {
+		return nostr.GeneratePrivateKey()
+	}
+	
+	keyFile := filepath.Join(zspDir, "client_secret")
+	content, err := os.ReadFile(keyFile)
+	if err == nil {
+		key := strings.TrimSpace(string(content))
+		if len(key) == 64 {
+			return key // Valid hex key
+		}
+	}
+	
+	// Generate and save
+	key := nostr.GeneratePrivateKey()
+	if err := os.WriteFile(keyFile, []byte(key), 0600); err != nil {
+		fmt.Printf("Warning: failed to save client key: %v\n", err)
+	}
+	return key
 }
 
 func (s *BunkerSigner) Type() SignerType {
