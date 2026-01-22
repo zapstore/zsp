@@ -2,6 +2,7 @@ package nostr
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -184,8 +185,11 @@ type BunkerSigner struct {
 
 // NewBunkerSigner creates a signer from a bunker:// URL.
 func NewBunkerSigner(ctx context.Context, bunkerURL string) (*BunkerSigner, error) {
-	// Generate an ephemeral client secret key for bunker communication
-	clientSecretKey := nostr.GeneratePrivateKey()
+	// Derive a deterministic client key from the bunker URL.
+	// This ensures we use the same client key for the same bunker URL,
+	// which is important because NIP-46 secrets are single-use and
+	// permissions are tied to the client pubkey that first connected.
+	clientSecretKey := deriveBunkerClientKey(bunkerURL)
 
 	// Connect to bunker
 	bunker, err := nip46.ConnectBunker(ctx, clientSecretKey, bunkerURL, nil, func(s string) {
@@ -193,12 +197,22 @@ func NewBunkerSigner(ctx context.Context, bunkerURL string) (*BunkerSigner, erro
 		fmt.Printf("Bunker connection request: %s\n", s)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to bunker: %w", err)
+		if !strings.Contains(err.Error(), "already connected") {
+			return nil, fmt.Errorf("failed to connect to bunker: %w", err)
+		}
+		// "already connected" means the secret was already used.
+		// This is okay if we're using the same client key that originally connected.
 	}
 
 	// Get public key
 	pubkey, err := bunker.GetPublicKey(ctx)
 	if err != nil {
+		// If we get "no permission", it likely means the bunker URL's secret
+		// was already used with a different client key (e.g., from another app).
+		// The user needs to generate a new bunker URL.
+		if strings.Contains(err.Error(), "no permission") {
+			return nil, fmt.Errorf("failed to get public key from bunker: %w\n\nThis bunker URL's secret appears to have been used with a different application.\nPlease generate a new bunker connection URL from your signer (e.g., nsec.app)", err)
+		}
 		return nil, fmt.Errorf("failed to get public key from bunker: %w", err)
 	}
 
@@ -206,6 +220,17 @@ func NewBunkerSigner(ctx context.Context, bunkerURL string) (*BunkerSigner, erro
 		bunker:    bunker,
 		publicKey: pubkey,
 	}, nil
+}
+
+// deriveBunkerClientKey generates a deterministic client secret key from a bunker URL.
+// This ensures that repeated connections to the same bunker use the same client key,
+// which is necessary because NIP-46 bunker secrets are single-use and permissions
+// are bound to the client pubkey that first connected with that secret.
+func deriveBunkerClientKey(bunkerURL string) string {
+	// Use SHA-256 to derive a deterministic 32-byte private key from the URL.
+	// We include a fixed prefix to namespace this derivation.
+	h := sha256.Sum256([]byte("zsp-bunker-client-v1:" + bunkerURL))
+	return hex.EncodeToString(h[:])
 }
 
 func (s *BunkerSigner) Type() SignerType {
