@@ -46,7 +46,7 @@ type PublishOptions struct {
 	Quiet            bool
 	SkipPreview      bool
 	OverwriteRelease bool
-	OverwriteApp     bool
+	SkipMetadata     bool
 	Legacy           bool
 	Wizard           bool
 	Check            bool // Verify config fetches arm64-v8a APK (exit 0=success)
@@ -188,7 +188,7 @@ func parsePublishFlags(opts *Options, args []string) {
 	fs.BoolVar(&opts.Publish.SkipPreview, "skip-preview", false, "Skip the browser preview prompt")
 	fs.IntVar(&opts.Publish.Port, "port", 0, "Custom port for browser preview/signing")
 	fs.BoolVar(&opts.Publish.OverwriteRelease, "overwrite-release", false, "Bypass cache and re-publish even if release unchanged")
-	fs.BoolVar(&opts.Publish.OverwriteApp, "overwrite-app", false, "Re-fetch metadata even if app already exists on relays")
+	fs.BoolVar(&opts.Publish.SkipMetadata, "skip-metadata", false, "Skip fetching metadata from external sources")
 	fs.BoolVar(&opts.Publish.Wizard, "wizard", false, "Run interactive wizard (uses existing config as defaults)")
 	fs.BoolVar(&opts.Publish.Legacy, "legacy", true, "Use legacy event format for relay.zapstore.dev compatibility")
 	fs.BoolVar(&opts.Publish.Check, "check", false, "Verify config fetches arm64-v8a APK (exit 0=success)")

@@ -125,7 +125,7 @@ func PublishHelp() string {
 	writeFlag(&b, "-s <url>", "Release/download source URL (F-Droid, web page, etc)")
 	b.WriteString("                            " + renderGreyDark("Use alone (no -r) for closed-source apps") + "\n")
 	writeFlag(&b, "-m <source>", "Fetch metadata from source (repeatable: -m github -m fdroid)")
-	b.WriteString("                            " + renderGreyDark("Only fetched for new apps or with --overwrite-app") + "\n")
+	b.WriteString("                            " + renderGreyDark("Fetched automatically for new releases") + "\n")
 	writeFlag(&b, "--match <pattern>", "Regex pattern to filter APK assets (rarely needed)")
 	b.WriteString("\n")
 
@@ -148,8 +148,8 @@ func PublishHelp() string {
 	// Cache flags
 	b.WriteString(renderPurpleBold("CACHE FLAGS") + "\n")
 	writeFlag(&b, "--overwrite-release", "Bypass cache and re-publish even if release unchanged")
-	writeFlag(&b, "--overwrite-app", "Re-fetch metadata even if app exists on relays")
-	b.WriteString("                            " + renderGreyDark("Default: false for existing apps, true for new apps") + "\n")
+	writeFlag(&b, "--skip-metadata", "Skip fetching metadata from external sources")
+	b.WriteString("                            " + renderGreyDark("Useful for apps with frequent releases") + "\n")
 	b.WriteString("\n")
 
 	// Other flags

@@ -260,7 +260,7 @@ variants:
 # ═══════════════════════════════════════════════════════════════════
 
 # External sources for metadata enrichment
-# Note: metadata is only fetched for new apps or when --overwrite-app is set
+# Note: metadata is fetched automatically for new releases (use --skip-metadata to disable)
 metadata_sources:
   - playstore
   - fdroid
@@ -287,7 +287,7 @@ zsp --wizard                   # Wizard with existing config as defaults
 |------|-------------|
 | `-r <url>` | Source code repository URL (GitHub/GitLab/Codeberg). Also fetches releases from here unless `-s` is specified. |
 | `-s <url>` | Release/download source URL (F-Droid, web page, etc). Use alone for closed-source apps. |
-| `-m <source>` | Fetch metadata from source (repeatable). Only fetched for new apps or when `--overwrite-app` is set. |
+| `-m <source>` | Fetch metadata from source (repeatable). Fetched automatically for new releases. |
 | `-y` | Auto-confirm all prompts |
 | `-n`, `--dry-run` | Parse & build events without publishing |
 | `-h`, `--help` | Show help |
@@ -302,7 +302,7 @@ zsp --wizard                   # Wizard with existing config as defaults
 | `--skip-preview` | Skip the browser preview prompt |
 | `--port <port>` | Custom port for browser preview/signing |
 | `--overwrite-release` | Bypass cache, re-publish unchanged release |
-| `--overwrite-app` | Re-fetch metadata even if app exists on relays (default: false for existing apps, true for new apps) |
+| `--skip-metadata` | Skip fetching metadata from external sources (useful for frequent releases) |
 | `--quiet` | Minimal output, no prompts (implies -y) |
 | `--verbose` | Debug output |
 | `--no-color` | Disable colored output |

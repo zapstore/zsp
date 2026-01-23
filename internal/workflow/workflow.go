@@ -37,10 +37,9 @@ type Publisher struct {
 	imageURLs         []string
 	releaseNotes      string
 	preDownloaded     *PreDownloadedImages
-	events            *nostr.EventSet
-	blossomURL        string
-	browserPort       int
-	skipMetadataFetch bool
+	events      *nostr.EventSet
+	blossomURL  string
+	browserPort int
 }
 
 // NewPublisher creates a new publish workflow.
@@ -381,28 +380,14 @@ func (p *Publisher) checkExistingAsset(ctx context.Context) error {
 
 // gatherMetadata fetches metadata from external sources.
 func (p *Publisher) gatherMetadata(ctx context.Context) error {
-	// Check if app already exists on relays
-	if !p.opts.Publish.OverwriteApp && !p.opts.Publish.DryRun {
-		existingApp, err := p.publisher.CheckExistingApp(ctx, p.apkInfo.PackageID)
-		if err != nil {
-			if p.opts.Global.Verbose {
-				fmt.Printf("  Could not check for existing app: %v\n", err)
-			}
-		} else if existingApp != nil {
-			p.skipMetadataFetch = true
-			if p.opts.Publish.ShouldShowSpinners() {
-				ui.PrintInfo(fmt.Sprintf("App %s already exists on %s, skipping metadata fetch",
-					p.apkInfo.PackageID, existingApp.RelayURL))
-				fmt.Println("  Use --overwrite-app to re-fetch metadata from sources.")
-			}
-		}
-	}
-
-	// Fetch metadata from external sources
-	if !p.skipMetadataFetch {
+	// Fetch metadata from external sources (default for new releases)
+	// Use --skip-metadata to opt out (useful for apps with frequent releases)
+	if !p.opts.Publish.SkipMetadata {
 		if err := p.fetchExternalMetadata(ctx); err != nil {
 			return err
 		}
+	} else if p.opts.Publish.ShouldShowSpinners() {
+		ui.PrintInfo("Skipping metadata fetch (--skip-metadata)")
 	}
 
 	// Determine release notes
@@ -476,8 +461,8 @@ func (p *Publisher) preDownloadImages(ctx context.Context) error {
 
 // handlePreview shows the browser preview if requested.
 func (p *Publisher) handlePreview(ctx context.Context) error {
-	// Skip preview if metadata fetch was skipped (incomplete data)
-	if p.opts.Publish.Quiet || p.opts.Publish.Yes || p.opts.Publish.SkipPreview || p.skipMetadataFetch {
+	// Skip preview if metadata fetch was skipped (may have incomplete data)
+	if p.opts.Publish.Quiet || p.opts.Publish.Yes || p.opts.Publish.SkipPreview || p.opts.Publish.SkipMetadata {
 		return nil
 	}
 
