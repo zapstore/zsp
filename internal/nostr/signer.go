@@ -2,10 +2,13 @@ package nostr
 
 import (
 	"context"
-	"crypto/sha256"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -185,11 +188,23 @@ type BunkerSigner struct {
 
 // NewBunkerSigner creates a signer from a bunker:// URL.
 func NewBunkerSigner(ctx context.Context, bunkerURL string) (*BunkerSigner, error) {
-	// Derive a deterministic client key from the bunker URL.
-	// This ensures we use the same client key for the same bunker URL,
-	// which is important because NIP-46 secrets are single-use and
-	// permissions are tied to the client pubkey that first connected.
-	clientSecretKey := deriveBunkerClientKey(bunkerURL)
+	// Extract the target pubkey from the bunker URL.
+	// The URL format is: bunker://<remote-signer-pubkey>?relay=...&secret=...
+	// We key the client secret by the target pubkey, NOT the secret token,
+	// because the secret is single-use and disposable while the pubkey identifies
+	// the actual bunker we're connecting to.
+	targetPubkey, err := extractBunkerTargetPubkey(bunkerURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid bunker URL: %w", err)
+	}
+
+	// Get or generate a truly random client secret key for this bunker.
+	// This is persisted to ensure we use the same client key across sessions,
+	// which is necessary because NIP-46 permissions are tied to the client pubkey.
+	clientSecretKey, err := getOrCreateBunkerClientKey(targetPubkey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get client key: %w", err)
+	}
 
 	// Connect to bunker
 	bunker, err := nip46.ConnectBunker(ctx, clientSecretKey, bunkerURL, nil, func(s string) {
@@ -222,15 +237,73 @@ func NewBunkerSigner(ctx context.Context, bunkerURL string) (*BunkerSigner, erro
 	}, nil
 }
 
-// deriveBunkerClientKey generates a deterministic client secret key from a bunker URL.
-// This ensures that repeated connections to the same bunker use the same client key,
-// which is necessary because NIP-46 bunker secrets are single-use and permissions
-// are bound to the client pubkey that first connected with that secret.
-func deriveBunkerClientKey(bunkerURL string) string {
-	// Use SHA-256 to derive a deterministic 32-byte private key from the URL.
-	// We include a fixed prefix to namespace this derivation.
-	h := sha256.Sum256([]byte("zsp-bunker-client-v1:" + bunkerURL))
-	return hex.EncodeToString(h[:])
+// extractBunkerTargetPubkey extracts the target pubkey from a bunker URL.
+// The URL format is: bunker://<remote-signer-pubkey>?relay=...&secret=...
+func extractBunkerTargetPubkey(bunkerURL string) (string, error) {
+	parsed, err := url.Parse(bunkerURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse URL: %w", err)
+	}
+	if parsed.Scheme != "bunker" {
+		return "", fmt.Errorf("expected bunker:// scheme, got %s://", parsed.Scheme)
+	}
+	if parsed.Host == "" {
+		return "", fmt.Errorf("missing target pubkey in bunker URL")
+	}
+	if !nostr.IsValidPublicKey(parsed.Host) {
+		return "", fmt.Errorf("invalid target pubkey: %s", parsed.Host)
+	}
+	return parsed.Host, nil
+}
+
+// getOrCreateBunkerClientKey retrieves an existing client key for a bunker,
+// or generates and persists a new truly random one.
+// Keys are stored in the user's config directory under zsp/bunker-keys/.
+func getOrCreateBunkerClientKey(targetPubkey string) (string, error) {
+	keyPath, err := bunkerKeyPath(targetPubkey)
+	if err != nil {
+		return "", err
+	}
+
+	// Try to read existing key
+	data, err := os.ReadFile(keyPath)
+	if err == nil {
+		key := strings.TrimSpace(string(data))
+		if len(key) == 64 && isValidHex(key) {
+			return key, nil
+		}
+		// Invalid key file, regenerate
+	}
+
+	// Generate a truly random 32-byte private key
+	var keyBytes [32]byte
+	if _, err := rand.Read(keyBytes[:]); err != nil {
+		return "", fmt.Errorf("failed to generate random key: %w", err)
+	}
+	clientKey := hex.EncodeToString(keyBytes[:])
+
+	// Ensure directory exists
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0700); err != nil {
+		return "", fmt.Errorf("failed to create key directory: %w", err)
+	}
+
+	// Write key with restrictive permissions (owner read/write only)
+	if err := os.WriteFile(keyPath, []byte(clientKey+"\n"), 0600); err != nil {
+		return "", fmt.Errorf("failed to save client key: %w", err)
+	}
+
+	return clientKey, nil
+}
+
+// bunkerKeyPath returns the file path for storing a bunker client key.
+// Keys are stored in $XDG_CONFIG_HOME/zsp/bunker-keys/<pubkey>.key
+// or ~/.config/zsp/bunker-keys/<pubkey>.key on Unix systems.
+func bunkerKeyPath(targetPubkey string) (string, error) {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get config directory: %w", err)
+	}
+	return filepath.Join(configDir, "zsp", "bunker-keys", targetPubkey+".key"), nil
 }
 
 func (s *BunkerSigner) Type() SignerType {
