@@ -53,9 +53,10 @@ func NewPublisherFromEnv(relaysEnv string) *Publisher {
 
 // PublishResult contains the result of publishing to a single relay.
 type PublishResult struct {
-	RelayURL string
-	Success  bool
-	Error    error
+	RelayURL    string
+	Success     bool
+	IsDuplicate bool
+	Error       error
 }
 
 // Publish publishes an event to all configured relays.
@@ -67,6 +68,15 @@ func (p *Publisher) Publish(ctx context.Context, event *nostr.Event) []PublishRe
 	}
 
 	return results
+}
+
+// isDuplicateError checks if an error indicates the event already exists.
+func isDuplicateError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "duplicate") || strings.Contains(errStr, "already exists")
 }
 
 // publishToRelay publishes an event to a single relay.
@@ -85,6 +95,13 @@ func (p *Publisher) publishToRelay(ctx context.Context, url string, event *nostr
 
 	err = relay.Publish(ctx, *event)
 	if err != nil {
+		// Check if this is a duplicate error (event already exists)
+		if isDuplicateError(err) {
+			result.Success = true
+			result.IsDuplicate = true
+			result.Error = err // Keep error for informational purposes
+			return result
+		}
 		result.Error = fmt.Errorf("failed to publish: %w", err)
 		return result
 	}

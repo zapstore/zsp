@@ -832,15 +832,19 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 
 	// Report results
 	allSuccess := true
-	var failures []string
+	hasDuplicates := false
+	var messages []string
 	for eventType, eventResults := range results {
 		for _, r := range eventResults {
 			if r.Success {
-				if p.opts.Global.Verbose {
-					failures = append(failures, fmt.Sprintf("    %s -> %s: OK", eventType, r.RelayURL))
+				if r.IsDuplicate {
+					hasDuplicates = true
+					messages = append(messages, fmt.Sprintf("    %s -> %s: already exists", eventType, r.RelayURL))
+				} else if p.opts.Global.Verbose {
+					messages = append(messages, fmt.Sprintf("    %s -> %s: OK", eventType, r.RelayURL))
 				}
 			} else {
-				failures = append(failures, fmt.Sprintf("    %s -> %s: FAILED (%v)", eventType, r.RelayURL, r.Error))
+				messages = append(messages, fmt.Sprintf("    %s -> %s: FAILED (%v)", eventType, r.RelayURL, r.Error))
 				allSuccess = false
 			}
 		}
@@ -848,14 +852,18 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 
 	if publishSpinner != nil {
 		if allSuccess {
-			publishSpinner.StopWithSuccess("Published successfully")
+			if hasDuplicates {
+				publishSpinner.StopWithSuccess("Published (some events already existed)")
+			} else {
+				publishSpinner.StopWithSuccess("Published successfully")
+			}
 		} else {
 			publishSpinner.StopWithWarning("Published with some failures")
 		}
 	}
 
-	for _, f := range failures {
-		fmt.Println(f)
+	for _, msg := range messages {
+		fmt.Println(msg)
 	}
 
 	// Commit or clear cache
