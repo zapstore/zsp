@@ -45,6 +45,10 @@ var unsupportedArchRegex = regexp.MustCompile(`(?i)[-_\.](x86_64|x86|i686|i386|a
 // This prevents memory exhaustion from malicious or unexpectedly large responses.
 const MaxRemoteDownloadSize = 20 * 1024 * 1024 // 20MB
 
+// MaxDownloadSize is the hard cap for APK downloads (and any HTTP downloads
+// via DownloadHTTP) to avoid excessive bandwidth or disk usage.
+const MaxDownloadSize int64 = 600 * 1024 * 1024 // 600MB
+
 // maxReleasesToCheck is the maximum number of releases to iterate through
 // when looking for one with valid APKs (some repos publish desktop and mobile separately).
 const maxReleasesToCheck = 10
@@ -203,6 +207,10 @@ func DownloadHTTP(ctx context.Context, client *http.Client, url, destPath string
 		total = expectedSize
 	}
 
+	if total > MaxDownloadSize {
+		return fmt.Errorf("download size %d bytes exceeds limit of %d bytes", total, MaxDownloadSize)
+	}
+
 	// Create destination file
 	f, err := os.Create(destPath)
 	if err != nil {
@@ -220,10 +228,21 @@ func DownloadHTTP(ctx context.Context, client *http.Client, url, destPath string
 		}
 	}
 
-	_, err = io.Copy(f, reader)
+	// Enforce maximum download size even when Content-Length is missing.
+	limitedReader := &io.LimitedReader{
+		R: reader,
+		N: MaxDownloadSize + 1, // allow detecting overflow
+	}
+
+	written, err := io.Copy(f, limitedReader)
 	if err != nil {
 		os.Remove(destPath)
 		return fmt.Errorf("failed to write file: %w", err)
+	}
+
+	if written > MaxDownloadSize {
+		os.Remove(destPath)
+		return fmt.Errorf("download exceeded limit of %d bytes", MaxDownloadSize)
 	}
 
 	return nil
