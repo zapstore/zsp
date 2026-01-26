@@ -46,7 +46,7 @@ repository: https://github.com/AeonBTC/mempal
 ```
 
 ```bash
-zsp -r github.com/AeonBTC/mempal
+zsp publish -r github.com/AeonBTC/mempal
 ```
 
 ### GitLab Releases
@@ -83,15 +83,19 @@ repository: https://github.com/AntennaPod/AntennaPod
 release_source: https://f-droid.org/packages/de.danoeh.antennapod
 ```
 
-### Web Scraping
+### Web Sources
 
-Fetch APKs from any web page using regex patterns.
+Fetch APKs from any URL with version extraction via CSS selectors, JSON APIs, or HTTP headers.
 
 ```yaml
+# Extract version from HTML using CSS selector
 repository: https://github.com/AntennaPod/AntennaPod
 release_source:
-  url: https://f-droid.org/packages/de.danoeh.antennapod/
-  asset_url: https://f-droid\.org/repo/de\.danoeh\.antennapod_[0-9]+\.apk
+  version:
+    url: https://f-droid.org/packages/de.danoeh.antennapod/
+    selector: ".package-version-header"
+    match: "([0-9.]+)"
+  asset_url: https://f-droid.org/repo/de.danoeh.antennapod_{version}.apk
 ```
 
 Direct APK URL (no scraping):
@@ -110,7 +114,7 @@ repository: https://github.com/user/app
 ```
 
 ```bash
-zsp app.apk -r github.com/user/app
+zsp publish app.apk -r github.com/user/app
 ```
 
 ---
@@ -140,7 +144,7 @@ When multiple sources are used, metadata is merged with this priority:
 
 ```bash
 # CLI flags (can be repeated)
-zsp -m github -m playstore
+zsp publish -m github -m playstore
 
 # Or in YAML
 metadata_sources:
@@ -169,7 +173,7 @@ repository: https://github.com/user/app
 repository: https://github.com/user/app
 
 # Where to fetch APKs (if different from repository)
-# Can be URL string, local path, or object with type/asset_url for web scraping
+# Can be URL string, local path, or object with version extractor
 # Local paths: ./build/app-release.apk, ../builds/*.apk
 release_source: https://f-droid.org/packages/com.example.app
 
@@ -226,12 +230,6 @@ images:
 # Release notes file or URL (extracts section matching version if Keep a Changelog format)
 release_notes: ./CHANGELOG.md
 
-# Release channel: main (default), beta, nightly, dev
-release_channel: main
-
-# Git commit hash for reproducible builds
-commit: abc123def456
-
 # ═══════════════════════════════════════════════════════════════════
 # NOSTR-SPECIFIC
 # ═══════════════════════════════════════════════════════════════════
@@ -242,8 +240,7 @@ supported_nips:
   - "07"
   - "46"
 
-# Minimum version users should update to
-min_allowed_version: "1.0.0"
+# Minimum version code users should update to
 min_allowed_version_code: 100
 
 # ═══════════════════════════════════════════════════════════════════
@@ -273,12 +270,12 @@ metadata_sources:
 ### Usage Patterns
 
 ```bash
-zsp [config.yaml]              # Config file (default: ./zapstore.yaml)
-zsp <app.apk> [-r <repo>]      # Local APK with optional source repo
-zsp -r <repo>                  # Fetch latest release from repo
-zsp apk --extract <app.apk>    # Extract APK metadata as JSON
-zsp                            # Interactive wizard
-zsp --wizard                   # Wizard with existing config as defaults
+zsp publish [config.yaml]           # Config file (default: ./zapstore.yaml)
+zsp publish <app.apk> [-r <repo>]   # Local APK with optional source repo
+zsp publish -r <repo>               # Fetch latest release from repo
+zsp publish --wizard                # Interactive wizard
+zsp apk --extract <app.apk>         # Extract APK metadata as JSON
+zsp identity --link-key <cert>      # Link signing key to Nostr identity
 ```
 
 ### Flags
@@ -298,6 +295,7 @@ zsp --wizard                   # Wizard with existing config as defaults
 | `--wizard` | Run interactive wizard (recommended for first-time setup) |
 | `--match <pattern>` | Regex pattern to filter APK assets (rarely needed - system auto-selects best APK) |
 | `--commit <hash>` | Git commit hash for reproducible builds |
+| `--channel <name>` | Release channel: main (default), beta, nightly, dev |
 | `--check` | Verify config fetches arm64-v8a APK (exit 0=success) |
 | `--skip-preview` | Skip the browser preview prompt |
 | `--port <port>` | Custom port for browser preview/signing |
@@ -332,7 +330,7 @@ zsp --wizard                   # Wizard with existing config as defaults
 Direct signing with a Nostr private key.
 
 ```bash
-SIGN_WITH=nsec1... zsp zapstore.yaml
+SIGN_WITH=nsec1... zsp publish zapstore.yaml
 ```
 
 > ⚠️ **Security**: Private keys in environment variables can be exposed via `/proc/*/environ` on Linux or shell history. For production, prefer bunker or browser signing.
@@ -342,7 +340,7 @@ SIGN_WITH=nsec1... zsp zapstore.yaml
 64-character hex private key (converted to nsec internally).
 
 ```bash
-SIGN_WITH=0123456789abcdef... zsp zapstore.yaml
+SIGN_WITH=0123456789abcdef... zsp publish zapstore.yaml
 ```
 
 ### Public Key (npub) - Unsigned Output
@@ -350,7 +348,7 @@ SIGN_WITH=0123456789abcdef... zsp zapstore.yaml
 Output unsigned events for external signing workflows.
 
 ```bash
-SIGN_WITH=npub1... zsp zapstore.yaml > unsigned-events.json
+SIGN_WITH=npub1... zsp publish zapstore.yaml > unsigned-events.json
 ```
 
 ### NIP-46 Bunker (Remote Signing)
@@ -358,7 +356,7 @@ SIGN_WITH=npub1... zsp zapstore.yaml > unsigned-events.json
 Sign via a remote signer like nsecBunker.
 
 ```bash
-SIGN_WITH="bunker://pubkey?relay=wss://relay.example.com&secret=..." zsp
+SIGN_WITH="bunker://pubkey?relay=wss://relay.example.com&secret=..." zsp publish
 ```
 
 ### Browser Extension (NIP-07)
@@ -366,7 +364,7 @@ SIGN_WITH="bunker://pubkey?relay=wss://relay.example.com&secret=..." zsp
 Sign using your browser's Nostr extension (Alby, nos2x, Flamingo, etc.).
 
 ```bash
-SIGN_WITH=browser zsp
+SIGN_WITH=browser zsp publish
 ```
 
 This opens a browser window where you approve signing. Supports batch signing for efficiency.
@@ -476,7 +474,7 @@ match: "^(?!.*debug).*\\.apk$"
     SIGN_WITH: ${{ secrets.NOSTR_NSEC }}
     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   run: |
-    zsp -y zapstore.yaml
+    zsp publish -y zapstore.yaml
 ```
 
 ### Check Mode
@@ -494,7 +492,7 @@ zsp publish --check zapstore.yaml
 Build events without publishing:
 
 ```bash
-zsp --dry-run zapstore.yaml
+zsp publish --dry-run zapstore.yaml
 ```
 
 ---
@@ -528,25 +526,21 @@ release_source:
   type: gitlab
 ```
 
-### Web Page with Dynamic APK URL
+### Web Source with JSON API
 
 ```yaml
 release_source:
-  url: https://example.com/downloads
-  asset_url: https://cdn\.example\.com/releases/app-v[0-9.]+\.apk
+  version:
+    url: https://api.example.com/releases/latest
+    path: "$.tag_name"
+    match: "v([0-9.]+)"
+  asset_url: https://cdn.example.com/releases/app-v{version}.apk
 ```
 
 ### Reproducible Build with Commit Hash
 
-```yaml
-repository: https://github.com/AeonBTC/mempal
-commit: a1b2c3d4e5f6
-```
-
-Or via CLI:
-
 ```bash
-zsp --commit a1b2c3d4e5f6 zapstore.yaml
+zsp publish --commit a1b2c3d4e5f6 zapstore.yaml
 ```
 
 ### NIP-34 Repository Reference
