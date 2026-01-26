@@ -129,19 +129,19 @@ func runPublishCommand(ctx context.Context, opts *cli.Options) int {
 		if errors.Is(err, ui.ErrInterrupted) {
 			return 130
 		}
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
 		return 1
 	}
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: invalid configuration: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: invalid configuration: %s\n", ui.SanitizeErrorMessage(err))
 		return 1
 	}
 
 	// Validate CLI options
 	if err := opts.Publish.ValidateChannel(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
 		return 1
 	}
 
@@ -158,7 +158,7 @@ func runPublishCommand(ctx context.Context, opts *cli.Options) int {
 		if errors.Is(err, context.Canceled) {
 			return 130 // Standard exit code for Ctrl+C
 		}
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
 		return 1
 	}
 
@@ -182,7 +182,7 @@ func runIdentityCommand(ctx context.Context, opts *cli.Options) int {
 				fmt.Fprint(os.Stderr, identity.JKSConversionHelp(opts.Identity.LinkKey))
 				return 1
 			}
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
 			return 1
 		}
 		return 0
@@ -197,7 +197,7 @@ func runIdentityCommand(ctx context.Context, opts *cli.Options) int {
 				fmt.Fprint(os.Stderr, identity.JKSConversionHelp(opts.Identity.Verify))
 				return 1
 			}
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
 			return 1
 		}
 		return 0
@@ -222,7 +222,7 @@ func runAPKCommand(ctx context.Context, opts *cli.Options) int {
 			return 1
 		}
 		if err := extractAPKMetadata(opts.Args[0]); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
 			return 1
 		}
 		return 0

@@ -3,6 +3,7 @@ package ui
 
 import (
 	"os"
+	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -273,3 +274,19 @@ func ColorizeJSON(jsonStr string) string {
 	return string(result)
 }
 
+// SanitizeErrorMessage redacts potentially sensitive path information from error messages.
+// Replaces the user's home directory with ~ to avoid leaking usernames or system structure.
+func SanitizeErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+
+	// Replace home directory with ~
+	homeDir, homeErr := os.UserHomeDir()
+	if homeErr == nil && homeDir != "" {
+		msg = strings.ReplaceAll(msg, homeDir, "~")
+	}
+
+	return msg
+}

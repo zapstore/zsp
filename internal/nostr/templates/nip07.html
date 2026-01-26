@@ -237,6 +237,11 @@
           const resp = await fetch('/api/state');
           const state = await resp.json();
 
+          // Capture session nonce for subsequent requests
+          if (state.nonce) {
+            sessionNonce = state.nonce;
+          }
+
           idleSection.style.display = state.mode === 'idle' ? 'block' : 'none';
           publicKeySection.style.display = state.mode === 'publicKey' ? 'block' : 'none';
           signSection.style.display = state.mode === 'sign' ? 'block' : 'none';
@@ -252,6 +257,8 @@
         }
       }
 
+      let sessionNonce = '';
+
       async function handlePublicKey() {
         const status = document.getElementById('pk-status');
         try {
@@ -261,7 +268,10 @@
 
           await fetch('/public-key', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 
+              'Content-Type': 'application/json',
+              'X-Session-Nonce': sessionNonce 
+            },
             body: JSON.stringify({ publicKey: pubkey })
           });
         } catch (e) {
@@ -331,7 +341,10 @@
 
             const resp = await fetch('/signed-events', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: { 
+                'Content-Type': 'application/json',
+                'X-Session-Nonce': sessionNonce
+              },
               body: JSON.stringify(signed)
             });
 

@@ -4,6 +4,7 @@ package blossom
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -38,7 +39,22 @@ func NewClient(serverURL string) *Client {
 	}
 	return &Client{
 		serverURL:  serverURL,
-		httpClient: &http.Client{Timeout: 5 * time.Minute},
+		httpClient: newSecureHTTPClient(5 * time.Minute),
+	}
+}
+
+// newSecureHTTPClient creates an HTTP client with security best practices.
+func newSecureHTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			},
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+		},
 	}
 }
 

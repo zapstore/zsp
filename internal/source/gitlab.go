@@ -50,7 +50,7 @@ func NewGitLab(cfg *config.Config) (*GitLab, error) {
 		cfg:       cfg,
 		baseURL:   baseURL,
 		projectID: projectID,
-		client:    &http.Client{Timeout: 30 * time.Second},
+		client:    newSecureHTTPClient(30 * time.Second),
 	}, nil
 }
 
@@ -220,7 +220,19 @@ func (g *GitLab) Download(ctx context.Context, asset *Asset, destDir string, pro
 		return "", fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	destPath := filepath.Join(destDir, asset.Name)
+	// Security: Sanitize filename to prevent path traversal attacks
+	safeName := filepath.Base(asset.Name)
+	if safeName == "." || safeName == ".." || safeName == "" {
+		return "", fmt.Errorf("invalid asset filename: %s", asset.Name)
+	}
+	destPath := filepath.Join(destDir, safeName)
+
+	// Security: Validate the final path is within destDir
+	cleanDest := filepath.Clean(destPath)
+	cleanDir := filepath.Clean(destDir)
+	if !strings.HasPrefix(cleanDest, cleanDir+string(filepath.Separator)) && cleanDest != cleanDir {
+		return "", fmt.Errorf("invalid destination path: path traversal detected")
+	}
 
 	// Download the file
 	req, err := http.NewRequestWithContext(ctx, "GET", asset.URL, nil)

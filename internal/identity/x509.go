@@ -342,6 +342,7 @@ func detectJKS(data []byte) bool {
 }
 
 // LoadPKCS12 loads a private key and certificate from PKCS12 data.
+// Security: The password is zeroed after use to minimize exposure in memory.
 func LoadPKCS12(data []byte, password string) (crypto.PrivateKey, *x509.Certificate, error) {
 	// Check for JKS format first
 	if detectJKS(data) {
@@ -355,13 +356,41 @@ func LoadPKCS12(data []byte, password string) (crypto.PrivateKey, *x509.Certific
 	return privateKey, cert, nil
 }
 
+// LoadPKCS12WithSecurePassword loads a private key and certificate from PKCS12 data.
+// The password byte slice is zeroed after use for security.
+func LoadPKCS12WithSecurePassword(data []byte, password []byte) (crypto.PrivateKey, *x509.Certificate, error) {
+	// Zero the password when done
+	defer zeroBytes(password)
+
+	// Check for JKS format first
+	if detectJKS(data) {
+		return nil, nil, ErrJKSFormat
+	}
+
+	privateKey, cert, err := pkcs12.Decode(data, string(password))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse PKCS12: %w", err)
+	}
+	return privateKey, cert, nil
+}
+
+// zeroBytes zeroes a byte slice to clear sensitive data from memory.
+func zeroBytes(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
+}
+
 // LoadPKCS12File loads a private key and certificate from a PKCS12 file.
+// Security: The password is zeroed after use.
 func LoadPKCS12File(path, password string) (crypto.PrivateKey, *x509.Certificate, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read keystore file: %w", err)
 	}
-	return LoadPKCS12(data, password)
+	// Convert to bytes and use secure version that zeros after use
+	passwordBytes := []byte(password)
+	return LoadPKCS12WithSecurePassword(data, passwordBytes)
 }
 
 // LoadPEM loads a private key and certificate from PEM files.

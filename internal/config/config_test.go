@@ -925,15 +925,16 @@ func TestValidateURLCases(t *testing.T) {
 		wantErr bool
 	}{
 		{"https://github.com/user/repo", false},
-		{"http://github.com/user/repo", false},
+		{"http://github.com/user/repo", true},   // HTTP not allowed for remote hosts (security)
 		{"https://localhost:8080/user/repo", false},
-		{"http://localhost/path", false},
-		{"ftp://github.com/user/repo", true}, // Invalid scheme
-		{"github.com/user/repo", true},       // No scheme
-		{"https://", true},                   // No host
-		{"https:///path", true},              // No host
-		{"https://singleword", true},         // No TLD (unless localhost)
-		{"", true},                           // Empty
+		{"http://localhost/path", false},        // HTTP allowed for localhost
+		{"http://127.0.0.1/path", false},        // HTTP allowed for 127.0.0.1
+		{"ftp://github.com/user/repo", true},    // Invalid scheme
+		{"github.com/user/repo", true},          // No scheme
+		{"https://", true},                      // No host
+		{"https:///path", true},                 // No host
+		{"https://singleword", true},            // No TLD (unless localhost)
+		{"", true},                              // Empty
 	}
 
 	for _, tt := range tests {

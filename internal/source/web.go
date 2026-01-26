@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -59,7 +60,7 @@ func NewWeb(cfg *config.Config) (*Web, error) {
 
 	return &Web{
 		cfg:      cfg,
-		client:   &http.Client{Timeout: 30 * time.Second},
+		client:   newSecureHTTPClient(30 * time.Second),
 		cacheDir: cacheDir,
 	}, nil
 }
@@ -71,6 +72,11 @@ func (w *Web) resolveRedirects(ctx context.Context, url string) (string, error) 
 	var finalURL string
 	client := &http.Client{
 		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			},
+		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			finalURL = req.URL.String()
 			if len(via) >= 10 {
@@ -319,7 +325,8 @@ func (w *Web) extractVersionHTML(ctx context.Context, v *config.VersionExtractor
 		return "", fmt.Errorf("page fetch failed with status %d", resp.StatusCode)
 	}
 
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	// Security: Limit response size to prevent memory exhaustion
+	doc, err := goquery.NewDocumentFromReader(io.LimitReader(resp.Body, MaxRemoteDownloadSize))
 	if err != nil {
 		return "", fmt.Errorf("failed to parse HTML: %w", err)
 	}
@@ -364,9 +371,12 @@ func (w *Web) extractVersionJSON(ctx context.Context, v *config.VersionExtractor
 		return "", fmt.Errorf("API fetch failed with status %d", resp.StatusCode)
 	}
 
+	// Security: Limit response size to prevent memory exhaustion
+	limitedReader := io.LimitReader(resp.Body, MaxRemoteDownloadSize)
+
 	// Parse JSON
 	var data interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+	if err := json.NewDecoder(limitedReader).Decode(&data); err != nil {
 		return "", fmt.Errorf("failed to parse JSON: %w", err)
 	}
 
@@ -404,6 +414,11 @@ func (w *Web) extractVersionHeader(ctx context.Context, v *config.VersionExtract
 	// Don't follow redirects - we want to capture the redirect header
 	client := &http.Client{
 		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			},
+		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse // Stop at first redirect
 		},
@@ -536,9 +551,19 @@ func (w *Web) Download(ctx context.Context, asset *Asset, destDir string, progre
 		return "", fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	// Sanitize filename to prevent path traversal attacks
+	// Security: Sanitize filename to prevent path traversal attacks
 	safeName := filepath.Base(asset.Name)
+	if safeName == "." || safeName == ".." || safeName == "" {
+		return "", fmt.Errorf("invalid asset filename: %s", asset.Name)
+	}
 	destPath := filepath.Join(destDir, safeName)
+
+	// Security: Validate the final path is within destDir
+	cleanDest := filepath.Clean(destPath)
+	cleanDir := filepath.Clean(destDir)
+	if !strings.HasPrefix(cleanDest, cleanDir+string(filepath.Separator)) && cleanDest != cleanDir {
+		return "", fmt.Errorf("invalid destination path: path traversal detected")
+	}
 
 	// Download the file
 	req, err := http.NewRequestWithContext(ctx, "GET", asset.URL, nil)

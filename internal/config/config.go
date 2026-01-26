@@ -439,6 +439,15 @@ func (r *ReleaseSource) Validate() error {
 		return fmt.Errorf("asset_url contains {version} placeholder but no version extractor is configured")
 	}
 
+	// Validate asset_url if provided (check HTTPS requirement)
+	// Note: asset_url may contain {version} placeholder, so we validate a sample URL
+	if r.AssetURL != "" {
+		testURL := strings.ReplaceAll(r.AssetURL, "{version}", "1.0.0")
+		if err := ValidateURL(testURL); err != nil {
+			return fmt.Errorf("invalid asset_url: %w", err)
+		}
+	}
+
 	// Validate version extractor if present
 	if r.Version != nil {
 		if err := r.Version.Validate(); err != nil {
@@ -453,6 +462,11 @@ func (r *ReleaseSource) Validate() error {
 func (v *VersionExtractor) Validate() error {
 	if v.URL == "" {
 		return fmt.Errorf("url is required")
+	}
+
+	// Validate URL format and security requirements (HTTPS required)
+	if err := ValidateURL(v.URL); err != nil {
+		return fmt.Errorf("invalid url: %w", err)
 	}
 
 	// Determine mode and validate accordingly
@@ -507,6 +521,7 @@ func (v *VersionExtractor) Mode() string {
 }
 
 // ValidateURL checks if a string is a valid URL with http/https scheme.
+// For security, HTTPS is required for all remote URLs except localhost.
 func ValidateURL(rawURL string) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
@@ -525,6 +540,12 @@ func ValidateURL(rawURL string) error {
 	host := parsed.Hostname()
 	if host != "localhost" && !strings.Contains(host, ".") {
 		return fmt.Errorf("invalid host %q: must be a valid domain (e.g., github.com/user/repo)", host)
+	}
+
+	// Security: Require HTTPS for all remote URLs except localhost
+	// This prevents man-in-the-middle attacks on APK downloads and metadata
+	if parsed.Scheme == "http" && host != "localhost" && host != "127.0.0.1" && host != "::1" {
+		return fmt.Errorf("HTTPS is required for remote URLs (got http://%s)", host)
 	}
 
 	return nil

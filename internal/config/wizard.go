@@ -728,6 +728,7 @@ func selectBestAPKName(names []string) string {
 func GetSignWith() string {
 	// Check environment variable first
 	if value := os.Getenv("SIGN_WITH"); value != "" {
+		warnIfNsecInEnv(value, "environment variable")
 		return value
 	}
 
@@ -740,11 +741,28 @@ func GetSignWith() string {
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "SIGN_WITH=") {
-			return strings.TrimPrefix(line, "SIGN_WITH=")
+			value := strings.TrimPrefix(line, "SIGN_WITH=")
+			warnIfNsecInEnv(value, ".env file")
+			return value
 		}
 	}
 
 	return ""
+}
+
+// warnIfNsecInEnv prints a security warning if an nsec is stored in an insecure location.
+func warnIfNsecInEnv(value, source string) {
+	if strings.HasPrefix(value, "nsec1") {
+		fmt.Fprintf(os.Stderr, "\n⚠️  WARNING: Private key (nsec) found in %s\n", source)
+		fmt.Fprintf(os.Stderr, "   This is insecure. Consider using:\n")
+		fmt.Fprintf(os.Stderr, "   - A bunker:// URL for remote signing\n")
+		fmt.Fprintf(os.Stderr, "   - Browser extension (NIP-07)\n")
+		fmt.Fprintf(os.Stderr, "   - Environment variable set per-session (not persisted)\n")
+		if source == ".env file" && !isInGitignore(".env") {
+			fmt.Fprintf(os.Stderr, "   ⚠️  .env is NOT in .gitignore - risk of committing secrets!\n")
+		}
+		fmt.Fprintln(os.Stderr)
+	}
 }
 
 // hasSignWith checks if SIGN_WITH is set in environment or .env file.
@@ -777,6 +795,8 @@ func PromptSignWith() (string, error) {
 		if !strings.HasPrefix(signWith, "nsec1") {
 			return "", fmt.Errorf("invalid nsec format")
 		}
+		// Security: Do not offer to save nsec to .env - it's too risky
+		ui.PrintInfo("Set SIGN_WITH environment variable for future runs (do not store in files)")
 	case 1:
 		signWith, err = ui.Prompt("Enter your npub: ")
 		if err != nil {
@@ -784,6 +804,10 @@ func PromptSignWith() (string, error) {
 		}
 		if !strings.HasPrefix(signWith, "npub1") {
 			return "", fmt.Errorf("invalid npub format")
+		}
+		// Offer to save non-sensitive options to .env
+		if err := offerSaveToEnv(signWith); err != nil {
+			return "", err
 		}
 	case 2:
 		signWith, err = ui.Prompt("Enter bunker URL: ")
@@ -793,20 +817,37 @@ func PromptSignWith() (string, error) {
 		if !strings.HasPrefix(signWith, "bunker://") {
 			return "", fmt.Errorf("invalid bunker URL format")
 		}
+		// Offer to save bunker URL to .env (contains no secrets, just connection info)
+		if err := offerSaveToEnv(signWith); err != nil {
+			return "", err
+		}
 	case 3:
 		signWith = "browser"
+		// Offer to save browser option to .env
+		if err := offerSaveToEnv(signWith); err != nil {
+			return "", err
+		}
 	case 4:
 		// Test nsec (private key = 1) for dry-run mode
 		signWith = "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsmhltgl"
 	}
 
-	// Offer to save to .env
+	return signWith, nil
+}
+
+// offerSaveToEnv offers to save non-sensitive SIGN_WITH values to .env.
+func offerSaveToEnv(signWith string) error {
 	saveEnv, err := ui.Confirm("Save to .env for future runs?", true)
 	if err != nil {
-		return "", err
+		return err
 	}
 
 	if saveEnv {
+		// Warn about .gitignore
+		if !isInGitignore(".env") {
+			ui.PrintWarning("Consider adding .env to your .gitignore file")
+		}
+
 		envContent := fmt.Sprintf("SIGN_WITH=%s\n", signWith)
 		if err := appendToEnvFile(envContent); err != nil {
 			ui.PrintWarning(fmt.Sprintf("Could not save to .env: %v", err))
@@ -814,8 +855,22 @@ func PromptSignWith() (string, error) {
 			ui.PrintSuccess("Saved to .env")
 		}
 	}
+	return nil
+}
 
-	return signWith, nil
+// isInGitignore checks if a file pattern is listed in .gitignore.
+func isInGitignore(pattern string) bool {
+	data, err := os.ReadFile(".gitignore")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == pattern || line == "/"+pattern {
+			return true
+		}
+	}
+	return false
 }
 
 // appendToEnvFile appends content to .env file.

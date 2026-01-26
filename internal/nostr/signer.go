@@ -135,7 +135,12 @@ func (s *NsecSigner) Sign(ctx context.Context, event *nostr.Event) error {
 	return event.Sign(s.privateKey)
 }
 
+// Close clears sensitive key material from memory.
+// Note: Go strings are immutable, so we cannot truly zero them.
+// Setting to empty string allows the original to be garbage collected sooner
+// and reduces the window of exposure.
 func (s *NsecSigner) Close() error {
+	s.privateKey = ""
 	return nil
 }
 

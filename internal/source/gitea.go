@@ -44,7 +44,7 @@ func NewGitea(cfg *config.Config) (*Gitea, error) {
 		owner:   parts[0],
 		repo:    parts[1],
 		token:   os.Getenv("GITEA_TOKEN"),
-		client:  &http.Client{Timeout: 30 * time.Second},
+		client:  newSecureHTTPClient(30 * time.Second),
 	}, nil
 }
 
@@ -201,9 +201,19 @@ func (g *Gitea) Download(ctx context.Context, asset *Asset, destDir string, prog
 		return "", fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	// Sanitize filename to prevent path traversal attacks
+	// Security: Sanitize filename to prevent path traversal attacks
 	safeName := filepath.Base(asset.Name)
+	if safeName == "." || safeName == ".." || safeName == "" {
+		return "", fmt.Errorf("invalid asset filename: %s", asset.Name)
+	}
 	destPath := filepath.Join(destDir, safeName)
+
+	// Security: Validate the final path is within destDir
+	cleanDest := filepath.Clean(destPath)
+	cleanDir := filepath.Clean(destDir)
+	if !strings.HasPrefix(cleanDest, cleanDir+string(filepath.Separator)) && cleanDest != cleanDir {
+		return "", fmt.Errorf("invalid destination path: path traversal detected")
+	}
 
 	// Download the file
 	req, err := http.NewRequestWithContext(ctx, "GET", asset.URL, nil)

@@ -162,10 +162,10 @@ func SelectMultipleWithDefaults(message string, options []string, preselected []
 	return SelectMultiplePreselected(message, options, preselected)
 }
 
-// PromptSecret asks for secret input (like passwords or keys).
-// Note: This doesn't actually hide input - for that we'd need terminal raw mode.
+// PromptSecret asks for secret input (like passwords or keys) with hidden characters.
+// The input is not echoed to the terminal for security.
 func PromptSecret(message string) (string, error) {
-	return Prompt(message + ": ")
+	return PromptPassword(message)
 }
 
 // PromptPassword asks for password input with hidden characters.
@@ -228,7 +228,19 @@ func PromptPassword(message string) (string, error) {
 		if result.err != nil {
 			return "", result.err
 		}
-		return string(result.password), nil
+		// Convert to string, then zero the byte slice to minimize exposure in memory.
+		// Note: The string copy cannot be zeroed (Go strings are immutable), but
+		// zeroing the source bytes helps reduce the attack surface.
+		str := string(result.password)
+		zeroBytes(result.password)
+		return str, nil
+	}
+}
+
+// zeroBytes zeroes a byte slice to clear sensitive data from memory.
+func zeroBytes(b []byte) {
+	for i := range b {
+		b[i] = 0
 	}
 }
 

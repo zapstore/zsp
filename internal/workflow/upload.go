@@ -1029,6 +1029,9 @@ func detectImageMimeType(path string) string {
 	}
 }
 
+// maxImageDownloadSize is the maximum size for remote image downloads (20MB)
+const maxImageDownloadSize = 20 * 1024 * 1024
+
 func downloadRemoteImage(ctx context.Context, url string) (data []byte, hashStr string, mimeType string, err error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -1048,9 +1051,20 @@ func downloadRemoteImage(ctx context.Context, url string) (data []byte, hashStr 
 		return nil, "", "", fmt.Errorf("download failed with status %d: %s", resp.StatusCode, url)
 	}
 
-	data, err = io.ReadAll(resp.Body)
+	// Security: Check Content-Length header before reading
+	if resp.ContentLength > maxImageDownloadSize {
+		return nil, "", "", fmt.Errorf("image too large: %d bytes (max %d)", resp.ContentLength, maxImageDownloadSize)
+	}
+
+	// Security: Limit read size to prevent memory exhaustion
+	data, err = io.ReadAll(io.LimitReader(resp.Body, maxImageDownloadSize+1))
 	if err != nil {
 		return nil, "", "", fmt.Errorf("failed to read response: %w", err)
+	}
+
+	// Check if we hit the limit (read more than allowed)
+	if len(data) > maxImageDownloadSize {
+		return nil, "", "", fmt.Errorf("image too large: exceeds %d bytes", maxImageDownloadSize)
 	}
 
 	hash := sha256.Sum256(data)

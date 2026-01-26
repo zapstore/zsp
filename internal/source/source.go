@@ -4,6 +4,7 @@ package source
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -18,9 +19,31 @@ import (
 	"github.com/zapstore/zsp/internal/config"
 )
 
+// newSecureHTTPClient creates an HTTP client with security best practices:
+// - TLS 1.2 minimum version
+// - Connection pooling limits to prevent resource exhaustion
+// - Reasonable timeouts
+func newSecureHTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			},
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
+}
+
 // unsupportedArchRegex matches APK filenames that explicitly indicate unsupported architectures.
 // We only want arm64-v8a. Filter out x86, x86_64 (Intel/AMD) and armeabi/armeabi-v7a (32-bit ARM).
 var unsupportedArchRegex = regexp.MustCompile(`(?i)[-_\.](x86_64|x86|i686|i386|amd64|armeabi-v7a|armeabi)[-_\.]`)
+
+// MaxRemoteDownloadSize is the maximum size for remote downloads (images, metadata, etc.)
+// This prevents memory exhaustion from malicious or unexpectedly large responses.
+const MaxRemoteDownloadSize = 20 * 1024 * 1024 // 20MB
 
 // maxReleasesToCheck is the maximum number of releases to iterate through
 // when looking for one with valid APKs (some repos publish desktop and mobile separately).

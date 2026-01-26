@@ -2,7 +2,9 @@ package nostr
 
 import (
 	"context"
+	"crypto/rand"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -35,6 +37,9 @@ type NIP07Signer struct {
 	signingResult chan []map[string]any
 	shouldClose   bool
 	browserOpened bool
+
+	// Security: Session nonce to prevent replay attacks and CSRF
+	sessionNonce string
 }
 
 // NIP07SignerOptions contains options for creating a NIP-07 signer.
@@ -48,11 +53,20 @@ func NewNIP07Signer(ctx context.Context, port int) (*NIP07Signer, error) {
 	if port == 0 {
 		port = DefaultNIP07Port
 	}
+
+	// Security: Generate a random session nonce to prevent CSRF and replay attacks
+	nonceBytes := make([]byte, 16)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		return nil, fmt.Errorf("failed to generate session nonce: %w", err)
+	}
+	sessionNonce := hex.EncodeToString(nonceBytes)
+
 	s := &NIP07Signer{
 		port:          port,
 		mode:          "idle",
 		pubkeyResult:  make(chan string, 1),
 		signingResult: make(chan []map[string]any, 1),
+		sessionNonce:  sessionNonce,
 	}
 
 	// Start server
@@ -179,15 +193,41 @@ func (s *NIP07Signer) startServer() error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
-	mux.HandleFunc("/api/state", s.handleState)
-	mux.HandleFunc("/api/shutdown", s.handleShutdown)
-	mux.HandleFunc("/public-key", s.handlePublicKey)
-	mux.HandleFunc("/signed-events", s.handleSignedEvents)
+	mux.HandleFunc("/api/state", s.securityMiddleware(s.handleState))
+	mux.HandleFunc("/api/shutdown", s.securityMiddleware(s.handleShutdown))
+	mux.HandleFunc("/public-key", s.securityMiddleware(s.handlePublicKey))
+	mux.HandleFunc("/signed-events", s.securityMiddleware(s.handleSignedEvents))
 
 	s.server = &http.Server{Handler: mux}
 
 	go s.server.Serve(listener)
 	return nil
+}
+
+// securityMiddleware adds security headers and validates request origin.
+// This protects against CSRF attacks from malicious websites trying to
+// interact with the local signing server.
+func (s *NIP07Signer) securityMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Add security headers
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Cache-Control", "no-store")
+
+		// Validate Origin header for non-GET requests (CSRF protection)
+		if r.Method != http.MethodGet {
+			origin := r.Header.Get("Origin")
+			expectedOrigin := fmt.Sprintf("http://localhost:%d", s.port)
+			expectedOrigin127 := fmt.Sprintf("http://127.0.0.1:%d", s.port)
+
+			if origin != "" && origin != expectedOrigin && origin != expectedOrigin127 {
+				http.Error(w, "Forbidden: invalid origin", http.StatusForbidden)
+				return
+			}
+		}
+
+		next(w, r)
+	}
 }
 
 func (s *NIP07Signer) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -198,8 +238,9 @@ func (s *NIP07Signer) handleIndex(w http.ResponseWriter, r *http.Request) {
 func (s *NIP07Signer) handleState(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	state := map[string]any{
-		"mode": s.mode,
-		"data": s.eventsToSign,
+		"mode":  s.mode,
+		"data":  s.eventsToSign,
+		"nonce": s.sessionNonce, // Include nonce for client verification
 	}
 	s.mu.Unlock()
 
@@ -222,11 +263,24 @@ func (s *NIP07Signer) handlePublicKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Security: Verify session nonce from request header
+	requestNonce := r.Header.Get("X-Session-Nonce")
+	if requestNonce != s.sessionNonce {
+		http.Error(w, "Invalid session nonce", http.StatusForbidden)
+		return
+	}
+
 	var data struct {
 		PublicKey string `json:"publicKey"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Security: Validate pubkey format
+	if !nostr.IsValidPublicKey(data.PublicKey) {
+		http.Error(w, "Invalid public key format", http.StatusBadRequest)
 		return
 	}
 
@@ -245,10 +299,45 @@ func (s *NIP07Signer) handleSignedEvents(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Security: Verify session nonce from request header
+	requestNonce := r.Header.Get("X-Session-Nonce")
+	if requestNonce != s.sessionNonce {
+		http.Error(w, "Invalid session nonce", http.StatusForbidden)
+		return
+	}
+
 	var signedEvents []map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&signedEvents); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
+	}
+
+	// Security: Verify each signed event has a valid signature
+	for i, eventMap := range signedEvents {
+		// Convert map to nostr.Event for verification
+		eventJSON, err := json.Marshal(eventMap)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Invalid event %d: %v", i, err), http.StatusBadRequest)
+			return
+		}
+		var event nostr.Event
+		if err := json.Unmarshal(eventJSON, &event); err != nil {
+			http.Error(w, fmt.Sprintf("Invalid event %d: %v", i, err), http.StatusBadRequest)
+			return
+		}
+
+		// Verify the signature
+		valid, err := event.CheckSignature()
+		if err != nil || !valid {
+			http.Error(w, fmt.Sprintf("Invalid signature on event %d", i), http.StatusBadRequest)
+			return
+		}
+
+		// Verify the pubkey matches our expected pubkey (if we have one)
+		if s.publicKey != "" && event.PubKey != s.publicKey {
+			http.Error(w, fmt.Sprintf("Event %d pubkey mismatch", i), http.StatusBadRequest)
+			return
+		}
 	}
 
 	w.WriteHeader(http.StatusOK)

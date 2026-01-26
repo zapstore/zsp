@@ -41,7 +41,7 @@ type MetadataFetcher struct {
 func NewMetadataFetcher(cfg *config.Config) *MetadataFetcher {
 	return &MetadataFetcher{
 		cfg:    cfg,
-		client: &http.Client{Timeout: 30 * time.Second},
+		client: newSecureHTTPClient(30 * time.Second),
 	}
 }
 
@@ -49,7 +49,7 @@ func NewMetadataFetcher(cfg *config.Config) *MetadataFetcher {
 func NewMetadataFetcherWithPackageID(cfg *config.Config, packageID string) *MetadataFetcher {
 	return &MetadataFetcher{
 		cfg:       cfg,
-		client:    &http.Client{Timeout: 30 * time.Second},
+		client:    newSecureHTTPClient(30 * time.Second),
 		PackageID: packageID,
 	}
 }
@@ -316,7 +316,8 @@ func (f *MetadataFetcher) fetchGitHubReadme(ctx context.Context, owner, repo str
 		return "", fmt.Errorf("failed to fetch readme: %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	// Security: Limit response size to prevent memory exhaustion
+	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxRemoteDownloadSize))
 	if err != nil {
 		return "", err
 	}
@@ -426,7 +427,8 @@ func (f *MetadataFetcher) fetchGitLabReadme(ctx context.Context, encodedPath, br
 		defer resp.Body.Close()
 
 		if resp.StatusCode == http.StatusOK {
-			body, err := io.ReadAll(resp.Body)
+			// Security: Limit response size to prevent memory exhaustion
+			body, err := io.ReadAll(io.LimitReader(resp.Body, MaxRemoteDownloadSize))
 			if err != nil {
 				continue
 			}
@@ -524,7 +526,8 @@ func (f *MetadataFetcher) scrapeFDroidWebsite(ctx context.Context, packageID str
 		return nil, fmt.Errorf("F-Droid returned status %d", resp.StatusCode)
 	}
 
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	// Security: Limit response size to prevent memory exhaustion
+	doc, err := goquery.NewDocumentFromReader(io.LimitReader(resp.Body, MaxRemoteDownloadSize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse HTML: %w", err)
 	}
@@ -607,7 +610,8 @@ func (f *MetadataFetcher) fetchFDroidYAML(ctx context.Context, metadataURL strin
 		return nil, fmt.Errorf("metadata not found (status %d)", resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	// Security: Limit response size to prevent memory exhaustion
+	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxRemoteDownloadSize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read metadata: %w", err)
 	}

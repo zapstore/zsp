@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -22,7 +23,7 @@ type PlayStore struct {
 func NewPlayStore(packageID string) *PlayStore {
 	return &PlayStore{
 		packageID: packageID,
-		client:    &http.Client{Timeout: 30 * time.Second},
+		client:    newSecureHTTPClient(30 * time.Second),
 	}
 }
 
@@ -62,8 +63,8 @@ func (p *PlayStore) FetchMetadata(ctx context.Context) (*PlayStoreMetadata, erro
 		return nil, fmt.Errorf("Play Store returned status %d", resp.StatusCode)
 	}
 
-	// Parse the HTML
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	// Parse the HTML with size limit to prevent memory exhaustion
+	doc, err := goquery.NewDocumentFromReader(io.LimitReader(resp.Body, MaxRemoteDownloadSize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse HTML: %w", err)
 	}

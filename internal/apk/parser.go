@@ -184,6 +184,10 @@ func extractLabelWithReferences(path string) string {
 	// Read resources.arsc
 	var resData []byte
 	for _, f := range r.File {
+		// Security: Validate zip entry path to prevent zip slip attacks
+		if !isValidZipEntryPath(f.Name) {
+			continue
+		}
 		if f.Name == "resources.arsc" {
 			if f.UncompressedSize64 > maxZipFileSize {
 				return ""
@@ -207,6 +211,10 @@ func extractLabelWithReferences(path string) string {
 	// Read AndroidManifest.xml
 	var manifestData []byte
 	for _, f := range r.File {
+		// Security: Validate zip entry path to prevent zip slip attacks
+		if !isValidZipEntryPath(f.Name) {
+			continue
+		}
 		if f.Name == "AndroidManifest.xml" {
 			if f.UncompressedSize64 > maxZipFileSize {
 				return ""
@@ -408,6 +416,13 @@ func extractArchitectures(path string) []string {
 
 	archSet := make(map[string]struct{})
 	for _, f := range r.File {
+		// Security: Validate zip entry path to prevent zip slip attacks.
+		// Malicious APKs could contain paths like "../../../etc/passwd".
+		// We only read metadata here (not extracting files), but validate anyway
+		// to prevent any future misuse of this code pattern.
+		if !isValidZipEntryPath(f.Name) {
+			continue
+		}
 		if strings.HasPrefix(f.Name, "lib/") {
 			parts := strings.Split(f.Name, "/")
 			if len(parts) >= 2 && parts[1] != "" {
@@ -421,6 +436,28 @@ func extractArchitectures(path string) []string {
 		archs = append(archs, arch)
 	}
 	return archs
+}
+
+// isValidZipEntryPath validates a zip entry path to prevent zip slip attacks.
+// Returns false if the path contains directory traversal sequences or is absolute.
+func isValidZipEntryPath(path string) bool {
+	// Reject paths with directory traversal
+	if strings.Contains(path, "..") {
+		return false
+	}
+	// Reject absolute paths
+	if strings.HasPrefix(path, "/") {
+		return false
+	}
+	// Reject paths that clean to something different (indicates traversal)
+	cleaned := filepath.Clean(path)
+	if cleaned != path && cleaned+"/" != path {
+		// Allow trailing slash difference but nothing else
+		if !strings.HasSuffix(path, "/") || cleaned != strings.TrimSuffix(path, "/") {
+			return false
+		}
+	}
+	return true
 }
 
 // extractPermissions extracts Android permissions from the manifest.
@@ -526,8 +563,12 @@ func extractIconManually(path string) ([]byte, error) {
 	defer r.Close()
 
 	// Build a map of files for faster lookups
+	// Security: Validate zip entry paths to prevent zip slip attacks
 	files := make(map[string]*zip.File)
 	for _, f := range r.File {
+		if !isValidZipEntryPath(f.Name) {
+			continue
+		}
 		files[f.Name] = f
 	}
 
