@@ -140,11 +140,17 @@ func (g *GitLab) convertRelease(glRelease *gitlabRelease) *Release {
 			downloadURL = link.URL
 		}
 
-		// Extract the actual filename from the URL
+		// Extract the actual filename from the URL (strip query parameters)
 		assetName := link.Name
 		if downloadURL != "" {
-			if idx := strings.LastIndex(downloadURL, "/"); idx >= 0 {
-				filename := downloadURL[idx+1:]
+			// Parse the URL to properly extract the path without query params
+			urlPath := downloadURL
+			if parsedURL, err := url.Parse(downloadURL); err == nil {
+				urlPath = parsedURL.Path
+			}
+
+			if idx := strings.LastIndex(urlPath, "/"); idx >= 0 {
+				filename := urlPath[idx+1:]
 				if filename != "" && strings.HasSuffix(filename, ".apk") {
 					// Extract architecture from link.Name (e.g., "APK (arm64-v8a)")
 					// and append to filename if not already present
@@ -176,10 +182,7 @@ func (g *GitLab) convertRelease(glRelease *gitlabRelease) *Release {
 	assets = FilterUnsupportedArchitectures(assets)
 
 	// Extract version from tag name
-	version := glRelease.TagName
-	if strings.HasPrefix(version, "v") {
-		version = version[1:]
-	}
+	version := strings.TrimPrefix(glRelease.TagName, "v")
 
 	// Parse release date from released_at (RFC 3339 format)
 	var createdAt time.Time

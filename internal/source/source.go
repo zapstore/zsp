@@ -276,8 +276,15 @@ func HasUnsupportedArchitecture(filename string) bool {
 func hasValidAPKs(assets []*Asset) bool {
 	for _, asset := range assets {
 		name := strings.ToLower(asset.Name)
-		url := strings.ToLower(asset.URL)
-		if strings.HasSuffix(name, ".apk") || strings.HasSuffix(url, ".apk") {
+		if strings.HasSuffix(name, ".apk") {
+			return true
+		}
+		// Check URL path (strip query parameters)
+		assetURL := strings.ToLower(asset.URL)
+		if idx := strings.Index(assetURL, "?"); idx >= 0 {
+			assetURL = assetURL[:idx]
+		}
+		if strings.HasSuffix(assetURL, ".apk") {
 			return true
 		}
 	}
