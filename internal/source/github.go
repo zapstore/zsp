@@ -244,7 +244,7 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		}
 
 		release := g.convertRelease(ghRelease)
-		if hasValidAPKs(release.Assets) {
+		if HasValidAPKs(release.Assets) {
 			selectedRelease = ghRelease
 			break
 		}

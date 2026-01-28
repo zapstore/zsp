@@ -129,7 +129,7 @@ func (g *Gitea) fetchLatestFromList(ctx context.Context) (*Release, error) {
 			continue
 		}
 		release := g.convertRelease(&r)
-		if hasValidAPKs(release.Assets) {
+		if HasValidAPKs(release.Assets) {
 			return release, nil
 		}
 	}

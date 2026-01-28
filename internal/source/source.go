@@ -271,20 +271,30 @@ func HasUnsupportedArchitecture(filename string) bool {
 	return unsupportedArchRegex.MatchString(filename)
 }
 
-// hasValidAPKs returns true if the assets contain at least one APK file.
+// IsAPKURL checks if a URL points to an APK file.
+// Properly handles URLs with query parameters.
+func IsAPKURL(rawURL string) bool {
+	u := strings.ToLower(rawURL)
+	// Strip query parameters
+	if idx := strings.Index(u, "?"); idx >= 0 {
+		u = u[:idx]
+	}
+	return strings.HasSuffix(u, ".apk")
+}
+
+// IsAPKAsset checks if an asset (by name or URL) is an APK file.
+func IsAPKAsset(name, url string) bool {
+	if strings.HasSuffix(strings.ToLower(name), ".apk") {
+		return true
+	}
+	return IsAPKURL(url)
+}
+
+// HasValidAPKs returns true if the assets contain at least one APK file.
 // Used to determine if a release is a valid mobile release (vs desktop-only).
-func hasValidAPKs(assets []*Asset) bool {
+func HasValidAPKs(assets []*Asset) bool {
 	for _, asset := range assets {
-		name := strings.ToLower(asset.Name)
-		if strings.HasSuffix(name, ".apk") {
-			return true
-		}
-		// Check URL path (strip query parameters)
-		assetURL := strings.ToLower(asset.URL)
-		if idx := strings.Index(assetURL, "?"); idx >= 0 {
-			assetURL = assetURL[:idx]
-		}
-		if strings.HasSuffix(assetURL, ".apk") {
+		if IsAPKAsset(asset.Name, asset.URL) {
 			return true
 		}
 	}

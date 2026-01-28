@@ -1000,9 +1000,14 @@ func validateGitLabRepo(repoPath string) *releaseValidation {
 	if len(releases) > 0 {
 		for _, link := range releases[0].Assets.Links {
 			name := link.Name
-			if name == "" {
-				// Extract filename from URL
-				parts := strings.Split(link.URL, "/")
+			// Extract filename from URL if name is empty or doesn't look like a filename
+			if name == "" || !strings.Contains(name, ".") {
+				// Parse URL to get path without query parameters
+				assetURL := link.URL
+				if idx := strings.Index(assetURL, "?"); idx >= 0 {
+					assetURL = assetURL[:idx]
+				}
+				parts := strings.Split(assetURL, "/")
 				if len(parts) > 0 {
 					name = parts[len(parts)-1]
 				}

@@ -121,7 +121,7 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	// Find the first release with valid APKs
 	for _, glRelease := range releases {
 		release := g.convertRelease(&glRelease)
-		if hasValidAPKs(release.Assets) {
+		if HasValidAPKs(release.Assets) {
 			return release, nil
 		}
 	}
