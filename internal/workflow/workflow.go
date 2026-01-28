@@ -595,7 +595,7 @@ func (p *Publisher) isOffline() bool {
 	return p.opts.Publish.Offline
 }
 
-// buildEventsWithoutUpload builds events without uploading files (dry run / npub mode).
+// buildEventsWithoutUpload builds events without uploading files (offline / npub mode).
 func (p *Publisher) buildEventsWithoutUpload(ctx context.Context) error {
 	var err error
 	p.iconURL, p.imageURLs, err = ResolveURLsWithoutUpload(ctx, p.cfg, p.apkInfo, p.blossomURL, p.preDownloaded, p.opts)

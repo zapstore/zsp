@@ -16,11 +16,6 @@ import (
 	"github.com/nbd-wtf/go-nostr/nip46"
 )
 
-// TestNsec is a deterministic test key (private key = 1) for dry-run mode.
-// DO NOT use this for production signing.
-// Public key: 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
-const TestNsec = "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsmhltgl"
-
 // SignerType represents the type of signer.
 type SignerType int
 

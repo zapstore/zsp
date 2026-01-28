@@ -724,11 +724,11 @@ func selectBestAPKName(names []string) string {
 	return names[0]
 }
 
-// GetSignWith returns SIGN_WITH from environment or .env file.
-func GetSignWith() string {
+// GetEnv returns the value of an environment variable, checking both
+// the process environment and .env file (environment takes precedence).
+func GetEnv(name string) string {
 	// Check environment variable first
-	if value := os.Getenv("SIGN_WITH"); value != "" {
-		warnIfNsecInEnv(value, "environment variable")
+	if value := os.Getenv(name); value != "" {
 		return value
 	}
 
@@ -738,16 +738,34 @@ func GetSignWith() string {
 		return ""
 	}
 
+	prefix := name + "="
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "SIGN_WITH=") {
-			value := strings.TrimPrefix(line, "SIGN_WITH=")
-			warnIfNsecInEnv(value, ".env file")
-			return value
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimPrefix(line, prefix)
 		}
 	}
 
 	return ""
+}
+
+// GetSignWith returns SIGN_WITH from environment or .env file.
+func GetSignWith() string {
+	value := GetEnv("SIGN_WITH")
+	if value != "" {
+		// Check source for warning
+		if os.Getenv("SIGN_WITH") != "" {
+			warnIfNsecInEnv(value, "environment variable")
+		} else {
+			warnIfNsecInEnv(value, ".env file")
+		}
+	}
+	return value
+}
+
+// GetKeystorePassword returns KEYSTORE_PASSWORD from environment or .env file.
+func GetKeystorePassword() string {
+	return GetEnv("KEYSTORE_PASSWORD")
 }
 
 // warnIfNsecInEnv prints a security warning if an nsec is stored in an insecure location.
@@ -777,7 +795,6 @@ func PromptSignWith() (string, error) {
 		"Public key (npub) - outputs unsigned events",
 		"Bunker connection (bunker://)",
 		"Browser extension (NIP-07)",
-		"Dry run (NSEC=1)",
 	}
 
 	idx, err := ui.SelectOption("", options, -1)
@@ -827,9 +844,6 @@ func PromptSignWith() (string, error) {
 		if err := offerSaveToEnv(signWith); err != nil {
 			return "", err
 		}
-	case 4:
-		// Test nsec (private key = 1) for dry-run mode
-		signWith = "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsmhltgl"
 	}
 
 	return signWith, nil

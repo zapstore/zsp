@@ -253,7 +253,8 @@ func IdentityHelp() string {
 
 	// Other flags
 	b.WriteString(renderPurpleBold("OTHER FLAGS") + "\n")
-	writeFlag(&b, "-n, --dry-run", "Build event but don't publish")
+	writeFlag(&b, "--offline", "Output event JSON to stdout instead of publishing")
+	b.WriteString("                            " + renderGreyDark("Event is signed unless SIGN_WITH is npub (unsigned)") + "\n")
 	writeFlag(&b, "--verbose", "Debug output")
 	writeFlag(&b, "--no-color", "Disable colored output")
 	writeFlag(&b, "-h, --help", "Show this help")
@@ -268,8 +269,11 @@ func IdentityHelp() string {
 	b.WriteString(renderGreyDark("  # Link with 2-year expiry") + "\n")
 	b.WriteString("  " + renderGreen("zsp identity --link-key release-key.p12 --link-key-expiry 2y") + "\n\n")
 
-	b.WriteString(renderGreyDark("  # Preview the event without publishing (dry run)") + "\n")
-	b.WriteString("  " + renderGreen("zsp identity --link-key release-key.p12 --dry-run") + "\n\n")
+	b.WriteString(renderGreyDark("  # Output signed event for external publishing (e.g., with nak)") + "\n")
+	b.WriteString("  " + renderGreen("KEYSTORE_PASSWORD=... SIGN_WITH=nsec1... zsp identity --link-key key.p12 --offline | nak event") + "\n\n")
+
+	b.WriteString(renderGreyDark("  # Output unsigned event (when SIGN_WITH is npub)") + "\n")
+	b.WriteString("  " + renderGreen("KEYSTORE_PASSWORD=... SIGN_WITH=npub1... zsp identity --link-key key.p12 --offline") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Use custom relays") + "\n")
 	b.WriteString("  " + renderGreen("zsp identity --link-key key.p12 --relays wss://my-relay.com") + "\n\n")
@@ -284,6 +288,12 @@ func IdentityHelp() string {
 	b.WriteString(renderPurpleBold("CERTIFICATE FORMATS") + "\n")
 	b.WriteString("  " + renderGreen("PKCS12 (.p12, .pfx)") + "   " + renderWhite("Android keystore format (requires password)") + "\n")
 	b.WriteString("  " + renderGreen("PEM (.pem, .crt)") + "      " + renderWhite("Certificate + separate key file") + "\n\n")
+
+	// Environment variables
+	b.WriteString(renderPurpleBold("ENVIRONMENT") + "\n")
+	b.WriteString(renderGreyDark("  Variables can be set in environment or .env file") + "\n\n")
+	b.WriteString("  " + renderPurple("SIGN_WITH") + "           " + renderWhite("Signing method (nsec1..., npub1..., bunker://..., browser)") + "\n")
+	b.WriteString("  " + renderPurple("KEYSTORE_PASSWORD") + "   " + renderWhite("PKCS12 keystore password (avoids prompt, required for piping)") + "\n\n")
 
 	b.WriteString(renderGreyDark("  Note: JKS format is not directly supported. Convert with:") + "\n")
 	b.WriteString("  " + renderGreen("keytool -importkeystore -srckeystore key.jks -destkeystore key.p12 \\") + "\n")

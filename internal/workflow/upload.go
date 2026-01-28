@@ -154,7 +154,7 @@ func downloadImageWithSpinner(ctx context.Context, url, imageType string, opts *
 }
 
 // ResolveURLsWithoutUpload computes Blossom URLs by downloading/reading files and computing hashes,
-// but without actually uploading to Blossom. Used for dry-run and npub modes.
+// but without actually uploading to Blossom. Used for offline and npub modes.
 func ResolveURLsWithoutUpload(ctx context.Context, cfg *config.Config, apkInfo *apk.APKInfo, blossomURL string, preDownloaded *PreDownloadedImages, opts *cli.Options) (iconURL string, imageURLs []string, err error) {
 	// Process icon
 	iconURL, err = resolveIconURL(ctx, cfg, apkInfo, blossomURL, preDownloaded, opts)

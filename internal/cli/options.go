@@ -61,7 +61,7 @@ type IdentityOptions struct {
 	LinkKeyExpiry string   // Validity period for identity proof (e.g., "1y", "6mo", "30d")
 	Verify        string   // Verify identity proof (path to certificate or APK)
 	Relays        []string // Relays for identity proof operations
-	DryRun        bool     // Build event but don't publish
+	Offline       bool     // Output event JSON to stdout instead of publishing
 }
 
 // APKOptions holds flags specific to the apk subcommand.
@@ -232,8 +232,7 @@ func parseIdentityFlags(opts *Options, args []string) {
 	fs.StringVar(&opts.Identity.LinkKeyExpiry, "link-key-expiry", "1y", "Validity period for identity proof (e.g., 1y, 6mo, 30d)")
 	fs.StringVar(&opts.Identity.Verify, "verify", "", "Verify identity proof against certificate or APK")
 	fs.Var(&relaysFlag, "relays", "Relays for identity proofs (repeatable, overrides defaults)")
-	fs.BoolVar(&opts.Identity.DryRun, "dry-run", false, "Build event but don't publish")
-	fs.BoolVar(&opts.Identity.DryRun, "n", false, "Build event but don't publish (alias)")
+	fs.BoolVar(&opts.Identity.Offline, "offline", false, "Output event JSON to stdout instead of publishing")
 	fs.BoolVar(&opts.Global.Verbose, "verbose", false, "Debug output")
 	fs.BoolVar(&opts.Global.NoColor, "no-color", false, "Disable colored output")
 

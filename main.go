@@ -581,14 +581,19 @@ func runLinkKey(ctx context.Context, opts *cli.Options) error {
 		return fmt.Errorf("failed to compute SPKIFP: %w", err)
 	}
 
-	// Show certificate summary
-	ui.PrintSectionHeader("Certificate Summary")
-	ui.PrintKeyValue("SPKIFP", certSPKIFP)
-	ui.PrintKeyValue("Validity", fmt.Sprintf("%d year(s)", int(expiry.Hours()/24/365)))
+	// Show certificate summary (skip in offline mode for clean output)
+	if !opts.Identity.Offline {
+		ui.PrintSectionHeader("Certificate Summary")
+		ui.PrintKeyValue("SPKIFP", certSPKIFP)
+		ui.PrintKeyValue("Validity", fmt.Sprintf("%d year(s)", int(expiry.Hours()/24/365)))
+	}
 
 	// 2. Get signWith config
 	signWith := config.GetSignWith()
 	if signWith == "" {
+		if opts.Identity.Offline {
+			return fmt.Errorf("SIGN_WITH environment variable required in offline mode")
+		}
 		ui.PrintSectionHeader("Signing Setup")
 		signWith, err = config.PromptSignWith()
 		if err != nil {
@@ -596,15 +601,18 @@ func runLinkKey(ctx context.Context, opts *cli.Options) error {
 		}
 	}
 
-	// 3. Create publisher with identity-specific relays
-	publisher := nostrpkg.NewPublisher(opts.Identity.Relays)
+	// 3. Create publisher with identity-specific relays (only needed for online mode)
+	var publisher *nostrpkg.Publisher
+	if !opts.Identity.Offline {
+		publisher = nostrpkg.NewPublisher(opts.Identity.Relays)
+	}
 
 	// 4. Try to get pubkey without opening browser (for nsec/npub/hex)
 	// This allows checking existing proofs BEFORE browser opens
 	pubkeyHex, canCheckBeforeSigner := extractPubkeyFromSignWith(signWith)
 
-	if canCheckBeforeSigner {
-		// Check for existing identity proof with same SPKIFP (with spinner)
+	// Check for existing identity proofs (skip in offline mode)
+	if !opts.Identity.Offline && canCheckBeforeSigner {
 		checkSpinner := ui.NewSpinner("Checking existing identity proofs...")
 		checkSpinner.Start()
 		existingProof, err := publisher.FetchIdentityProof(ctx, pubkeyHex, certSPKIFP)
@@ -628,16 +636,18 @@ func runLinkKey(ctx context.Context, opts *cli.Options) error {
 	if !canCheckBeforeSigner {
 		pubkeyHex = signer.PublicKey()
 
-		// Now check for existing proofs
-		checkSpinner := ui.NewSpinner("Checking existing identity proofs...")
-		checkSpinner.Start()
-		existingProof, err := publisher.FetchIdentityProof(ctx, pubkeyHex, certSPKIFP)
-		if err != nil {
-			checkSpinner.StopWithWarning("Could not check existing proofs")
-		} else if existingProof != nil {
-			checkSpinner.StopWithSuccess("Found existing proof (will be replaced)")
-		} else {
-			checkSpinner.StopWithSuccess("No existing proof for this SPKIFP")
+		// Check for existing proofs (skip in offline mode)
+		if !opts.Identity.Offline {
+			checkSpinner := ui.NewSpinner("Checking existing identity proofs...")
+			checkSpinner.Start()
+			existingProof, err := publisher.FetchIdentityProof(ctx, pubkeyHex, certSPKIFP)
+			if err != nil {
+				checkSpinner.StopWithWarning("Could not check existing proofs")
+			} else if existingProof != nil {
+				checkSpinner.StopWithSuccess("Found existing proof (will be replaced)")
+			} else {
+				checkSpinner.StopWithSuccess("No existing proof for this SPKIFP")
+			}
 		}
 	}
 
@@ -654,23 +664,28 @@ func runLinkKey(ctx context.Context, opts *cli.Options) error {
 	identityEvent := nostrpkg.BuildIdentityProofEvent(identityTags, pubkeyHex, proof.CreatedAt)
 
 	// 8. Sign the identity event with Nostr key
-	signSpinner := ui.NewSpinner("Signing identity event...")
-	signSpinner.Start()
-	if err := signer.Sign(ctx, identityEvent); err != nil {
-		signSpinner.StopWithError("Failed to sign")
-		return fmt.Errorf("failed to sign identity event: %w", err)
+	if !opts.Identity.Offline {
+		signSpinner := ui.NewSpinner("Signing identity event...")
+		signSpinner.Start()
+		if err := signer.Sign(ctx, identityEvent); err != nil {
+			signSpinner.StopWithError("Failed to sign")
+			return fmt.Errorf("failed to sign identity event: %w", err)
+		}
+		signSpinner.StopWithSuccess("Signed identity event")
+	} else {
+		// Offline mode: sign without spinner for clean output
+		if err := signer.Sign(ctx, identityEvent); err != nil {
+			return fmt.Errorf("failed to sign identity event: %w", err)
+		}
 	}
-	signSpinner.StopWithSuccess("Signed identity event")
 
-	// 9. Dry run: show event and exit
-	if opts.Identity.DryRun {
-		fmt.Println()
-		fmt.Println(ui.Dim("─────────────────────────────────────────────────────────────────────"))
-		fmt.Println(ui.Warning("You are in dry run mode. Event was NOT published."))
-		fmt.Println(ui.Dim("─────────────────────────────────────────────────────────────────────"))
-		fmt.Println()
-		fmt.Printf("%s\n", ui.Bold("Kind 30509 (Cryptographic Identity Proof):"))
-		printIdentityEventJSON(identityEvent)
+	// 9. Offline mode: output event JSON to stdout and exit
+	if opts.Identity.Offline {
+		data, err := json.Marshal(identityEvent)
+		if err != nil {
+			return fmt.Errorf("failed to marshal event: %w", err)
+		}
+		fmt.Println(string(data))
 		return nil
 	}
 
@@ -1008,8 +1023,20 @@ func isHex(s string) bool {
 	return true
 }
 
+// getKeystorePassword returns the keystore password from KEYSTORE_PASSWORD env var/.env or prompts.
+func getKeystorePassword() (string, error) {
+	// Check environment variable and .env file first
+	if password := config.GetKeystorePassword(); password != "" {
+		return password, nil
+	}
+
+	// Prompt for password
+	return ui.PromptPassword("Keystore password")
+}
+
 // loadX509FromFile loads x509 private key and certificate from a file.
 // Detects file type by extension and prompts for additional info as needed.
+// For PKCS12 files, set KEYSTORE_PASSWORD env var to avoid interactive prompt.
 func loadX509FromFile(filePath string) (crypto.PrivateKey, *x509.Certificate, error) {
 	lower := strings.ToLower(filePath)
 
@@ -1020,7 +1047,7 @@ func loadX509FromFile(filePath string) (crypto.PrivateKey, *x509.Certificate, er
 
 	// PKCS12 keystore (.p12, .pfx)
 	if strings.HasSuffix(lower, ".p12") || strings.HasSuffix(lower, ".pfx") {
-		password, err := ui.PromptPassword("Keystore password")
+		password, err := getKeystorePassword()
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to read password: %w", err)
 		}
