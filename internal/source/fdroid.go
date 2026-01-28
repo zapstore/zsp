@@ -139,15 +139,45 @@ func (f *FDroid) fetchLatestVersion(ctx context.Context) (*fdroidPackageVersion,
 		return nil, fmt.Errorf("package %s not found in repository", f.repoInfo.PackageID)
 	}
 
-	// Find the latest version (highest versionCode)
+	// F-Droid publishes separate APKs for each architecture, each with a different
+	// versionCode (e.g., arm64-v8a=25060102, x86=25060103, x86_64=25060104).
+	// Filter to arm64-v8a first, then find the highest versionCode among those.
 	var latest *fdroidPackageVersion
 	for i := range versions {
-		if latest == nil || versions[i].VersionCode > latest.VersionCode {
-			latest = &versions[i]
+		if hasArm64(versions[i].NativeCodes) {
+			if latest == nil || versions[i].VersionCode > latest.VersionCode {
+				latest = &versions[i]
+			}
 		}
 	}
 
+	// Fallback: if no arm64-v8a builds, look for architecture-independent builds
+	// (pure Java/Kotlin apps with no native code)
+	if latest == nil {
+		for i := range versions {
+			if len(versions[i].NativeCodes) == 0 {
+				if latest == nil || versions[i].VersionCode > latest.VersionCode {
+					latest = &versions[i]
+				}
+			}
+		}
+	}
+
+	if latest == nil {
+		return nil, fmt.Errorf("package %s has no arm64-v8a build available", f.repoInfo.PackageID)
+	}
+
 	return latest, nil
+}
+
+// hasArm64 checks if the native codes include arm64-v8a.
+func hasArm64(nativeCodes []string) bool {
+	for _, code := range nativeCodes {
+		if code == "arm64-v8a" {
+			return true
+		}
+	}
+	return false
 }
 
 // Download downloads an APK from F-Droid.
