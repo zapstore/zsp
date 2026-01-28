@@ -3,6 +3,7 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/zapstore/zsp/internal/cli"
@@ -122,79 +123,25 @@ func confirmPublish(events *nostr.EventSet, relayURLs []string) (bool, error) {
 
 	for {
 		options := []string{
-			"Preview events (formatted)",
 			"Preview events (JSON)",
 			"Publish now",
 			"Exit without publishing",
 		}
 
-		idx, err := ui.SelectOption("Choose an option:", options, 2)
+		idx, err := ui.SelectOption("Choose an option:", options, 1)
 		if err != nil {
 			return false, err
 		}
 
 		switch idx {
 		case 0:
-			previewEvents(events)
-		case 1:
 			previewEventsJSON(events)
-		case 2:
+		case 1:
 			return true, nil
-		case 3:
+		case 2:
 			return false, nil
 		}
 	}
-}
-
-// previewEvents displays signed events in a human-readable format.
-func previewEvents(events *nostr.EventSet) {
-	ui.PrintSectionHeader("Signed Events Preview")
-
-	fmt.Println()
-	fmt.Printf("  %s\n", ui.Bold("Kind 32267 (Software Application)"))
-	fmt.Printf("    ID: %s\n", events.AppMetadata.ID)
-	fmt.Printf("    pubkey: %s...\n", events.AppMetadata.PubKey[:16])
-	fmt.Printf("    Created: %s\n", events.AppMetadata.CreatedAt.Time().Format("2006-01-02 15:04:05"))
-	fmt.Println("    Tags:")
-	for _, tag := range events.AppMetadata.Tags {
-		fmt.Printf("      %v\n", tag)
-	}
-	if events.AppMetadata.Content != "" {
-		fmt.Printf("    Content: %s\n", truncateString(events.AppMetadata.Content, 100))
-	}
-	fmt.Printf("    Sig: %s...\n", events.AppMetadata.Sig[:32])
-
-	fmt.Println()
-	fmt.Printf("  %s\n", ui.Bold("Kind 30063 (Software Release)"))
-	fmt.Printf("    ID: %s\n", events.Release.ID)
-	fmt.Printf("    pubkey: %s...\n", events.Release.PubKey[:16])
-	fmt.Printf("    Created: %s\n", events.Release.CreatedAt.Time().Format("2006-01-02 15:04:05"))
-	fmt.Println("    Tags:")
-	for _, tag := range events.Release.Tags {
-		fmt.Printf("      %v\n", tag)
-	}
-	if events.Release.Content != "" {
-		fmt.Printf("    Content: %s\n", truncateString(events.Release.Content, 100))
-	}
-	fmt.Printf("    Sig: %s...\n", events.Release.Sig[:32])
-
-	for i, asset := range events.SoftwareAssets {
-		fmt.Println()
-		assetLabel := "Kind 3063 (Software Asset)"
-		if len(events.SoftwareAssets) > 1 {
-			assetLabel = fmt.Sprintf("Kind 3063 (Software Asset %d)", i+1)
-		}
-		fmt.Printf("  %s\n", ui.Bold(assetLabel))
-		fmt.Printf("    ID: %s\n", asset.ID)
-		fmt.Printf("    pubkey: %s...\n", asset.PubKey[:16])
-		fmt.Printf("    Created: %s\n", asset.CreatedAt.Time().Format("2006-01-02 15:04:05"))
-		fmt.Println("    Tags:")
-		for _, tag := range asset.Tags {
-			fmt.Printf("      %v\n", tag)
-		}
-		fmt.Printf("    Sig: %s...\n", asset.Sig[:32])
-	}
-	fmt.Println()
 }
 
 // previewEventsJSON outputs events as formatted JSON with syntax highlighting.
@@ -243,6 +190,45 @@ func OutputEvents(events *nostr.EventSet) {
 	}
 }
 
+// OutputEventsToStdout outputs events as newline-delimited JSON to stdout.
+// This format is suitable for piping to tools like `nak event`.
+func OutputEventsToStdout(events *nostr.EventSet) {
+	// Output each event as a single line of JSON
+	outputEventLine(events.AppMetadata)
+	outputEventLine(events.Release)
+	for _, asset := range events.SoftwareAssets {
+		outputEventLine(asset)
+	}
+}
+
+// outputEventLine outputs a single event as JSON on one line to stdout.
+func outputEventLine(event any) {
+	data, err := json.Marshal(event)
+	if err != nil {
+		return
+	}
+	fmt.Println(string(data))
+}
+
+// OutputUploadManifest outputs the upload manifest to stderr.
+func OutputUploadManifest(entries []UploadManifestEntry, blossomServer string) {
+	if len(entries) == 0 {
+		return
+	}
+
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintf(os.Stderr, "Make sure to upload these files to %s before publishing events:\n", blossomServer)
+	fmt.Fprintln(os.Stderr)
+
+	for _, e := range entries {
+		fmt.Fprintf(os.Stderr, "%s:\n", e.Description)
+		fmt.Fprintf(os.Stderr, "  Path:   %s\n", e.FilePath)
+		fmt.Fprintf(os.Stderr, "  SHA256: %s\n", e.SHA256)
+		fmt.Fprintf(os.Stderr, "  URL:    %s\n", e.BlossomURL)
+		fmt.Fprintln(os.Stderr)
+	}
+}
+
 // printColorizedJSON prints a value as colorized JSON.
 func printColorizedJSON(v any) {
 	data, err := json.MarshalIndent(v, "", "  ")
@@ -253,10 +239,3 @@ func printColorizedJSON(v any) {
 	fmt.Println(ui.ColorizeJSON(string(data)))
 }
 
-// truncateString truncates a string to maxLen characters, adding "..." if truncated.
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}

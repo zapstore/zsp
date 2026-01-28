@@ -138,7 +138,8 @@ func PublishHelp() string {
 	// Behavior flags
 	b.WriteString(renderPurpleBold("BEHAVIOR FLAGS") + "\n")
 	writeFlag(&b, "-y", "Skip confirmations (auto-yes)")
-	writeFlag(&b, "-n, --dry-run", "Parse & build events, but don't upload/publish")
+	writeFlag(&b, "--offline", "Sign events without uploading/publishing (outputs JSON)")
+	b.WriteString("                            " + renderGreyDark("Events go to stdout, upload manifest to stderr") + "\n")
 	writeFlag(&b, "--quiet", "Minimal output, no prompts (implies -y)")
 	writeFlag(&b, "--wizard", "Run interactive wizard (uses existing config as defaults)")
 	writeFlag(&b, "--skip-preview", "Skip the browser preview prompt")
@@ -183,8 +184,11 @@ func PublishHelp() string {
 	b.WriteString(renderGreyDark("  # Open source: GitHub repo + F-Droid builds") + "\n")
 	b.WriteString("  " + renderGreen("zsp publish -r github.com/user/app -s f-droid.org/packages/com.example") + "\n\n")
 
-	b.WriteString(renderGreyDark("  # Dry run - preview events without publishing") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish zapstore.yaml --dry-run") + "\n\n")
+	b.WriteString(renderGreyDark("  # Offline mode - sign events, output to stdout, defer upload/publish") + "\n")
+	b.WriteString("  " + renderGreen("zsp publish zapstore.yaml --offline > events.json") + "\n\n")
+
+	b.WriteString(renderGreyDark("  # Pipe signed events directly to nak for publishing (use -q for clean output)") + "\n")
+	b.WriteString("  " + renderGreen("zsp publish -q zapstore.yaml --offline | nak event wss://relay.zapstore.dev") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # CI/CD mode - no prompts, auto-confirm") + "\n")
 	b.WriteString("  " + renderGreen("zsp publish -y zapstore.yaml") + "\n\n")

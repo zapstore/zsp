@@ -286,7 +286,7 @@ zsp identity --link-key <cert>      # Link signing key to Nostr identity
 | `-s <url>` | Release/download source URL (F-Droid, web page, etc). Use alone for closed-source apps. |
 | `-m <source>` | Fetch metadata from source (repeatable). Fetched automatically for new releases. |
 | `-y` | Auto-confirm all prompts |
-| `-n`, `--dry-run` | Parse & build events without publishing |
+| `--offline` | Sign events without uploading/publishing (outputs JSON to stdout) |
 | `-h`, `--help` | Show help |
 | `-v`, `--version` | Print version |
 
@@ -471,7 +471,7 @@ match: "^(?!.*debug).*\\.apk$"
 ```yaml
 - name: Publish to Zapstore
   env:
-    SIGN_WITH: ${{ secrets.NOSTR_NSEC }}
+    SIGN_WITH: ${{ secrets.BUNKER_URL_OR_NSEC }}
     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   run: |
     zsp publish -y zapstore.yaml
@@ -487,12 +487,49 @@ zsp publish --check zapstore.yaml
 # Exit 1 = failure
 ```
 
-### Dry Run
+### Offline Mode
 
-Build events without publishing:
+Sign events without uploading to Blossom or publishing to relays. Events are output to stdout (pipeable to `nak`), and an upload manifest is printed to stderr:
 
 ```bash
-zsp publish --dry-run zapstore.yaml
+# Save signed events for later
+zsp publish -q --offline zapstore.yaml > events.json
+
+# Pipe directly to nak for publishing (use -q for clean output)
+zsp publish -q --offline zapstore.yaml | nak event wss://relay.zapstore.dev
+
+# With npub (outputs unsigned events)
+SIGN_WITH=npub1... zsp publish -q --offline zapstore.yaml > unsigned-events.json
+```
+
+The manifest (on stderr) shows which files must be uploaded to Blossom before the events become valid:
+
+```
+Make sure to upload these files to https://cdn.zapstore.dev before publishing events:
+
+APK:
+  Path:   /path/to/app-release.apk
+  SHA256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+  URL:    https://cdn.zapstore.dev/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+
+Icon:
+  Path:   /tmp/zsp_icon_a1b2c3d4e5f67890
+  SHA256: a1b2c3d4e5f6789012345678901234567890123456789012345678901234abcd
+  URL:    https://cdn.zapstore.dev/a1b2c3d4e5f6789012345678901234567890123456789012345678901234abcd
+```
+
+For extra security, block all network access:
+
+```bash
+# Linux (built-in)
+unshare --net --map-root-user zsp publish app.apk --offline > events.json
+
+# Linux (firejail)
+firejail --net=none zsp publish app.apk --offline > events.json
+
+# macOS (sandbox-exec, or use LuLu/Little Snitch firewalls)
+echo '(version 1)(allow default)(deny network*)' > /tmp/no-net.sb
+sandbox-exec -f /tmp/no-net.sb zsp publish app.apk --offline > events.json
 ```
 
 ---

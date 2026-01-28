@@ -76,9 +76,12 @@ func NewSignerWithOptions(ctx context.Context, signWith string, opts SignerOptio
 		return NewNIP07Signer(ctx, opts.Port)
 	}
 
-	// Check if it's a hex private key (64 hex characters = 32 bytes)
-	if len(signWith) == 64 && isValidHex(signWith) {
-		nsec, err := nip19.EncodePrivateKey(signWith)
+	// Check if it's a hex private key (pad to 64 hex characters = 32 bytes if shorter)
+	if isValidHex(signWith) && len(signWith) <= 64 {
+		// Pad with leading zeros to 64 characters (32 bytes)
+		hexKey := fmt.Sprintf("%064s", signWith)
+		hexKey = strings.ReplaceAll(hexKey, " ", "0")
+		nsec, err := nip19.EncodePrivateKey(hexKey)
 		if err != nil {
 			return nil, fmt.Errorf("invalid hex private key: %w", err)
 		}
@@ -90,8 +93,15 @@ func NewSignerWithOptions(ctx context.Context, signWith string, opts SignerOptio
 
 // isValidHex checks if a string is valid hexadecimal.
 func isValidHex(s string) bool {
-	_, err := hex.DecodeString(s)
-	return err == nil
+	if len(s) == 0 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 // NsecSigner signs events with a private key.

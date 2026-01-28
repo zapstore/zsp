@@ -76,7 +76,7 @@ func NewPublisher(opts *cli.Options, cfg *config.Config) (*Publisher, error) {
 func (p *Publisher) Execute(ctx context.Context) error {
 	// Determine total steps based on mode
 	totalSteps := 4
-	if p.opts.Publish.DryRun {
+	if p.opts.Publish.Offline {
 		totalSteps = 2
 	}
 
@@ -106,17 +106,17 @@ func (p *Publisher) Execute(ctx context.Context) error {
 		return err
 	}
 
-	// Step 3: Sign & Upload (skip in dry run)
-	if steps != nil && !p.opts.Publish.DryRun {
+	// Step 3: Sign & Upload (skip in offline mode)
+	if steps != nil && !p.opts.Publish.Offline {
 		steps.StartStep("Sign & Upload")
 	}
 	if err := p.signAndUpload(ctx); err != nil {
 		return err
 	}
 
-	// Handle dry run output
-	if p.isDryRun() {
-		return p.outputDryRun()
+	// Handle offline mode output
+	if p.isOffline() {
+		return p.outputOffline()
 	}
 
 	// Handle npub signer
@@ -354,7 +354,7 @@ func (p *Publisher) getAPKPath(ctx context.Context) (string, error) {
 
 // checkExistingAsset checks if the release already exists on relays.
 func (p *Publisher) checkExistingAsset(ctx context.Context) error {
-	if p.opts.Publish.OverwriteRelease || p.opts.Publish.DryRun {
+	if p.opts.Publish.OverwriteRelease || p.opts.Publish.Offline {
 		return nil
 	}
 
@@ -543,7 +543,7 @@ func (p *Publisher) signAndUpload(ctx context.Context) error {
 	}
 
 	// Determine URLs and build events
-	if p.isDryRun() || p.signer.Type() == nostr.SignerNpub {
+	if p.isOffline() || p.signer.Type() == nostr.SignerNpub {
 		return p.buildEventsWithoutUpload(ctx)
 	}
 
@@ -552,22 +552,16 @@ func (p *Publisher) signAndUpload(ctx context.Context) error {
 
 // createSigner creates the appropriate signer based on configuration.
 func (p *Publisher) createSigner(ctx context.Context) error {
-	var signWith string
-
-	if p.opts.Publish.DryRun {
-		signWith = nostr.TestNsec
-	} else {
-		signWith = config.GetSignWith()
-		if signWith == "" {
-			if p.opts.Publish.Quiet {
-				return fmt.Errorf("SIGN_WITH environment variable is required")
-			}
-			ui.PrintSectionHeader("Signing Setup")
-			var err error
-			signWith, err = config.PromptSignWith()
-			if err != nil {
-				return fmt.Errorf("signing setup failed: %w", err)
-			}
+	signWith := config.GetSignWith()
+	if signWith == "" {
+		if p.opts.Publish.Quiet || p.opts.Publish.Offline {
+			return fmt.Errorf("SIGN_WITH environment variable is required")
+		}
+		ui.PrintSectionHeader("Signing Setup")
+		var err error
+		signWith, err = config.PromptSignWith()
+		if err != nil {
+			return fmt.Errorf("signing setup failed: %w", err)
 		}
 	}
 
@@ -596,15 +590,9 @@ func (p *Publisher) createSigner(ctx context.Context) error {
 	return nil
 }
 
-// isDryRun returns true if this is a dry run.
-func (p *Publisher) isDryRun() bool {
-	return p.opts.Publish.DryRun || (p.signer != nil && p.signWithTestKey())
-}
-
-// signWithTestKey returns true if using the test key.
-func (p *Publisher) signWithTestKey() bool {
-	signWith := config.GetSignWith()
-	return signWith == nostr.TestNsec
+// isOffline returns true if running in offline mode.
+func (p *Publisher) isOffline() bool {
+	return p.opts.Publish.Offline
 }
 
 // buildEventsWithoutUpload builds events without uploading files (dry run / npub mode).
@@ -763,28 +751,125 @@ func (p *Publisher) matchVariant() string {
 	return ""
 }
 
-// outputDryRun outputs events in dry run mode.
-func (p *Publisher) outputDryRun() error {
-	if p.opts.Publish.ShouldShowSpinners() {
-		fmt.Println()
-		fmt.Println(ui.Dim("─────────────────────────────────────────────────────────────────────"))
-		fmt.Println(ui.Warning("You are in dry run mode. These events are signed with a dummy key."))
-		fmt.Println(ui.Dim("Use SIGN_WITH to generate real events."))
-		fmt.Println(ui.Dim("─────────────────────────────────────────────────────────────────────"))
-	}
+// outputOffline outputs signed events to stdout and upload manifest to stderr.
+func (p *Publisher) outputOffline() error {
+	// Output events to stdout (JSON, one per line for piping to nak)
+	OutputEventsToStdout(p.events)
 
-	if p.opts.Publish.IsInteractive() {
-		confirmed, err := ui.Confirm("View events?", true)
-		if err != nil {
-			return fmt.Errorf("confirmation failed: %w", err)
-		}
-		if !confirmed {
-			return nil
-		}
-	}
+	// Output upload manifest to stderr
+	p.outputUploadManifest()
 
-	OutputEvents(p.events)
 	return nil
+}
+
+// UploadManifestEntry represents a file that must be uploaded to Blossom.
+type UploadManifestEntry struct {
+	Description string // Human-readable description (e.g., "APK", "Icon", "Screenshot 1")
+	FilePath    string // Local file path or "(from APK)" for extracted data
+	SHA256      string // SHA256 hash of the file
+	BlossomURL  string // Expected Blossom URL
+}
+
+// outputUploadManifest outputs the upload manifest to stderr.
+func (p *Publisher) outputUploadManifest() {
+	var entries []UploadManifestEntry
+
+	// APK entry
+	entries = append(entries, UploadManifestEntry{
+		Description: "APK",
+		FilePath:    p.apkPath,
+		SHA256:      p.apkInfo.SHA256,
+		BlossomURL:  fmt.Sprintf("%s/%s", p.blossomURL, p.apkInfo.SHA256),
+	})
+
+	// Icon entry
+	if p.iconURL != "" {
+		hash := extractHashFromBlossomURL(p.iconURL)
+		iconPath := p.resolveIconPath(hash)
+		entries = append(entries, UploadManifestEntry{
+			Description: "Icon",
+			FilePath:    iconPath,
+			SHA256:      hash,
+			BlossomURL:  p.iconURL,
+		})
+	}
+
+	// Image entries
+	for i, imgURL := range p.imageURLs {
+		hash := extractHashFromBlossomURL(imgURL)
+		imgPath := p.resolveImagePath(i, hash)
+		entries = append(entries, UploadManifestEntry{
+			Description: fmt.Sprintf("Screenshot %d", i+1),
+			FilePath:    imgPath,
+			SHA256:      hash,
+			BlossomURL:  imgURL,
+		})
+	}
+
+	// Output manifest to stderr
+	OutputUploadManifest(entries, p.blossomURL)
+}
+
+// resolveIconPath returns the path to the icon file, saving APK-extracted icons to temp.
+func (p *Publisher) resolveIconPath(hash string) string {
+	// Config icon takes precedence
+	if p.cfg.Icon != "" {
+		if isRemoteURL(p.cfg.Icon) {
+			// Pre-downloaded remote icon
+			if p.preDownloaded != nil && p.preDownloaded.Icon != nil {
+				return p.saveToTemp("icon", p.preDownloaded.Icon.Data, hash)
+			}
+			return p.cfg.Icon + " (download required)"
+		}
+		return resolvePath(p.cfg.Icon, p.cfg.BaseDir)
+	}
+
+	// APK-extracted icon
+	if p.apkInfo.Icon != nil {
+		return p.saveToTemp("icon", p.apkInfo.Icon, hash)
+	}
+
+	return "(none)"
+}
+
+// resolveImagePath returns the path to an image file, saving downloaded images to temp.
+func (p *Publisher) resolveImagePath(index int, hash string) string {
+	// Check pre-downloaded images first
+	if p.preDownloaded != nil && index < len(p.preDownloaded.Images) {
+		img := p.preDownloaded.Images[index]
+		return p.saveToTemp(fmt.Sprintf("screenshot_%d", index+1), img.Data, hash)
+	}
+
+	// Config images
+	if index < len(p.cfg.Images) {
+		img := p.cfg.Images[index]
+		if isRemoteURL(img) {
+			return img + " (download required)"
+		}
+		return resolvePath(img, p.cfg.BaseDir)
+	}
+
+	return "(none)"
+}
+
+// saveToTemp saves data to a temp file and returns the path.
+func (p *Publisher) saveToTemp(prefix string, data []byte, hash string) string {
+	// Use hash as filename for easy identification
+	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("zsp_%s_%s", prefix, hash[:16]))
+	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+		return fmt.Sprintf("(failed to save: %v)", err)
+	}
+	return tmpFile
+}
+
+// extractHashFromBlossomURL extracts the SHA256 hash from a Blossom URL.
+func extractHashFromBlossomURL(url string) string {
+	// URL format: https://cdn.zapstore.dev/{sha256}
+	parts := strings.Split(url, "/")
+	if len(parts) > 0 {
+		return parts[len(parts)-1]
+	}
+	return ""
 }
 
 // outputNpubEvents outputs unsigned events for npub signer.

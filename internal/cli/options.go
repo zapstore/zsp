@@ -42,7 +42,7 @@ type PublishOptions struct {
 
 	// Behavior flags
 	Yes              bool
-	DryRun           bool
+	Offline          bool // Sign events without uploading/publishing (outputs to stdout)
 	Quiet            bool
 	SkipPreview      bool
 	OverwriteRelease bool
@@ -179,8 +179,7 @@ func parsePublishFlags(opts *Options, args []string) {
 	fs.StringVar(&opts.Publish.Commit, "commit", "", "Git commit hash for reproducible builds")
 	fs.StringVar(&opts.Publish.Channel, "channel", "main", "Release channel: main, beta, nightly, dev")
 	fs.BoolVar(&opts.Publish.Yes, "y", false, "Skip confirmations (auto-yes)")
-	fs.BoolVar(&opts.Publish.DryRun, "dry-run", false, "Do everything except upload/publish")
-	fs.BoolVar(&opts.Publish.DryRun, "n", false, "Do everything except upload/publish (alias)")
+	fs.BoolVar(&opts.Publish.Offline, "offline", false, "Sign events without uploading/publishing (outputs JSON to stdout)")
 	fs.BoolVar(&opts.Publish.Quiet, "quiet", false, "Minimal output, no prompts (implies -y)")
 	fs.BoolVar(&opts.Publish.Quiet, "q", false, "Minimal output, no prompts (alias)")
 	fs.BoolVar(&opts.Global.Verbose, "verbose", false, "Debug output")
