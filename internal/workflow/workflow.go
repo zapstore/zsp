@@ -54,13 +54,13 @@ func NewPublisher(opts *cli.Options, cfg *config.Config) (*Publisher, error) {
 	}
 
 	// Get Blossom server URL
-	blossomURL := os.Getenv("BLOSSOM_URL")
+	blossomURL := config.GetEnv("BLOSSOM_URL")
 	if blossomURL == "" {
 		blossomURL = blossom.DefaultServer
 	}
 
 	// Create relay publisher
-	relaysEnv := os.Getenv("RELAY_URLS")
+	relaysEnv := config.GetEnv("RELAY_URLS")
 	publisher := nostr.NewPublisherFromEnv(relaysEnv)
 
 	return &Publisher{
@@ -693,7 +693,7 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 // getRelayHint returns the first relay URL for event references.
 func (p *Publisher) getRelayHint() string {
 	relayHint := nostr.DefaultRelay
-	if relaysEnv := os.Getenv("RELAY_URLS"); relaysEnv != "" {
+	if relaysEnv := config.GetEnv("RELAY_URLS"); relaysEnv != "" {
 		parts := strings.Split(relaysEnv, ",")
 		if len(parts) > 0 && strings.TrimSpace(parts[0]) != "" {
 			relayHint = strings.TrimSpace(parts[0])

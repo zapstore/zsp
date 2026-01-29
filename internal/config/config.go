@@ -763,6 +763,7 @@ func GetGitLabRepoWithBase(rawURL string) (baseURL, repoPath string) {
 }
 
 // GetRelayURLs returns the RELAY_URLS environment variable value.
+// Checks both process environment and .env file.
 func GetRelayURLs() string {
-	return os.Getenv("RELAY_URLS")
+	return GetEnv("RELAY_URLS")
 }
