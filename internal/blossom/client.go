@@ -212,8 +212,8 @@ func (c *Client) UploadWithAuth(ctx context.Context, filePath string, sha256 str
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("upload failed with status %d: %s", resp.StatusCode, string(body))
+		reason := resp.Header.Get("X-Reason")
+		return nil, fmt.Errorf("upload failed with status %d: %s", resp.StatusCode, reason)
 	}
 
 	// Parse response
@@ -307,8 +307,8 @@ func (c *Client) uploadBytesWithAuth(ctx context.Context, data []byte, sha256 st
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("upload failed with status %d: %s", resp.StatusCode, string(body))
+		reason := resp.Header.Get("X-Reason")
+		return nil, fmt.Errorf("upload failed with status %d: %s", resp.StatusCode, reason)
 	}
 
 	return &UploadResult{
@@ -340,7 +340,3 @@ func (pr *progressReader) Read(p []byte) (int, error) {
 	}
 	return n, err
 }
-
-// Ensure nostr.Event is used (for auth event)
-var _ = nostr.Event{}
-
