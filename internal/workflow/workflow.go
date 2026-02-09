@@ -127,7 +127,7 @@ func (p *Publisher) Execute(ctx context.Context) error {
 	// Hash confirmation
 	if !p.opts.Publish.Yes {
 		isClosedSource := p.cfg.Repository == ""
-		confirmed, err := confirmHash(p.apkInfo.SHA256, isClosedSource)
+		confirmed, err := confirmHash(p.apkInfo.SHA256, isClosedSource, p.opts.Publish.Legacy)
 		if err != nil {
 			return fmt.Errorf("hash confirmation failed: %w", err)
 		}

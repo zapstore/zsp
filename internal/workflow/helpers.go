@@ -79,9 +79,14 @@ func selectAPKInteractive(ranked []picker.ScoredAsset) (*source.Asset, error) {
 }
 
 // confirmHash asks the user to confirm the file hash they just signed.
-func confirmHash(sha256Hash string, isClosedSource bool) (bool, error) {
+func confirmHash(sha256Hash string, isClosedSource bool, isLegacy bool) (bool, error) {
+	kindStr := "3063"
+	if isLegacy {
+		kindStr = "1063"
+	}
+	
 	fmt.Println()
-	ui.PrintWarning("You just signed an event attesting to this file hash (kind 3063):")
+	ui.PrintWarning(fmt.Sprintf("You just signed an event attesting to this file hash (kind %s):", kindStr))
 	fmt.Println()
 	fmt.Printf("  %s\n", ui.Bold(sha256Hash))
 	fmt.Println()
@@ -104,6 +109,10 @@ func confirmHash(sha256Hash string, isClosedSource bool) (bool, error) {
 func confirmPublish(events *nostr.EventSet, relayURLs []string) (bool, error) {
 	packageID := ""
 	version := ""
+	
+	// Determine if using legacy format by checking asset kind
+	isLegacy := len(events.SoftwareAssets) > 0 && events.SoftwareAssets[0].Kind == 1063
+	
 	for _, tag := range events.Release.Tags {
 		if len(tag) >= 2 {
 			if tag[0] == "i" {
@@ -112,12 +121,25 @@ func confirmPublish(events *nostr.EventSet, relayURLs []string) (bool, error) {
 			if tag[0] == "version" {
 				version = tag[1]
 			}
+			// In legacy format, version is in the "d" tag as "packageID@version"
+			if isLegacy && tag[0] == "d" && strings.Contains(tag[1], "@") {
+				parts := strings.Split(tag[1], "@")
+				if len(parts) == 2 {
+					packageID = parts[0]
+					version = parts[1]
+				}
+			}
 		}
+	}
+
+	assetKind := "3063"
+	if isLegacy {
+		assetKind = "1063"
 	}
 
 	ui.PrintSectionHeader("Ready to Publish")
 	fmt.Printf("  App: %s v%s\n", packageID, version)
-	fmt.Printf("  Events: Kind 32267 (App) + Kind 30063 (Release) + Kind 3063 (Asset)\n")
+	fmt.Printf("  Events: Kind 32267 (App) + Kind 30063 (Release) + Kind %s (Asset)\n", assetKind)
 	fmt.Printf("  Target: %s\n", strings.Join(relayURLs, ", "))
 	fmt.Println()
 
@@ -157,10 +179,16 @@ func previewEventsJSON(events *nostr.EventSet) {
 	printColorizedJSON(events.Release)
 	fmt.Println()
 
+	// Determine asset kind based on actual event kind
+	assetKindStr := "3063"
+	if len(events.SoftwareAssets) > 0 && events.SoftwareAssets[0].Kind == 1063 {
+		assetKindStr = "1063"
+	}
+
 	for i, asset := range events.SoftwareAssets {
-		assetLabel := "Kind 3063 (Software Asset):"
+		assetLabel := fmt.Sprintf("Kind %s (Software Asset):", assetKindStr)
 		if len(events.SoftwareAssets) > 1 {
-			assetLabel = fmt.Sprintf("Kind 3063 (Software Asset %d):", i+1)
+			assetLabel = fmt.Sprintf("Kind %s (Software Asset %d):", assetKindStr, i+1)
 		}
 		fmt.Printf("  %s\n", ui.Bold(assetLabel))
 		printColorizedJSON(asset)
@@ -179,10 +207,16 @@ func OutputEvents(events *nostr.EventSet) {
 	printColorizedJSON(events.Release)
 	fmt.Println()
 
+	// Determine asset kind based on actual event kind
+	assetKindStr := "3063"
+	if len(events.SoftwareAssets) > 0 && events.SoftwareAssets[0].Kind == 1063 {
+		assetKindStr = "1063"
+	}
+
 	for i, asset := range events.SoftwareAssets {
-		assetLabel := "Kind 3063 (Software Asset):"
+		assetLabel := fmt.Sprintf("Kind %s (Software Asset):", assetKindStr)
 		if len(events.SoftwareAssets) > 1 {
-			assetLabel = fmt.Sprintf("Kind 3063 (Software Asset %d):", i+1)
+			assetLabel = fmt.Sprintf("Kind %s (Software Asset %d):", assetKindStr, i+1)
 		}
 		fmt.Printf("%s\n", ui.Bold(assetLabel))
 		printColorizedJSON(asset)
