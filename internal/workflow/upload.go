@@ -38,23 +38,24 @@ type PreDownloadedImages struct {
 
 // UploadParams contains parameters for upload functions.
 type UploadParams struct {
-	Cfg           *config.Config
-	APKInfo       *apk.APKInfo
-	APKPath       string
-	Release       *source.Release
-	Client        *blossom.Client
-	OriginalURL   string
-	BlossomServer string
-	BatchSigner   nostr.BatchSigner
-	Signer        nostr.Signer
-	Pubkey        string
-	RelayHint     string
-	PreDownloaded *PreDownloadedImages
-	Variant       string
-	Commit        string
-	Channel       string
-	Opts          *cli.Options
-	Legacy        bool
+	Cfg                 *config.Config
+	APKInfo             *apk.APKInfo
+	APKPath             string
+	Release             *source.Release
+	Client              *blossom.Client
+	OriginalURL         string
+	BlossomServer       string
+	BatchSigner         nostr.BatchSigner
+	Signer              nostr.Signer
+	Pubkey              string
+	RelayHint           string
+	PreDownloaded       *PreDownloadedImages
+	Variant             string
+	Commit              string
+	Channel             string
+	Opts                *cli.Options
+	Legacy              bool
+	AppCreatedAtRelease bool
 }
 
 // uploadItem represents a file to upload with its auth event.
@@ -295,20 +296,21 @@ func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.Ev
 	}
 
 	events := nostr.BuildEventSet(nostr.BuildEventSetParams{
-		APKInfo:          params.APKInfo,
-		Config:           params.Cfg,
-		Pubkey:           params.Pubkey,
-		OriginalURL:      params.OriginalURL,
-		BlossomServer:    params.BlossomServer,
-		IconURL:          iconURL,
-		ImageURLs:        imageURLs,
-		Changelog:        releaseNotes,
-		Variant:          params.Variant,
-		Commit:           params.Commit,
-		Channel:          params.Channel,
-		ReleaseURL:       releaseURL,
-		LegacyFormat:     params.Legacy,
-		ReleaseTimestamp: releaseTimestamp,
+		APKInfo:                   params.APKInfo,
+		Config:                    params.Cfg,
+		Pubkey:                    params.Pubkey,
+		OriginalURL:               params.OriginalURL,
+		BlossomServer:             params.BlossomServer,
+		IconURL:                   iconURL,
+		ImageURLs:                 imageURLs,
+		Changelog:                 releaseNotes,
+		Variant:                   params.Variant,
+		Commit:                    params.Commit,
+		Channel:                   params.Channel,
+		ReleaseURL:                releaseURL,
+		LegacyFormat:              params.Legacy,
+		ReleaseTimestamp:          releaseTimestamp,
+		UseReleaseTimestampForApp: params.AppCreatedAtRelease,
 	})
 
 	// Pre-compute asset event IDs

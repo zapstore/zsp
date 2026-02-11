@@ -75,7 +75,6 @@ type AssetMetadata struct {
 	Filename              string   // Original filename (for variant detection)
 	Variant               string   // Explicit variant name (e.g., "fdroid", "google")
 	Commit                string   // Git commit hash for reproducible builds
-	Permissions           []string // Android permissions
 	SupportedNIPs         []string // Supported Nostr NIPs
 	MinAllowedVersion     string   // Minimum allowed version string
 	MinAllowedVersionCode int64    // Minimum allowed version code
@@ -339,11 +338,6 @@ func BuildSoftwareAssetEvent(meta *AssetMetadata, pubkey string) *nostr.Event {
 			tags = append(tags, nostr.Tag{"commit", meta.Commit})
 		}
 
-		// Android permissions
-		for _, perm := range meta.Permissions {
-			tags = append(tags, nostr.Tag{"permission", perm})
-		}
-
 		// Supported NIPs
 		for _, nip := range meta.SupportedNIPs {
 			tags = append(tags, nostr.Tag{"supported_nip", nip})
@@ -413,8 +407,8 @@ type BuildEventSetParams struct {
 	APKInfo          *apk.APKInfo
 	Config           *config.Config
 	Pubkey           string
-	OriginalURL      string    // Original download URL (from release source)
-	BlossomServer    string    // Blossom server URL (fallback when OriginalURL is empty)
+	OriginalURL      string // Original download URL (from release source)
+	BlossomServer    string // Blossom server URL (fallback when OriginalURL is empty)
 	IconURL          string
 	ImageURLs        []string
 	Changelog        string    // Release notes (from remote source or local file)
@@ -424,6 +418,9 @@ type BuildEventSetParams struct {
 	ReleaseURL       string    // Release page URL (for legacy format url/r tags)
 	LegacyFormat     bool      // Use legacy event format (kind 1063, different tags)
 	ReleaseTimestamp time.Time // Release publish date (zero means use current time)
+	// UseReleaseTimestampForApp sets kind 32267 created_at to ReleaseTimestamp.
+	// When false, app metadata keeps current-time created_at.
+	UseReleaseTimestampForApp bool
 }
 
 // BuildEventSet creates all events for an APK release.
@@ -528,7 +525,6 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		Filename:              filepath.Base(apkInfo.FilePath),
 		Variant:               params.Variant,
 		Commit:                params.Commit, // In new format, commit is on asset
-		Permissions:           apkInfo.Permissions,
 		SupportedNIPs:         cfg.SupportedNIPs,
 		MinAllowedVersion:     cfg.MinAllowedVersion,
 		MinAllowedVersionCode: cfg.MinAllowedVersionCode,
@@ -542,12 +538,15 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 	}
 
 	// If a release timestamp is provided, use it for release and asset events
-	// (AppMetadata uses current time as it represents when the metadata was updated)
+	// by default. Optionally, app metadata can also use the release timestamp.
 	if !params.ReleaseTimestamp.IsZero() {
 		ts := nostr.Timestamp(params.ReleaseTimestamp.Unix())
 		eventSet.Release.CreatedAt = ts
 		for _, asset := range eventSet.SoftwareAssets {
 			asset.CreatedAt = ts
+		}
+		if params.UseReleaseTimestampForApp {
+			eventSet.AppMetadata.CreatedAt = ts
 		}
 	}
 

@@ -144,6 +144,7 @@ func PublishHelp() string {
 	writeFlag(&b, "--wizard", "Run interactive wizard (uses existing config as defaults)")
 	writeFlag(&b, "--skip-preview", "Skip the browser preview prompt")
 	writeFlag(&b, "--port <port>", "Custom port for browser preview/signing")
+	writeFlag(&b, "--app-created-at-release", "Use release date for kind 32267 created_at")
 	b.WriteString("\n")
 
 	// Cache flags

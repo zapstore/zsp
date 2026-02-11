@@ -29,17 +29,17 @@ type Publisher struct {
 	signer    nostr.Signer
 
 	// Computed during workflow
-	release           *source.Release
-	selectedAsset     *source.Asset
-	apkPath           string
-	apkInfo           *apk.APKInfo
-	iconURL           string
-	imageURLs         []string
-	releaseNotes      string
-	preDownloaded     *PreDownloadedImages
-	events      *nostr.EventSet
-	blossomURL  string
-	browserPort int
+	release       *source.Release
+	selectedAsset *source.Asset
+	apkPath       string
+	apkInfo       *apk.APKInfo
+	iconURL       string
+	imageURLs     []string
+	releaseNotes  string
+	preDownloaded *PreDownloadedImages
+	events        *nostr.EventSet
+	blossomURL    string
+	browserPort   int
 }
 
 // NewPublisher creates a new publish workflow.
@@ -604,20 +604,21 @@ func (p *Publisher) buildEventsWithoutUpload(ctx context.Context) error {
 	}
 
 	p.events = nostr.BuildEventSet(nostr.BuildEventSetParams{
-		APKInfo:          p.apkInfo,
-		Config:           p.cfg,
-		Pubkey:           p.signer.PublicKey(),
-		OriginalURL:      p.getOriginalURL(),
-		BlossomServer:    p.blossomURL,
-		IconURL:          p.iconURL,
-		ImageURLs:        p.imageURLs,
-		Changelog:        p.releaseNotes,
-		Variant:          p.matchVariant(),
-		Commit:           p.opts.Publish.Commit,
-		Channel:          p.opts.Publish.Channel,
-		ReleaseURL:       p.getReleaseURL(),
-		LegacyFormat:     p.opts.Publish.Legacy,
-		ReleaseTimestamp: p.getReleaseTimestamp(),
+		APKInfo:                   p.apkInfo,
+		Config:                    p.cfg,
+		Pubkey:                    p.signer.PublicKey(),
+		OriginalURL:               p.getOriginalURL(),
+		BlossomServer:             p.blossomURL,
+		IconURL:                   p.iconURL,
+		ImageURLs:                 p.imageURLs,
+		Changelog:                 p.releaseNotes,
+		Variant:                   p.matchVariant(),
+		Commit:                    p.opts.Publish.Commit,
+		Channel:                   p.opts.Publish.Channel,
+		ReleaseURL:                p.getReleaseURL(),
+		LegacyFormat:              p.opts.Publish.Legacy,
+		ReleaseTimestamp:          p.getReleaseTimestamp(),
+		UseReleaseTimestampForApp: p.opts.Publish.AppCreatedAtRelease,
 	})
 
 	relayHint := p.getRelayHint()
@@ -635,22 +636,23 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 	if isBatchSigner {
 		var err error
 		p.events, err = UploadAndSignWithBatch(ctx, UploadParams{
-			Cfg:           p.cfg,
-			APKInfo:       p.apkInfo,
-			APKPath:       p.apkPath,
-			Release:       p.release,
-			Client:        client,
-			OriginalURL:   p.getOriginalURL(),
-			BlossomServer: p.blossomURL,
-			BatchSigner:   batchSigner,
-			Pubkey:        p.signer.PublicKey(),
-			RelayHint:     relayHint,
-			PreDownloaded: p.preDownloaded,
-			Variant:       p.matchVariant(),
-			Commit:        p.opts.Publish.Commit,
-			Channel:       p.opts.Publish.Channel,
-			Opts:          p.opts,
-			Legacy:        p.opts.Publish.Legacy,
+			Cfg:                 p.cfg,
+			APKInfo:             p.apkInfo,
+			APKPath:             p.apkPath,
+			Release:             p.release,
+			Client:              client,
+			OriginalURL:         p.getOriginalURL(),
+			BlossomServer:       p.blossomURL,
+			BatchSigner:         batchSigner,
+			Pubkey:              p.signer.PublicKey(),
+			RelayHint:           relayHint,
+			PreDownloaded:       p.preDownloaded,
+			Variant:             p.matchVariant(),
+			Commit:              p.opts.Publish.Commit,
+			Channel:             p.opts.Publish.Channel,
+			Opts:                p.opts,
+			Legacy:              p.opts.Publish.Legacy,
+			AppCreatedAtRelease: p.opts.Publish.AppCreatedAtRelease,
 		})
 		return err
 	}
@@ -671,20 +673,21 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 	}
 
 	p.events = nostr.BuildEventSet(nostr.BuildEventSetParams{
-		APKInfo:          p.apkInfo,
-		Config:           p.cfg,
-		Pubkey:           p.signer.PublicKey(),
-		OriginalURL:      p.getOriginalURL(),
-		BlossomServer:    p.blossomURL,
-		IconURL:          p.iconURL,
-		ImageURLs:        p.imageURLs,
-		Changelog:        p.releaseNotes,
-		Variant:          p.matchVariant(),
-		Commit:           p.opts.Publish.Commit,
-		Channel:          p.opts.Publish.Channel,
-		ReleaseURL:       p.getReleaseURL(),
-		LegacyFormat:     p.opts.Publish.Legacy,
-		ReleaseTimestamp: p.getReleaseTimestamp(),
+		APKInfo:                   p.apkInfo,
+		Config:                    p.cfg,
+		Pubkey:                    p.signer.PublicKey(),
+		OriginalURL:               p.getOriginalURL(),
+		BlossomServer:             p.blossomURL,
+		IconURL:                   p.iconURL,
+		ImageURLs:                 p.imageURLs,
+		Changelog:                 p.releaseNotes,
+		Variant:                   p.matchVariant(),
+		Commit:                    p.opts.Publish.Commit,
+		Channel:                   p.opts.Publish.Channel,
+		ReleaseURL:                p.getReleaseURL(),
+		LegacyFormat:              p.opts.Publish.Legacy,
+		ReleaseTimestamp:          p.getReleaseTimestamp(),
+		UseReleaseTimestampForApp: p.opts.Publish.AppCreatedAtRelease,
 	})
 
 	return nostr.SignEventSet(ctx, p.signer, p.events, relayHint)

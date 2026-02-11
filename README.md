@@ -301,6 +301,7 @@ zsp identity --link-key <cert>      # Link signing key to Nostr identity
 | `--port <port>` | Custom port for browser preview/signing |
 | `--overwrite-release` | Bypass cache, re-publish unchanged release |
 | `--skip-metadata` | Skip fetching metadata from external sources (useful for frequent releases) |
+| `--app-created-at-release` | Set kind 32267 `created_at` to the release timestamp (indexer compatibility) |
 | `--quiet` | Minimal output, no prompts (implies -y) |
 | `--verbose` | Debug output |
 | `--no-color` | Disable colored output |

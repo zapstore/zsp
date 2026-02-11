@@ -2,6 +2,7 @@ package nostr
 
 import (
 	"testing"
+	"time"
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/zapstore/zsp/internal/apk"
@@ -566,10 +567,10 @@ func TestBuildEventSetMultipleArchitectures(t *testing.T) {
 
 	// Verify architecture names are properly prefixed with android-
 	expectedArches := map[string]bool{
-		"android-arm64-v8a":    true,
-		"android-armeabi-v7a":  true,
-		"android-x86":          true,
-		"android-x86_64":       true,
+		"android-arm64-v8a":   true,
+		"android-armeabi-v7a": true,
+		"android-x86":         true,
+		"android-x86_64":      true,
 	}
 
 	for _, tag := range fTags {
@@ -718,3 +719,75 @@ func TestBuildEventSetLegacyFormat(t *testing.T) {
 	}
 }
 
+func TestBuildEventSetReleaseTimestampDefaultsToReleaseAndAssetOnly(t *testing.T) {
+	apkInfo := &apk.APKInfo{
+		PackageID:   "com.example.app",
+		VersionName: "1.0.0",
+		VersionCode: 1,
+		Label:       "Test App",
+		SHA256:      "abc123",
+		FilePath:    "/path/to/app.apk",
+	}
+
+	cfg := &config.Config{}
+	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	releaseTS := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	expectedTS := nostr.Timestamp(releaseTS.Unix())
+
+	events := BuildEventSet(BuildEventSetParams{
+		APKInfo:          apkInfo,
+		Config:           cfg,
+		Pubkey:           pubkey,
+		ReleaseTimestamp: releaseTS,
+	})
+
+	if events.Release.CreatedAt != expectedTS {
+		t.Errorf("expected release created_at %d, got %d", expectedTS, events.Release.CreatedAt)
+	}
+	if len(events.SoftwareAssets) == 0 {
+		t.Fatal("expected at least one software asset")
+	}
+	if events.SoftwareAssets[0].CreatedAt != expectedTS {
+		t.Errorf("expected asset created_at %d, got %d", expectedTS, events.SoftwareAssets[0].CreatedAt)
+	}
+	if events.AppMetadata.CreatedAt == expectedTS {
+		t.Errorf("expected app metadata created_at to remain current time, got release timestamp %d", expectedTS)
+	}
+}
+
+func TestBuildEventSetReleaseTimestampCanAlsoApplyToAppMetadata(t *testing.T) {
+	apkInfo := &apk.APKInfo{
+		PackageID:   "com.example.app",
+		VersionName: "1.0.0",
+		VersionCode: 1,
+		Label:       "Test App",
+		SHA256:      "abc123",
+		FilePath:    "/path/to/app.apk",
+	}
+
+	cfg := &config.Config{}
+	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	releaseTS := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	expectedTS := nostr.Timestamp(releaseTS.Unix())
+
+	events := BuildEventSet(BuildEventSetParams{
+		APKInfo:                   apkInfo,
+		Config:                    cfg,
+		Pubkey:                    pubkey,
+		ReleaseTimestamp:          releaseTS,
+		UseReleaseTimestampForApp: true,
+	})
+
+	if events.Release.CreatedAt != expectedTS {
+		t.Errorf("expected release created_at %d, got %d", expectedTS, events.Release.CreatedAt)
+	}
+	if len(events.SoftwareAssets) == 0 {
+		t.Fatal("expected at least one software asset")
+	}
+	if events.SoftwareAssets[0].CreatedAt != expectedTS {
+		t.Errorf("expected asset created_at %d, got %d", expectedTS, events.SoftwareAssets[0].CreatedAt)
+	}
+	if events.AppMetadata.CreatedAt != expectedTS {
+		t.Errorf("expected app metadata created_at %d, got %d", expectedTS, events.AppMetadata.CreatedAt)
+	}
+}

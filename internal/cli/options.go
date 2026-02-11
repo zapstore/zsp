@@ -41,15 +41,16 @@ type PublishOptions struct {
 	Channel string // Release channel: main (default), beta, nightly, dev
 
 	// Behavior flags
-	Yes              bool
-	Offline          bool // Sign events without uploading/publishing (outputs to stdout)
-	Quiet            bool
-	SkipPreview      bool
-	OverwriteRelease bool
-	SkipMetadata     bool
-	Legacy           bool
-	Wizard           bool
-	Check            bool // Verify config fetches arm64-v8a APK (exit 0=success)
+	Yes                 bool
+	Offline             bool // Sign events without uploading/publishing (outputs to stdout)
+	Quiet               bool
+	SkipPreview         bool
+	OverwriteRelease    bool
+	SkipMetadata        bool
+	Legacy              bool
+	AppCreatedAtRelease bool // Use release timestamp for kind 32267 created_at
+	Wizard              bool
+	Check               bool // Verify config fetches arm64-v8a APK (exit 0=success)
 
 	// Server options
 	Port int
@@ -68,7 +69,6 @@ type IdentityOptions struct {
 type APKOptions struct {
 	Extract bool // Extract APK metadata as JSON
 }
-
 
 // Options holds all CLI configuration options.
 type Options struct {
@@ -190,6 +190,7 @@ func parsePublishFlags(opts *Options, args []string) {
 	fs.BoolVar(&opts.Publish.SkipMetadata, "skip-metadata", false, "Skip fetching metadata from external sources")
 	fs.BoolVar(&opts.Publish.Wizard, "wizard", false, "Run interactive wizard (uses existing config as defaults)")
 	fs.BoolVar(&opts.Publish.Legacy, "legacy", true, "Use legacy event format for relay.zapstore.dev compatibility")
+	fs.BoolVar(&opts.Publish.AppCreatedAtRelease, "app-created-at-release", false, "Use release date for kind 32267 created_at (indexer compatibility)")
 	fs.BoolVar(&opts.Publish.Check, "check", false, "Verify config fetches arm64-v8a APK (exit 0=success)")
 
 	// Help flag
