@@ -803,16 +803,19 @@ const previewHTML = `<!DOCTYPE html>
     }
     
     .screenshots {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      display: flex;
       gap: 16px;
       margin-top: 20px;
+      overflow-x: auto;
+      padding-bottom: 8px;
     }
     
     .screenshots img {
-      width: 100%%;
+      height: 400px;
+      width: auto;
       border-radius: 6px;
       box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+      flex-shrink: 0;
     }
     
     .version-badge {

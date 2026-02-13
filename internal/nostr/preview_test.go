@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -26,9 +27,8 @@ func TestPreviewServerServesLocalScreenshots(t *testing.T) {
 		},
 	}
 
-	server := NewPreviewServer(previewData, "", "", 0)
+	server := NewPreviewServer(previewData, "", "", 17018)
 
-	// Start the server (this also tries to open a browser, which is fine in test)
 	url, err := server.Start()
 	if err != nil {
 		t.Fatalf("failed to start preview server: %v", err)
@@ -69,7 +69,7 @@ func TestPreviewServerServesLocalScreenshots(t *testing.T) {
 	htmlBody, _ := io.ReadAll(htmlResp.Body)
 	html := string(htmlBody)
 
-	if !contains(html, `/images/0`) {
+	if !strings.Contains(html, `/images/0`) {
 		t.Error("expected HTML to contain /images/0 reference for local screenshot")
 	}
 
@@ -91,7 +91,7 @@ func TestPreviewServerNoScreenshots(t *testing.T) {
 		PackageID: "com.example.test",
 	}
 
-	server := NewPreviewServer(previewData, "", "", 0)
+	server := NewPreviewServer(previewData, "", "", 17019)
 	url, err := server.Start()
 	if err != nil {
 		t.Fatalf("failed to start preview server: %v", err)
@@ -108,17 +108,4 @@ func TestPreviewServerNoScreenshots(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected status 404, got %d", resp.StatusCode)
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
-}
-
-func searchString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
