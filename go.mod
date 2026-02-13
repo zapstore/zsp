@@ -13,6 +13,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/nbd-wtf/go-nostr v0.52.3
 	github.com/shogo82148/androidbinary v1.0.5
+	golang.org/x/image v0.28.0
 	golang.org/x/term v0.37.0
 	gopkg.in/yaml.v3 v3.0.1
 	software.sslmate.com/src/go-pkcs12 v0.7.0
