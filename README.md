@@ -1,5 +1,7 @@
 # zsp
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/zapstore/zsp)
+
 A fast CLI tool for publishing Android apps to Nostr relays. Used by [Zapstore](https://zapstore.dev).
 
 ## Features
