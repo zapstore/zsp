@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nbd-wtf/go-nostr/nip19"
 	"github.com/zapstore/zsp/internal/apk"
 	"github.com/zapstore/zsp/internal/blossom"
 	"github.com/zapstore/zsp/internal/cli"
@@ -503,12 +504,34 @@ func (p *Publisher) showPreview(ctx context.Context) error {
 		previewData.IconData = p.preDownloaded.Icon.Data
 	}
 
-	// Add pre-downloaded screenshots
-	if p.preDownloaded != nil && len(p.preDownloaded.Images) > 0 {
+	// Add screenshots for preview (pre-downloaded remote + local files)
+	preDownloadedByURL := make(map[string]*DownloadedImage)
+	if p.preDownloaded != nil {
 		for _, img := range p.preDownloaded.Images {
+			preDownloadedByURL[img.URL] = img
+		}
+	}
+
+	for _, img := range p.cfg.Images {
+		if pd, ok := preDownloadedByURL[img]; ok {
+			// Use pre-downloaded remote image
 			previewData.ImageData = append(previewData.ImageData, nostr.PreviewImageData{
-				Data:     img.Data,
-				MimeType: img.MimeType,
+				Data:     pd.Data,
+				MimeType: pd.MimeType,
+			})
+		} else if !isRemoteURL(img) {
+			// Read local file for preview
+			imgPath := resolvePath(img, p.cfg.BaseDir)
+			data, err := os.ReadFile(imgPath)
+			if err != nil {
+				if p.opts.Global.Verbose {
+					fmt.Printf("  Warning: failed to read local screenshot %s: %v\n", imgPath, err)
+				}
+				continue
+			}
+			previewData.ImageData = append(previewData.ImageData, nostr.PreviewImageData{
+				Data:     data,
+				MimeType: detectImageMimeType(imgPath),
 			})
 		}
 	}
@@ -975,7 +998,49 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 		}
 	}
 
+	// Show zapstore.dev URL if the app was successfully published to relay.zapstore.dev
+	if allSuccess {
+		p.showZapstoreURL(results)
+	}
+
 	return nil
+}
+
+// showZapstoreURL prints the zapstore.dev app URL if the app was published to relay.zapstore.dev.
+func (p *Publisher) showZapstoreURL(results map[string][]nostr.PublishResult) {
+	// Check if relay.zapstore.dev accepted the software_application event
+	const zapstoreRelayHost = "relay.zapstore.dev"
+	accepted := false
+	for _, r := range results["software_application"] {
+		if r.Success && strings.Contains(r.RelayURL, zapstoreRelayHost) {
+			accepted = true
+			break
+		}
+	}
+	if !accepted {
+		return
+	}
+
+	// Extract d tag (identifier) from the AppMetadata event
+	event := p.events.AppMetadata
+	identifier := ""
+	for _, tag := range event.Tags {
+		if len(tag) >= 2 && tag[0] == "d" {
+			identifier = tag[1]
+			break
+		}
+	}
+	if identifier == "" {
+		return
+	}
+
+	// Encode as naddr (kind 32267, pubkey, identifier, relay hint)
+	naddr, err := nip19.EncodeEntity(event.PubKey, event.Kind, identifier, []string{"wss://" + zapstoreRelayHost})
+	if err != nil {
+		return
+	}
+
+	fmt.Printf("  View your app: https://zapstore.dev/apps/%s\n\n", naddr)
 }
 
 // clearCache clears the source cache.

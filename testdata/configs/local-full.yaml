@@ -12,8 +12,9 @@ website: https://zapstore.dev
 # Custom icon (otherwise extracted from APK)
 icon: "../fixtures/icon.png"
 
-# Screenshots
+# Screenshots (local and remote)
 images:
+  - ../fixtures/screenshot.png
   - https://raw.githubusercontent.com/purplebase/purplestack/main/assets/images/purplestack.png
 
 # Source code repository (for display, not fetching)

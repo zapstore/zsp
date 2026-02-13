@@ -771,16 +771,15 @@ func FetchReleaseNotes(ctx context.Context, pathOrURL string, version string, ba
 		}
 		content = string(data)
 	} else {
-		// Read from local file
+		// Read from local file - resolve relative to config directory.
+		// No traversal check needed: this is a local CLI tool where the user
+		// authors their own config file. All other local paths (icon, images,
+		// release_source) use the same resolution without restriction.
 		path := pathOrURL
 		if baseDir != "" && !filepath.IsAbs(path) {
-			fullPath := filepath.Join(baseDir, path)
-			// Prevent path traversal
-			if !strings.HasPrefix(filepath.Clean(fullPath), filepath.Clean(baseDir)) {
-				return "", fmt.Errorf("invalid release notes path: traversal attempted")
-			}
-			path = fullPath
+			path = filepath.Join(baseDir, path)
 		}
+		path = filepath.Clean(path)
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return "", fmt.Errorf("failed to read release notes file: %w", err)
