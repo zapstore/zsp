@@ -19,6 +19,7 @@ import (
 	"github.com/avast/apkverifier"
 	"github.com/shogo82148/androidbinary"
 	"github.com/shogo82148/androidbinary/apk"
+	"golang.org/x/image/webp"
 )
 
 // maxZipFileSize is the maximum size for reading individual files from APK archives.
@@ -573,42 +574,43 @@ func extractIconManually(path string) ([]byte, error) {
 	}
 
 	// Priority order for icon paths (highest density first)
-	iconPaths := []string{
-		"res/mipmap-xxxhdpi-v4/ic_launcher.png",
-		"res/mipmap-xxhdpi-v4/ic_launcher.png",
-		"res/mipmap-xhdpi-v4/ic_launcher.png",
-		"res/mipmap-hdpi-v4/ic_launcher.png",
-		"res/mipmap-mdpi-v4/ic_launcher.png",
-		"res/drawable-xxxhdpi-v4/ic_launcher.png",
-		"res/drawable-xxhdpi-v4/ic_launcher.png",
-		"res/drawable-xhdpi-v4/ic_launcher.png",
-		"res/drawable-hdpi-v4/ic_launcher.png",
-		"res/drawable-mdpi-v4/ic_launcher.png",
+	var iconPaths []string
+	densities := []string{"xxxhdpi", "xxhdpi", "xhdpi", "hdpi", "mdpi"}
+	iconNames := []string{"ic_launcher", "ic_launcher_round"}
+	iconExts := []string{"png", "webp"}
+	for _, density := range densities {
+		for _, iconName := range iconNames {
+			for _, ext := range iconExts {
+				iconPaths = append(iconPaths,
+					fmt.Sprintf("res/mipmap-%s-v4/%s.%s", density, iconName, ext),
+					fmt.Sprintf("res/drawable-%s-v4/%s.%s", density, iconName, ext),
+				)
+			}
+		}
 	}
 
 	// Try exact paths first
 	for _, iconPath := range iconPaths {
 		if f, ok := files[iconPath]; ok {
-			return readZipFile(f)
+			return readZipIcon(f)
 		}
 	}
 
 	// Try to find the foreground of adaptive icons
 	// These are typically in ic_launcher_foreground.png
-	foregroundPaths := []string{
-		"res/mipmap-xxxhdpi-v4/ic_launcher_foreground.png",
-		"res/mipmap-xxhdpi-v4/ic_launcher_foreground.png",
-		"res/mipmap-xhdpi-v4/ic_launcher_foreground.png",
-		"res/mipmap-hdpi-v4/ic_launcher_foreground.png",
-		"res/drawable-xxxhdpi-v4/ic_launcher_foreground.png",
-		"res/drawable-xxhdpi-v4/ic_launcher_foreground.png",
-		"res/drawable-xhdpi-v4/ic_launcher_foreground.png",
-		"res/drawable-hdpi-v4/ic_launcher_foreground.png",
+	var foregroundPaths []string
+	for _, density := range densities {
+		for _, ext := range iconExts {
+			foregroundPaths = append(foregroundPaths,
+				fmt.Sprintf("res/mipmap-%s-v4/ic_launcher_foreground.%s", density, ext),
+				fmt.Sprintf("res/drawable-%s-v4/ic_launcher_foreground.%s", density, ext),
+			)
+		}
 	}
 
 	for _, iconPath := range foregroundPaths {
 		if f, ok := files[iconPath]; ok {
-			return readZipFile(f)
+			return readZipIcon(f)
 		}
 	}
 
@@ -622,7 +624,7 @@ func extractIconManually(path string) ([]byte, error) {
 		if strings.HasPrefix(f.Name, "res/") &&
 			(strings.Contains(name, "ic_launcher") || strings.Contains(name, "launcher") ||
 				(strings.Contains(name, "icon") && !strings.Contains(name, "notification"))) &&
-			strings.HasSuffix(name, ".png") &&
+			(strings.HasSuffix(name, ".png") || strings.HasSuffix(name, ".webp")) &&
 			!strings.HasSuffix(name, ".9.png") { // Skip 9-patch images
 			if f.UncompressedSize64 > bestSize {
 				bestIcon = f
@@ -632,14 +634,14 @@ func extractIconManually(path string) ([]byte, error) {
 	}
 
 	if bestIcon != nil {
-		return readZipFile(bestIcon)
+		return readZipIcon(bestIcon)
 	}
 
 	// Last resort: look for any reasonably sized PNG in res/ that might be an icon
 	// (larger than 1KB, suggesting it's not a tiny UI element)
 	for _, f := range r.File {
 		if strings.HasPrefix(f.Name, "res/") &&
-			strings.HasSuffix(f.Name, ".png") &&
+			(strings.HasSuffix(f.Name, ".png") || strings.HasSuffix(f.Name, ".webp")) &&
 			!strings.HasSuffix(f.Name, ".9.png") &&
 			f.UncompressedSize64 > 1024 &&
 			f.UncompressedSize64 > bestSize {
@@ -649,10 +651,28 @@ func extractIconManually(path string) ([]byte, error) {
 	}
 
 	if bestIcon != nil {
-		return readZipFile(bestIcon)
+		return readZipIcon(bestIcon)
 	}
 
 	return nil, fmt.Errorf("no icon found")
+}
+
+// readZipIcon reads a potential icon and converts WebP to PNG.
+func readZipIcon(f *zip.File) ([]byte, error) {
+	data, err := readZipFile(f)
+	if err != nil {
+		return nil, err
+	}
+
+	if strings.EqualFold(filepath.Ext(f.Name), ".webp") {
+		img, err := webp.Decode(bytes.NewReader(data))
+		if err != nil {
+			return nil, err
+		}
+		return encodePNG(img)
+	}
+
+	return data, nil
 }
 
 // readZipFile reads the contents of a file within a zip archive.
