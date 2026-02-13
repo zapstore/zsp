@@ -110,7 +110,15 @@ type ReleaseSource struct {
 	// Can contain {version} placeholder which is replaced with the extracted version.
 	// If no version extractor is set, this is the direct download URL and
 	// HTTP caching (ETag/Last-Modified) is used to detect changes.
+	// Mutually exclusive with Asset.
 	AssetURL string
+
+	// Asset extracts the download URL dynamically from a web page, JSON API, or HTTP header.
+	// Works like Version but extracts the download URL instead of the version string.
+	// If Version is also set, it's used for change detection caching.
+	// If Version is not set, version is extracted from the downloaded APK.
+	// Mutually exclusive with AssetURL.
+	Asset *VersionExtractor
 }
 
 // IsLocal returns true if this release source is a local file path.
@@ -148,11 +156,17 @@ type webReleaseSource struct {
 	Type     string            `yaml:"type,omitempty"`
 	AssetURL string            `yaml:"asset_url,omitempty"`
 	Version  *VersionExtractor `yaml:"version,omitempty"`
+	Asset    *VersionExtractor `yaml:"asset,omitempty"`
 }
 
 // HasVersionExtractor returns true if a version extractor is configured.
 func (r *ReleaseSource) HasVersionExtractor() bool {
 	return r.Version != nil
+}
+
+// HasAssetExtractor returns true if an asset URL extractor is configured.
+func (r *ReleaseSource) HasAssetExtractor() bool {
+	return r.Asset != nil
 }
 
 // HasVersionPlaceholder returns true if AssetURL contains {version} placeholder.
@@ -352,8 +366,8 @@ func (c *Config) parseReleaseSource() error {
 			return fmt.Errorf("failed to parse release_source config: %w", err)
 		}
 
-		// Web source mode if asset_url is set (with or without version extractor)
-		isWebSource := web.AssetURL != ""
+		// Web source mode if asset_url or asset extractor is set (with or without version extractor)
+		isWebSource := web.AssetURL != "" || web.Asset != nil
 
 		c.ReleaseSource = &ReleaseSource{
 			URL:         web.URL,
@@ -361,6 +375,7 @@ func (c *Config) parseReleaseSource() error {
 			IsWebSource: isWebSource,
 			AssetURL:    web.AssetURL,
 			Version:     web.Version,
+			Asset:       web.Asset,
 		}
 
 	default:
@@ -434,6 +449,16 @@ func (r *ReleaseSource) Validate() error {
 		return nil
 	}
 
+	// asset_url and asset are mutually exclusive
+	if r.AssetURL != "" && r.Asset != nil {
+		return fmt.Errorf("asset_url and asset are mutually exclusive: use asset_url for static/template URLs or asset for dynamic URL extraction")
+	}
+
+	// Must have either asset_url or asset
+	if r.AssetURL == "" && r.Asset == nil {
+		return fmt.Errorf("must specify either asset_url or asset")
+	}
+
 	// Check if asset_url has {version} placeholder but no version extractor
 	if r.HasVersionPlaceholder() && r.Version == nil {
 		return fmt.Errorf("asset_url contains {version} placeholder but no version extractor is configured")
@@ -452,6 +477,13 @@ func (r *ReleaseSource) Validate() error {
 	if r.Version != nil {
 		if err := r.Version.Validate(); err != nil {
 			return fmt.Errorf("version: %w", err)
+		}
+	}
+
+	// Validate asset extractor if present
+	if r.Asset != nil {
+		if err := r.Asset.Validate(); err != nil {
+			return fmt.Errorf("asset: %w", err)
 		}
 	}
 

@@ -205,13 +205,15 @@ func (f *FDroid) Download(ctx context.Context, asset *Asset, destDir string, pro
 	safeName := filepath.Base(asset.Name)
 	destPath := filepath.Join(destDir, safeName)
 
-	// Download the file
+	// Use download client (no total timeout — only stall detection)
+	dlClient := newDownloadHTTPClient()
+
 	req, err := http.NewRequestWithContext(ctx, "GET", asset.URL, nil)
 	if err != nil {
 		return "", err
 	}
 
-	resp, err := f.client.Do(req)
+	resp, err := dlClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("download failed: %w", err)
 	}
@@ -234,11 +236,16 @@ func (f *FDroid) Download(ctx context.Context, asset *Asset, destDir string, pro
 	}
 	defer file.Close()
 
-	// Wrap reader with progress tracking if callback provided
-	var reader io.Reader = resp.Body
+	// Wrap body with stall timeout — fails only if no data received for 30s
+	var reader io.Reader = &StallTimeoutReader{
+		Reader:  resp.Body,
+		Timeout: downloadStallTimeout,
+	}
+
+	// Wrap with progress tracking if callback provided
 	if progress != nil && total > 0 {
 		reader = &ProgressReader{
-			Reader:     resp.Body,
+			Reader:     reader,
 			Total:      total,
 			OnProgress: progress,
 		}

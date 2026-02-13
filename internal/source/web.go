@@ -112,10 +112,13 @@ func (w *Web) Type() config.SourceType {
 
 // cacheFilePath returns the file path for storing cached URL data.
 func (w *Web) cacheFilePath() string {
-	// Hash the source URL (or asset_url if no url) for a unique filename
+	// Hash the source URL (or asset_url/asset URL if no url) for a unique filename
 	cacheKey := w.cfg.ReleaseSource.URL
 	if cacheKey == "" {
 		cacheKey = w.cfg.ReleaseSource.AssetURL
+	}
+	if cacheKey == "" && w.cfg.ReleaseSource.Asset != nil {
+		cacheKey = w.cfg.ReleaseSource.Asset.URL
 	}
 	h := sha256.Sum256([]byte(cacheKey))
 	return filepath.Join(w.cacheDir, hex.EncodeToString(h[:8])+".json")
@@ -172,20 +175,25 @@ func (w *Web) CommitCache() error {
 
 // FetchLatestRelease fetches the latest release from a web source.
 //
-// The method supports three modes:
+// The method supports four modes:
 //
-// 1. Version extraction mode (version_html, version_json, or version_redirect):
+// 1. Version extraction mode (version + asset_url with {version} template):
 //   - Fetches the URL and extracts version using the configured extractor
 //   - Substitutes {version} in asset_url to get the download URL
 //   - Caches by version - skips if version hasn't changed
 //
-// 2. Direct URL mode (asset_url only, no version extractor):
+// 2. Asset extraction mode (version + asset extractor):
+//   - Extracts version from page for caching (skips if unchanged)
+//   - Extracts download URL dynamically from page using asset extractor
+//   - Used for sites with dynamic/expiring download URLs (e.g., CDN tokens)
+//
+// 3. Direct URL mode (asset_url only, no version extractor):
 //   - Uses asset_url directly as the download URL
 //   - Uses HTTP caching (ETag/Last-Modified) to detect changes
 //   - Version is extracted from the downloaded APK
 //
-// 3. Direct URL shorthand (release_source: "https://example.com/app.apk"):
-//   - Same as mode 2, but specified as a simple string
+// 4. Direct URL shorthand (release_source: "https://example.com/app.apk"):
+//   - Same as mode 3, but specified as a simple string
 func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	repo := w.cfg.ReleaseSource
 
@@ -193,7 +201,38 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	var assetURL string
 	var newCache *webCache
 
-	if repo.HasVersionExtractor() {
+	if repo.HasAssetExtractor() {
+		// Mode 2: Extract asset URL from page (version optionally extracted too)
+
+		// If version extractor is configured, use it for caching
+		if repo.HasVersionExtractor() {
+			var err error
+			version, err = w.extractVersion(ctx, repo)
+			if err != nil {
+				return nil, fmt.Errorf("failed to extract version: %w", err)
+			}
+
+			// Check cache - if version hasn't changed, skip
+			if !w.SkipCache {
+				cache := w.loadCache()
+				if cache != nil && cache.Version == version {
+					return nil, ErrNotModified
+				}
+			}
+		}
+
+		// Extract the download URL dynamically from the page
+		var err error
+		assetURL, err = w.extractAssetURL(ctx, repo)
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract asset URL: %w", err)
+		}
+
+		newCache = &webCache{
+			Version:  version, // may be "" if no version extractor
+			AssetURL: assetURL,
+		}
+	} else if repo.HasVersionExtractor() {
 		// Mode 1: Extract version from page, construct asset URL
 		var err error
 		version, err = w.extractVersion(ctx, repo)
@@ -266,10 +305,10 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	w.pendingCache = newCache
 
 	// Create asset
-	// If asset_url doesn't have {version} placeholder, exclude original URL from event
-	// (only Blossom URL from x tag should be used). This applies even if there's a
-	// version extractor - the URL is static so shouldn't be advertised.
-	hasVersionPlaceholder := repo.HasVersionPlaceholder()
+	// Exclude original URL from event when it shouldn't be advertised:
+	// - Asset extractor: URL is dynamic/expiring (CDN tokens, etc.)
+	// - No {version} placeholder in asset_url: URL is static, only Blossom URL should be used
+	excludeURL := repo.HasAssetExtractor() || !repo.HasVersionPlaceholder()
 
 	// Extract filename from URL path (without query parameters)
 	assetName := filepath.Base(assetURL)
@@ -280,7 +319,7 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	asset := &Asset{
 		Name:       assetName,
 		URL:        assetURL,
-		ExcludeURL: !hasVersionPlaceholder,
+		ExcludeURL: excludeURL,
 	}
 
 	return &Release{
@@ -295,7 +334,31 @@ func (w *Web) extractVersion(ctx context.Context, repo *config.ReleaseSource) (s
 		return "", fmt.Errorf("no version extractor configured")
 	}
 
-	v := repo.Version
+	return w.extractValue(ctx, repo.Version)
+}
+
+// extractAssetURL extracts the download URL using the configured asset extractor.
+func (w *Web) extractAssetURL(ctx context.Context, repo *config.ReleaseSource) (string, error) {
+	if repo.Asset == nil {
+		return "", fmt.Errorf("no asset extractor configured")
+	}
+
+	assetURL, err := w.extractValue(ctx, repo.Asset)
+	if err != nil {
+		return "", err
+	}
+
+	// Validate that the extracted value looks like a URL
+	if !strings.HasPrefix(assetURL, "http://") && !strings.HasPrefix(assetURL, "https://") {
+		return "", fmt.Errorf("extracted asset value %q is not a valid URL", assetURL)
+	}
+
+	return assetURL, nil
+}
+
+// extractValue extracts a string value using a VersionExtractor configuration.
+// Used by both version and asset extraction.
+func (w *Web) extractValue(ctx context.Context, v *config.VersionExtractor) (string, error) {
 	switch v.Mode() {
 	case "html":
 		return w.extractVersionHTML(ctx, v)
@@ -304,7 +367,7 @@ func (w *Web) extractVersion(ctx context.Context, repo *config.ReleaseSource) (s
 	case "header":
 		return w.extractVersionHeader(ctx, v)
 	default:
-		return "", fmt.Errorf("invalid version extractor mode")
+		return "", fmt.Errorf("invalid extractor mode")
 	}
 }
 
@@ -565,13 +628,15 @@ func (w *Web) Download(ctx context.Context, asset *Asset, destDir string, progre
 		return "", fmt.Errorf("invalid destination path: path traversal detected")
 	}
 
-	// Download the file
+	// Use download client (no total timeout — only stall detection)
+	dlClient := newDownloadHTTPClient()
+
 	req, err := http.NewRequestWithContext(ctx, "GET", asset.URL, nil)
 	if err != nil {
 		return "", err
 	}
 
-	resp, err := w.client.Do(req)
+	resp, err := dlClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("download failed: %w", err)
 	}
@@ -594,11 +659,16 @@ func (w *Web) Download(ctx context.Context, asset *Asset, destDir string, progre
 	}
 	defer file.Close()
 
-	// Wrap reader with progress tracking if callback provided
-	var reader io.Reader = resp.Body
+	// Wrap body with stall timeout — fails only if no data received for 30s
+	var reader io.Reader = &StallTimeoutReader{
+		Reader:  resp.Body,
+		Timeout: downloadStallTimeout,
+	}
+
+	// Wrap with progress tracking if callback provided
 	if progress != nil && total > 0 {
 		reader = &ProgressReader{
-			Reader:     resp.Body,
+			Reader:     reader,
 			Total:      total,
 			OnProgress: progress,
 		}

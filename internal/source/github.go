@@ -341,8 +341,9 @@ func (g *GitHub) Download(ctx context.Context, asset *Asset, destDir string, pro
 		return "", fmt.Errorf("invalid destination path: path traversal detected")
 	}
 
-	// Download the file with progress tracking
-	// Note: GitHub requires auth header, so we can't use the shared helper directly
+	// Use download client (no total timeout — only stall detection)
+	dlClient := newDownloadHTTPClient()
+
 	req, err := http.NewRequestWithContext(ctx, "GET", asset.URL, nil)
 	if err != nil {
 		return "", err
@@ -352,7 +353,7 @@ func (g *GitHub) Download(ctx context.Context, asset *Asset, destDir string, pro
 		req.Header.Set("Authorization", "Bearer "+g.token)
 	}
 
-	resp, err := g.client.Do(req)
+	resp, err := dlClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("download failed: %w", err)
 	}
@@ -375,11 +376,16 @@ func (g *GitHub) Download(ctx context.Context, asset *Asset, destDir string, pro
 	}
 	defer f.Close()
 
-	// Wrap reader with progress tracking if callback provided
-	var reader io.Reader = resp.Body
+	// Wrap body with stall timeout — fails only if no data received for 30s
+	var reader io.Reader = &StallTimeoutReader{
+		Reader:  resp.Body,
+		Timeout: downloadStallTimeout,
+	}
+
+	// Wrap with progress tracking if callback provided
 	if progress != nil && total > 0 {
 		reader = &ProgressReader{
-			Reader:     resp.Body,
+			Reader:     reader,
 			Total:      total,
 			OnProgress: progress,
 		}

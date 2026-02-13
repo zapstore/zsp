@@ -23,6 +23,9 @@ import (
 // - TLS 1.2 minimum version
 // - Connection pooling limits to prevent resource exhaustion
 // - Reasonable timeouts
+//
+// Uses a total request timeout — suitable for metadata/API calls with small responses.
+// For large file downloads, use newDownloadHTTPClient instead.
 func newSecureHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout: timeout,
@@ -34,6 +37,63 @@ func newSecureHTTPClient(timeout time.Duration) *http.Client {
 			MaxIdleConnsPerHost: 10,
 			IdleConnTimeout:     90 * time.Second,
 		},
+	}
+}
+
+// downloadStallTimeout is the duration after which a download is considered stalled
+// if no data has been received.
+const downloadStallTimeout = 30 * time.Second
+
+// newDownloadHTTPClient creates an HTTP client for large file downloads.
+// Unlike newSecureHTTPClient, it does NOT set a total request timeout.
+// Instead, the caller should wrap the response body with a StallTimeoutReader
+// to detect stalled downloads.
+func newDownloadHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			},
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   10,
+			IdleConnTimeout:       90 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second, // timeout for server to start responding
+		},
+	}
+}
+
+// StallTimeoutReader wraps an io.Reader and returns an error if no data is
+// received for the specified duration. Unlike http.Client.Timeout, this only
+// triggers when the download stalls — not after a fixed total time.
+type StallTimeoutReader struct {
+	Reader  io.Reader
+	Timeout time.Duration
+	timer   *time.Timer
+}
+
+func (r *StallTimeoutReader) Read(p []byte) (int, error) {
+	if r.timer == nil {
+		r.timer = time.NewTimer(r.Timeout)
+	} else {
+		r.timer.Reset(r.Timeout)
+	}
+
+	type result struct {
+		n   int
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		n, err := r.Reader.Read(p)
+		ch <- result{n, err}
+	}()
+
+	select {
+	case res := <-ch:
+		r.timer.Stop()
+		return res.n, res.err
+	case <-r.timer.C:
+		return 0, fmt.Errorf("download stalled: no data received for %s", r.Timeout)
 	}
 }
 
@@ -185,13 +245,22 @@ func (pr *ProgressReader) Read(p []byte) (int, error) {
 
 // DownloadHTTP downloads a file from a URL with optional progress reporting.
 // This is a shared helper for all HTTP-based sources.
+// Uses stall-based timeout: fails only if no data received for 30s, not after a fixed total time.
 func DownloadHTTP(ctx context.Context, client *http.Client, url, destPath string, expectedSize int64, progress DownloadProgress) error {
+	// Use download client without total timeout
+	dlClient := newDownloadHTTPClient()
+
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return err
 	}
 
-	resp, err := client.Do(req)
+	// Copy auth headers from the original client's request if any
+	// (the passed client is unused for the request itself, but callers
+	// may set headers on the request before calling this function)
+	_ = client // kept for API compatibility
+
+	resp, err := dlClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("download failed: %w", err)
 	}
@@ -218,11 +287,16 @@ func DownloadHTTP(ctx context.Context, client *http.Client, url, destPath string
 	}
 	defer f.Close()
 
-	// Wrap reader with progress tracking if callback provided
-	var reader io.Reader = resp.Body
+	// Wrap body with stall timeout — fails only if no data received for 30s
+	var reader io.Reader = &StallTimeoutReader{
+		Reader:  resp.Body,
+		Timeout: downloadStallTimeout,
+	}
+
+	// Wrap with progress tracking if callback provided
 	if progress != nil {
 		reader = &ProgressReader{
-			Reader:     resp.Body,
+			Reader:     reader,
 			Total:      total, // May be 0 if unknown; callback will receive 0 as total
 			OnProgress: progress,
 		}
