@@ -1,32 +1,237 @@
-filename,label
-app-arm64-v8a-fdroid.apk,1
-app-arm64-v8a-release.apk,1
-app-arm64-v8a.apk,1
-app-release-arm64-v8a.apk,1
-app-fdroid-arm64-v8a.apk,1
-app-foss-arm64-v8a.apk,1
-app-libre-arm64-v8a.apk,1
-app-oss-arm64-v8a.apk,1
-myapp-v1.0.0-arm64-v8a.apk,1
-myapp-arm64-v8a-v1.0.0.apk,1
-release-arm64-v8a.apk,1
-app-universal.apk,0
-app-release.apk,0
-app.apk,0
-myapp-v1.0.0.apk,0
-release.apk,0
-app-google.apk,-1
-app-playstore.apk,-1
-app-gms.apk,-1
-app-universal-google.apk,-1
-app-x86.apk,-1
-app-x86_64.apk,-1
-app-armeabi.apk,-1
-app-armeabi-v7a.apk,-1
-app-debug.apk,-1
-app-beta.apk,-1
-app-alpha.apk,-1
-app-rc.apk,-1
-app-debug-arm64-v8a.apk,-1
-app-x86-release.apk,-1
+filename,platform,label
+# ===================================================================
+# Android APK training data
+# Platform: android-arm64-v8a (zapstore default target)
+# ===================================================================
 
+# Positive: arm64 + FOSS/F-Droid builds
+app-arm64-v8a-fdroid.apk,android-arm64-v8a,1
+app-arm64-v8a-release.apk,android-arm64-v8a,1
+app-arm64-v8a.apk,android-arm64-v8a,1
+app-release-arm64-v8a.apk,android-arm64-v8a,1
+app-fdroid-arm64-v8a.apk,android-arm64-v8a,1
+app-foss-arm64-v8a.apk,android-arm64-v8a,1
+app-libre-arm64-v8a.apk,android-arm64-v8a,1
+app-oss-arm64-v8a.apk,android-arm64-v8a,1
+myapp-v1.0.0-arm64-v8a.apk,android-arm64-v8a,1
+myapp-arm64-v8a-v1.0.0.apk,android-arm64-v8a,1
+release-arm64-v8a.apk,android-arm64-v8a,1
+
+# Neutral: generic/universal APKs
+app-universal.apk,android-arm64-v8a,0
+app-release.apk,android-arm64-v8a,0
+app.apk,android-arm64-v8a,0
+myapp-v1.0.0.apk,android-arm64-v8a,0
+release.apk,android-arm64-v8a,0
+
+# Negative: Google/Play Store/GMS, wrong arch, debug/pre-release
+app-google.apk,android-arm64-v8a,-1
+app-playstore.apk,android-arm64-v8a,-1
+app-gms.apk,android-arm64-v8a,-1
+app-universal-google.apk,android-arm64-v8a,-1
+app-x86.apk,android-arm64-v8a,-1
+app-x86_64.apk,android-arm64-v8a,-1
+app-armeabi.apk,android-arm64-v8a,-1
+app-armeabi-v7a.apk,android-arm64-v8a,-1
+app-debug.apk,android-arm64-v8a,-1
+app-beta.apk,android-arm64-v8a,-1
+app-alpha.apk,android-arm64-v8a,-1
+app-rc.apk,android-arm64-v8a,-1
+app-debug-arm64-v8a.apk,android-arm64-v8a,-1
+app-x86-release.apk,android-arm64-v8a,-1
+
+# ===================================================================
+# Linux x86_64 native executables
+# Platform: linux-x86_64
+# ===================================================================
+
+# Positive: bare executables for linux x86_64
+ripgrep-14.0.0-x86_64-unknown-linux-musl,linux-x86_64,1
+fd-v9.0.0-x86_64-unknown-linux-musl,linux-x86_64,1
+bat-v0.24.0-x86_64-unknown-linux-musl,linux-x86_64,1
+gh_2.40.0_linux_amd64,linux-x86_64,1
+lazygit_0.40.0_Linux_x86_64,linux-x86_64,1
+fzf-0.45.0-linux_amd64,linux-x86_64,1
+jq-linux-amd64,linux-x86_64,1
+yq_linux_amd64,linux-x86_64,1
+delta-0.16.5-x86_64-unknown-linux-musl,linux-x86_64,1
+eza-v0.18.0-x86_64-unknown-linux-musl,linux-x86_64,1
+zoxide-0.9.4-x86_64-unknown-linux-musl,linux-x86_64,1
+starship-x86_64-unknown-linux-musl,linux-x86_64,1
+atuin-x86_64-unknown-linux-musl,linux-x86_64,1
+hugo_0.121.0_linux-amd64,linux-x86_64,1
+caddy_2.7.0_linux_amd64,linux-x86_64,1
+k9s_Linux_amd64,linux-x86_64,1
+btop-x86_64-linux-musl,linux-x86_64,1
+nak-v0.7.0-linux-amd64,linux-x86_64,1
+tool-linux-x86_64,linux-x86_64,1
+tool_linux_amd64,linux-x86_64,1
+tool-v1.0.0-linux-amd64,linux-x86_64,1
+myapp-linux-x86_64-static,linux-x86_64,1
+
+# Neutral: linux x86_64 but gnu (less portable)
+ripgrep-14.0.0-x86_64-unknown-linux-gnu,linux-x86_64,0
+fd-v9.0.0-x86_64-unknown-linux-gnu,linux-x86_64,0
+tool-linux-x86_64-gnu,linux-x86_64,0
+
+# Negative on linux-x86_64: wrong OS
+ripgrep-14.0.0-aarch64-apple-darwin,linux-x86_64,-1
+ripgrep-14.0.0-x86_64-apple-darwin,linux-x86_64,-1
+fd-v9.0.0-x86_64-apple-darwin,linux-x86_64,-1
+gh_2.40.0_macOS_arm64,linux-x86_64,-1
+gh_2.40.0_macOS_amd64,linux-x86_64,-1
+gh_2.40.0_windows_amd64.exe,linux-x86_64,-1
+lazygit_0.40.0_Darwin_arm64,linux-x86_64,-1
+lazygit_0.40.0_Windows_x86_64.exe,linux-x86_64,-1
+tool-darwin-arm64,linux-x86_64,-1
+tool-darwin-x86_64,linux-x86_64,-1
+tool-windows-amd64.exe,linux-x86_64,-1
+jq-macos-arm64,linux-x86_64,-1
+
+# Negative on linux-x86_64: wrong arch
+ripgrep-14.0.0-aarch64-unknown-linux-musl,linux-x86_64,-1
+fd-v9.0.0-aarch64-unknown-linux-musl,linux-x86_64,-1
+gh_2.40.0_linux_arm64,linux-x86_64,-1
+lazygit_0.40.0_Linux_arm64,linux-x86_64,-1
+tool-linux-aarch64,linux-x86_64,-1
+tool-linux-arm64,linux-x86_64,-1
+jq-linux-arm64,linux-x86_64,-1
+
+# Negative on linux-x86_64: archives (not supported per NIP-82)
+ripgrep-14.0.0-x86_64-unknown-linux-musl.tar.gz,linux-x86_64,-1
+fd-v9.0.0-x86_64-unknown-linux-musl.tar.gz,linux-x86_64,-1
+bat-v0.24.0-x86_64-unknown-linux-musl.tar.gz,linux-x86_64,-1
+gh_2.40.0_linux_amd64.tar.gz,linux-x86_64,-1
+lazygit_0.40.0_Linux_x86_64.tar.gz,linux-x86_64,-1
+fzf-0.45.0-linux_amd64.tar.gz,linux-x86_64,-1
+tool-linux-amd64.zip,linux-x86_64,-1
+tool-linux-x86_64.tar.xz,linux-x86_64,-1
+
+# Negative on linux-x86_64: checksums and signatures
+SHA256SUMS,linux-x86_64,-1
+checksums.txt,linux-x86_64,-1
+ripgrep-14.0.0-x86_64-unknown-linux-musl.sha256,linux-x86_64,-1
+tool-linux-amd64.sig,linux-x86_64,-1
+tool-linux-amd64.asc,linux-x86_64,-1
+tool-linux-amd64.minisig,linux-x86_64,-1
+
+# Negative on linux-x86_64: distro packages
+tool_1.0.0_amd64.deb,linux-x86_64,-1
+tool-1.0.0-1.x86_64.rpm,linux-x86_64,-1
+
+# Negative on linux-x86_64: APKs (wrong platform entirely)
+app-arm64-v8a-fdroid.apk,linux-x86_64,-1
+app-release.apk,linux-x86_64,-1
+
+# ===================================================================
+# Linux aarch64 native executables
+# Platform: linux-aarch64
+# ===================================================================
+
+# Positive: bare executables for linux aarch64
+ripgrep-14.0.0-aarch64-unknown-linux-musl,linux-aarch64,1
+fd-v9.0.0-aarch64-unknown-linux-musl,linux-aarch64,1
+bat-v0.24.0-aarch64-unknown-linux-musl,linux-aarch64,1
+gh_2.40.0_linux_arm64,linux-aarch64,1
+lazygit_0.40.0_Linux_arm64,linux-aarch64,1
+fzf-0.45.0-linux_arm64,linux-aarch64,1
+jq-linux-arm64,linux-aarch64,1
+yq_linux_arm64,linux-aarch64,1
+tool-linux-aarch64,linux-aarch64,1
+tool-linux-arm64,linux-aarch64,1
+nak-v0.7.0-linux-arm64,linux-aarch64,1
+
+# Negative on linux-aarch64: wrong arch
+ripgrep-14.0.0-x86_64-unknown-linux-musl,linux-aarch64,-1
+gh_2.40.0_linux_amd64,linux-aarch64,-1
+tool-linux-x86_64,linux-aarch64,-1
+tool-linux-amd64,linux-aarch64,-1
+
+# Negative on linux-aarch64: wrong OS
+ripgrep-14.0.0-aarch64-apple-darwin,linux-aarch64,-1
+gh_2.40.0_macOS_arm64,linux-aarch64,-1
+tool-darwin-arm64,linux-aarch64,-1
+
+# Negative on linux-aarch64: archives
+ripgrep-14.0.0-aarch64-unknown-linux-musl.tar.gz,linux-aarch64,-1
+gh_2.40.0_linux_arm64.tar.gz,linux-aarch64,-1
+
+# ===================================================================
+# macOS ARM64 (Apple Silicon) native executables
+# Platform: darwin-arm64
+# ===================================================================
+
+# Positive: bare executables for darwin arm64
+ripgrep-14.0.0-aarch64-apple-darwin,darwin-arm64,1
+fd-v9.0.0-aarch64-apple-darwin,darwin-arm64,1
+bat-v0.24.0-aarch64-apple-darwin,darwin-arm64,1
+gh_2.40.0_macOS_arm64,darwin-arm64,1
+lazygit_0.40.0_Darwin_arm64,darwin-arm64,1
+fzf-0.45.0-darwin_arm64,darwin-arm64,1
+jq-macos-arm64,darwin-arm64,1
+yq_darwin_arm64,darwin-arm64,1
+delta-0.16.5-aarch64-apple-darwin,darwin-arm64,1
+starship-aarch64-apple-darwin,darwin-arm64,1
+hugo_0.121.0_darwin-arm64,darwin-arm64,1
+k9s_Darwin_arm64,darwin-arm64,1
+nak-v0.7.0-darwin-arm64,darwin-arm64,1
+tool-darwin-arm64,darwin-arm64,1
+tool-macos-arm64,darwin-arm64,1
+tool_darwin_arm64,darwin-arm64,1
+tool-v1.0.0-darwin-arm64,darwin-arm64,1
+
+# Negative on darwin-arm64: wrong OS
+ripgrep-14.0.0-x86_64-unknown-linux-musl,darwin-arm64,-1
+ripgrep-14.0.0-aarch64-unknown-linux-musl,darwin-arm64,-1
+fd-v9.0.0-x86_64-unknown-linux-musl,darwin-arm64,-1
+gh_2.40.0_linux_amd64,darwin-arm64,-1
+gh_2.40.0_linux_arm64,darwin-arm64,-1
+gh_2.40.0_windows_amd64.exe,darwin-arm64,-1
+lazygit_0.40.0_Linux_x86_64,darwin-arm64,-1
+tool-linux-x86_64,darwin-arm64,-1
+tool-linux-aarch64,darwin-arm64,-1
+tool-windows-amd64.exe,darwin-arm64,-1
+
+# Negative on darwin-arm64: wrong arch
+ripgrep-14.0.0-x86_64-apple-darwin,darwin-arm64,-1
+fd-v9.0.0-x86_64-apple-darwin,darwin-arm64,-1
+gh_2.40.0_macOS_amd64,darwin-arm64,-1
+lazygit_0.40.0_Darwin_x86_64,darwin-arm64,-1
+tool-darwin-x86_64,darwin-arm64,-1
+jq-macos-amd64,darwin-arm64,-1
+
+# Negative on darwin-arm64: archives
+ripgrep-14.0.0-aarch64-apple-darwin.tar.gz,darwin-arm64,-1
+gh_2.40.0_macOS_arm64.zip,darwin-arm64,-1
+tool-darwin-arm64.tar.gz,darwin-arm64,-1
+
+# Negative on darwin-arm64: checksums
+SHA256SUMS,darwin-arm64,-1
+checksums.txt,darwin-arm64,-1
+tool-darwin-arm64.sha256,darwin-arm64,-1
+
+# Negative on darwin-arm64: APKs
+app-arm64-v8a.apk,darwin-arm64,-1
+
+# ===================================================================
+# macOS x86_64 (Intel) native executables
+# Platform: darwin-x86_64
+# ===================================================================
+
+# Positive: bare executables for darwin x86_64
+ripgrep-14.0.0-x86_64-apple-darwin,darwin-x86_64,1
+fd-v9.0.0-x86_64-apple-darwin,darwin-x86_64,1
+gh_2.40.0_macOS_amd64,darwin-x86_64,1
+lazygit_0.40.0_Darwin_x86_64,darwin-x86_64,1
+fzf-0.45.0-darwin_amd64,darwin-x86_64,1
+jq-macos-amd64,darwin-x86_64,1
+tool-darwin-x86_64,darwin-x86_64,1
+tool-macos-amd64,darwin-x86_64,1
+
+# Negative on darwin-x86_64: wrong OS
+ripgrep-14.0.0-x86_64-unknown-linux-musl,darwin-x86_64,-1
+tool-linux-x86_64,darwin-x86_64,-1
+
+# Negative on darwin-x86_64: wrong arch
+ripgrep-14.0.0-aarch64-apple-darwin,darwin-x86_64,-1
+tool-darwin-arm64,darwin-x86_64,-1

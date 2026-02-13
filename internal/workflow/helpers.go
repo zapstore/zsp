@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/zapstore/zsp/internal/cli"
@@ -12,6 +13,26 @@ import (
 	"github.com/zapstore/zsp/internal/source"
 	"github.com/zapstore/zsp/internal/ui"
 )
+
+// slugifyRe matches any character that is not a lowercase letter or digit.
+var slugifyRe = regexp.MustCompile(`[^a-z0-9]+`)
+
+// slugify converts a name into a lowercase identifier suitable for use as
+// a Nostr d-tag. It lowercases, replaces runs of non-alphanumeric characters
+// with a single hyphen, and trims leading/trailing hyphens.
+//
+// Examples:
+//
+//	"My-Tool"       -> "my-tool"
+//	"my_tool_v2"    -> "my-tool-v2"
+//	"App (beta)"    -> "app-beta"
+//	"nostr-relay"   -> "nostr-relay"
+func slugify(name string) string {
+	s := strings.ToLower(name)
+	s = slugifyRe.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	return s
+}
 
 // WithSpinner executes a function with spinner feedback.
 // Returns the result and any error from the function.
@@ -55,10 +76,10 @@ func WithSpinnerMsg(opts *cli.Options, message string, fn func() error, successM
 	return err
 }
 
-// selectAPKInteractive prompts the user to select an APK from a ranked list.
-func selectAPKInteractive(ranked []picker.ScoredAsset) (*source.Asset, error) {
-	ui.PrintSectionHeader("Select APK")
-	fmt.Printf("  %s\n", ui.Dim("Zapstore only supports arm64-v8a, always prefer that architecture."))
+// selectAssetInteractive prompts the user to select an asset from a ranked list.
+func selectAssetInteractive(ranked []picker.ScoredAsset) (*source.Asset, error) {
+	ui.PrintSectionHeader("Select Asset")
+	fmt.Printf("  %s\n", ui.Dim("Select the best asset for your target platform."))
 
 	options := make([]string, len(ranked))
 	for i, sa := range ranked {
@@ -90,11 +111,11 @@ func confirmHash(sha256Hash string, isClosedSource bool, isLegacy bool) (bool, e
 	fmt.Println()
 	fmt.Printf("  %s\n", ui.Bold(sha256Hash))
 	fmt.Println()
-	fmt.Printf("  %s\n", ui.Bold("Make sure it matches the APK you intend to distribute."))
+	fmt.Printf("  %s\n", ui.Bold("Make sure it matches the file you intend to distribute."))
 	fmt.Println()
 	fmt.Println("  To verify, run:")
-	fmt.Printf("    %s\n", ui.Dim("shasum -a 256 <path-to-apk>   # macOS"))
-	fmt.Printf("    %s\n", ui.Dim("sha256sum <path-to-apk>       # Linux"))
+	fmt.Printf("    %s\n", ui.Dim("shasum -a 256 <path-to-file>   # macOS"))
+	fmt.Printf("    %s\n", ui.Dim("sha256sum <path-to-file>       # Linux"))
 	fmt.Println()
 
 	if isClosedSource {

@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/nbd-wtf/go-nostr/nip19"
-	"github.com/zapstore/zsp/internal/apk"
+	"github.com/zapstore/zsp/internal/artifact"
 	"github.com/zapstore/zsp/internal/blossom"
 	"github.com/zapstore/zsp/internal/cli"
 	"github.com/zapstore/zsp/internal/config"
@@ -21,7 +21,7 @@ import (
 	"github.com/zapstore/zsp/internal/ui"
 )
 
-// Publisher orchestrates the APK publishing workflow.
+// Publisher orchestrates the publishing workflow for APKs and native executables.
 type Publisher struct {
 	opts      *cli.Options
 	cfg       *config.Config
@@ -30,17 +30,17 @@ type Publisher struct {
 	signer    nostr.Signer
 
 	// Computed during workflow
-	release                 *source.Release
-	selectedAsset           *source.Asset
-	apkPath                 string
-	apkInfo                 *apk.APKInfo
-	iconURL                 string
-	imageURLs               []string
-	releaseNotes            string
-	preDownloaded           *PreDownloadedImages
-	events                  *nostr.EventSet
-	blossomURL              string
-	browserPort             int
+	release                  *source.Release
+	selectedAsset            *source.Asset
+	assetPath                string // Local path to the asset file
+	assetInfo                *artifact.AssetInfo
+	iconURL                  string
+	imageURLs                []string
+	releaseNotes             string
+	preDownloaded            *PreDownloadedImages
+	events                   *nostr.EventSet
+	blossomURL               string
+	browserPort              int
 	existingReleaseTimestamp time.Time // created_at of existing 30063 on relay (for --overwrite-release)
 }
 
@@ -130,7 +130,7 @@ func (p *Publisher) Execute(ctx context.Context) error {
 	// Hash confirmation
 	if !p.opts.Publish.Yes {
 		isClosedSource := p.cfg.Repository == ""
-		confirmed, err := confirmHash(p.apkInfo.SHA256, isClosedSource, p.opts.Publish.Legacy)
+		confirmed, err := confirmHash(p.assetInfo.SHA256, isClosedSource, p.opts.Publish.Legacy)
 		if err != nil {
 			return fmt.Errorf("hash confirmation failed: %w", err)
 		}
@@ -148,7 +148,7 @@ func (p *Publisher) Execute(ctx context.Context) error {
 	return p.publishToRelays(ctx)
 }
 
-// fetchAssets fetches and selects the APK to publish.
+// fetchAssets fetches and selects the asset to publish.
 func (p *Publisher) fetchAssets(ctx context.Context) error {
 	if p.opts.Global.Verbose {
 		fmt.Printf("Source type: %s\n", p.src.Type())
@@ -161,15 +161,15 @@ func (p *Publisher) fetchAssets(ctx context.Context) error {
 	}
 	p.release = release
 
-	// Select APK
-	asset, err := p.selectAPK(ctx)
+	// Select asset
+	asset, err := p.selectAsset(ctx)
 	if err != nil {
 		return err
 	}
 	p.selectedAsset = asset
 
-	// Download and parse APK
-	return p.downloadAndParseAPK(ctx)
+	// Download and parse asset
+	return p.downloadAndParse(ctx)
 }
 
 // fetchRelease fetches the latest release with spinner feedback.
@@ -194,18 +194,31 @@ func (p *Publisher) fetchRelease(ctx context.Context) (*source.Release, error) {
 		if release.Version != "" {
 			ui.PrintSuccess(fmt.Sprintf("Found release %s with %d assets", release.Version, len(release.Assets)))
 		} else {
-			ui.PrintSuccess(fmt.Sprintf("Found %d assets (version from APK)", len(release.Assets)))
+			ui.PrintSuccess(fmt.Sprintf("Found %d assets (version pending)", len(release.Assets)))
 		}
 	}
 
 	return release, nil
 }
 
-// selectAPK filters and selects the best APK from the release.
-func (p *Publisher) selectAPK(ctx context.Context) (*source.Asset, error) {
-	// Filter to APKs only
-	apkAssets := picker.FilterAPKs(p.release.Assets)
-	if len(apkAssets) == 0 {
+// selectAsset filters and selects the best asset from the release.
+// For APKs, uses the APK-specific picker. For other formats, uses
+// the platform-aware picker with supported-format filtering.
+func (p *Publisher) selectAsset(ctx context.Context) (*source.Asset, error) {
+	assets := p.release.Assets
+
+	// Try APK-specific path first
+	apkAssets := picker.FilterAPKs(assets)
+
+	// If there are APKs, use the APK selection path
+	if len(apkAssets) > 0 {
+		assets = apkAssets
+	} else {
+		// Non-APK: filter to supported formats (remove archives, checksums, etc.)
+		assets = picker.FilterSupported(assets)
+	}
+
+	if len(assets) == 0 {
 		if p.opts.Global.Verbose {
 			fmt.Printf("Release: %s\n", p.release.Version)
 			if p.release.TagName != "" && p.release.TagName != p.release.Version {
@@ -223,34 +236,34 @@ func (p *Publisher) selectAPK(ctx context.Context) (*source.Asset, error) {
 				}
 			}
 		}
-		return nil, fmt.Errorf("no APK files found in release")
+		return nil, fmt.Errorf("no supported assets found in release")
 	}
 
 	// Apply match filter if specified
 	if p.cfg.Match != "" {
 		var err error
-		apkAssets, err = picker.FilterByMatch(apkAssets, p.cfg.Match)
+		assets, err = picker.FilterByMatch(assets, p.cfg.Match)
 		if err != nil {
 			return nil, err
 		}
-		if len(apkAssets) == 0 {
-			return nil, fmt.Errorf("no APK files match pattern: %s", p.cfg.Match)
+		if len(assets) == 0 {
+			return nil, fmt.Errorf("no assets match pattern: %s", p.cfg.Match)
 		}
 	}
 
-	// Single APK - use it
-	if len(apkAssets) == 1 {
+	// Single asset - use it
+	if len(assets) == 1 {
 		if p.opts.Publish.ShouldShowSpinners() {
-			ui.PrintSuccess(fmt.Sprintf("Selected %s", apkAssets[0].Name))
+			ui.PrintSuccess(fmt.Sprintf("Selected %s", assets[0].Name))
 		}
-		return apkAssets[0], nil
+		return assets[0], nil
 	}
 
-	// Multiple APKs - rank and select
-	ranked := picker.DefaultModel.RankAssets(apkAssets)
+	// Multiple assets - rank and select
+	ranked := picker.DefaultModel.RankAssets(assets)
 
 	if p.opts.Global.Verbose {
-		fmt.Println("  Ranked APKs:")
+		fmt.Println("  Ranked assets:")
 		for i, sa := range ranked {
 			fmt.Printf("    %d. %s (score: %.2f)\n", i+1, sa.Asset.Name, sa.Score)
 		}
@@ -258,7 +271,7 @@ func (p *Publisher) selectAPK(ctx context.Context) (*source.Asset, error) {
 
 	// Interactive selection if not quiet mode
 	if p.opts.Publish.IsInteractive() && len(ranked) > 1 {
-		return selectAPKInteractive(ranked)
+		return selectAssetInteractive(ranked)
 	}
 
 	// Auto-select best match
@@ -268,57 +281,106 @@ func (p *Publisher) selectAPK(ctx context.Context) (*source.Asset, error) {
 	return ranked[0].Asset, nil
 }
 
-// downloadAndParseAPK downloads (if needed) and parses the selected APK.
-func (p *Publisher) downloadAndParseAPK(ctx context.Context) error {
+// downloadAndParse downloads (if needed) and parses the selected asset.
+// Uses artifact.Detect to identify the file format and route to the correct parser.
+func (p *Publisher) downloadAndParse(ctx context.Context) error {
 	var err error
 
-	// Get APK path (download if needed)
-	p.apkPath, err = p.getAPKPath(ctx)
+	// Get asset path (download if needed)
+	p.assetPath, err = p.getAssetPath(ctx)
 	if err != nil {
 		return err
 	}
 
-	// Parse APK
-	p.apkInfo, err = WithSpinner(p.opts, "Parsing APK...", func() (*apk.APKInfo, error) {
-		return apk.Parse(p.apkPath)
+	// Detect format and parse
+	p.assetInfo, err = WithSpinner(p.opts, "Parsing asset...", func() (*artifact.AssetInfo, error) {
+		parser, err := artifact.Detect(p.assetPath)
+		if err != nil {
+			return nil, fmt.Errorf("unsupported file format: %w", err)
+		}
+		return parser.Parse(p.assetPath)
 	})
 	if err != nil {
-		return fmt.Errorf("failed to parse APK: %w", err)
+		return fmt.Errorf("failed to parse asset: %w", err)
 	}
 
-	// Verify arm64 support
-	if !p.apkInfo.IsArm64() {
-		return fmt.Errorf("APK does not support arm64-v8a architecture (found: %v)", p.apkInfo.Architectures)
+	// APK-specific validation
+	if p.assetInfo.IsAPK() {
+		apkInfo := artifact.ToAPKInfo(p.assetInfo)
+		if !apkInfo.IsArm64() {
+			return fmt.Errorf("APK does not support arm64-v8a architecture (found: %v)", apkInfo.Architectures)
+		}
 	}
 
 	if p.opts.Publish.ShouldShowSpinners() {
-		ui.PrintSuccess("Parsed and verified APK")
+		ui.PrintSuccess("Parsed and verified asset")
 	}
 
-	// Backfill version from APK if not known from release
+	// Backfill version from asset if not known from release
+	if p.release.Version == "" && p.assetInfo.Version != "" {
+		p.release.Version = p.assetInfo.Version
+	}
+
+	// CLI --version flag overrides all other version sources
+	if p.opts.Publish.Version != "" {
+		p.release.Version = p.opts.Publish.Version
+	}
+
+	// Version is required — fail if still unknown after all sources
 	if p.release.Version == "" {
-		p.release.Version = p.apkInfo.VersionName
+		return fmt.Errorf("could not determine version for this asset; use --version <version> to set it explicitly")
 	}
 
-	// Display APK summary
+	// Propagate resolved version to asset info
+	p.assetInfo.Version = p.release.Version
+
+	// Backfill name for non-APK assets from filename (without extension)
+	if !p.assetInfo.IsAPK() && p.assetInfo.Name == "" {
+		name := filepath.Base(p.assetPath)
+		if ext := filepath.Ext(name); ext != "" {
+			name = strings.TrimSuffix(name, ext)
+		}
+		p.assetInfo.Name = name
+	}
+
+	// Backfill identifier for non-APK assets by slugifying the name
+	if !p.assetInfo.IsAPK() && p.assetInfo.Identifier == "" {
+		p.assetInfo.Identifier = slugify(p.assetInfo.Name)
+	}
+
+	// Identifier is required — fail if still unknown
+	if p.assetInfo.Identifier == "" {
+		return fmt.Errorf("could not determine identifier for this asset")
+	}
+
+	// Display asset summary
 	if p.opts.Publish.ShouldShowSpinners() {
-		ui.PrintSectionHeader("APK Summary")
-		ui.PrintKeyValue("Name", p.apkInfo.Label)
-		ui.PrintKeyValue("App ID", p.apkInfo.PackageID)
-		ui.PrintKeyValue("Version", fmt.Sprintf("%s (%d)", p.apkInfo.VersionName, p.apkInfo.VersionCode))
-		ui.PrintKeyValue("Certificate hash", p.apkInfo.CertFingerprint)
-		ui.PrintKeyValue("Size", fmt.Sprintf("%.2f MB", float64(p.apkInfo.FileSize)/(1024*1024)))
+		if p.assetInfo.IsAPK() {
+			ui.PrintSectionHeader("APK Summary")
+			ui.PrintKeyValue("Name", p.assetInfo.Name)
+			ui.PrintKeyValue("App ID", p.assetInfo.Identifier)
+			ui.PrintKeyValue("Version", fmt.Sprintf("%s (%d)", p.assetInfo.Version, p.assetInfo.APK.VersionCode))
+			ui.PrintKeyValue("Certificate hash", p.assetInfo.APK.CertFingerprint)
+		} else {
+			ui.PrintSectionHeader("Asset Summary")
+			ui.PrintKeyValue("File", filepath.Base(p.assetPath))
+			ui.PrintKeyValue("Identifier", p.assetInfo.Identifier)
+			ui.PrintKeyValue("Version", p.assetInfo.Version)
+			ui.PrintKeyValue("Type", p.assetInfo.MIMEType)
+			ui.PrintKeyValue("Platform", strings.Join(p.assetInfo.Platforms, ", "))
+		}
+		ui.PrintKeyValue("Size", fmt.Sprintf("%.2f MB", float64(p.assetInfo.FileSize)/(1024*1024)))
 	}
 
 	// Check if asset already exists on relays
 	return p.checkExistingAsset(ctx)
 }
 
-// getAPKPath returns the local path to the APK, downloading if necessary.
-func (p *Publisher) getAPKPath(ctx context.Context) (string, error) {
+// getAssetPath returns the local path to the asset, downloading if necessary.
+func (p *Publisher) getAssetPath(ctx context.Context) (string, error) {
 	if p.selectedAsset.LocalPath != "" {
 		if p.opts.Publish.ShouldShowSpinners() {
-			ui.PrintSuccess("Using local APK file")
+			ui.PrintSuccess("Using local file")
 		}
 		return p.selectedAsset.LocalPath, nil
 	}
@@ -329,7 +391,7 @@ func (p *Publisher) getAPKPath(ctx context.Context) (string, error) {
 	} else if cachedPath := source.GetCachedDownload(p.selectedAsset.URL, p.selectedAsset.Name); cachedPath != "" {
 		p.selectedAsset.LocalPath = cachedPath
 		if p.opts.Publish.ShouldShowSpinners() {
-			ui.PrintSuccess("Using cached APK")
+			ui.PrintSuccess("Using cached asset")
 		}
 		return cachedPath, nil
 	}
@@ -346,15 +408,15 @@ func (p *Publisher) getAPKPath(ctx context.Context) (string, error) {
 		progressCallback = tracker.Callback()
 	}
 
-	apkPath, err := p.src.Download(ctx, p.selectedAsset, "", progressCallback)
+	assetPath, err := p.src.Download(ctx, p.selectedAsset, "", progressCallback)
 	if tracker != nil {
 		tracker.Done()
 	}
 	if err != nil {
-		return "", fmt.Errorf("failed to download APK: %w", err)
+		return "", fmt.Errorf("failed to download asset: %w", err)
 	}
 
-	return apkPath, nil
+	return assetPath, nil
 }
 
 // checkExistingAsset checks if the release already exists on relays.
@@ -363,7 +425,7 @@ func (p *Publisher) checkExistingAsset(ctx context.Context) error {
 		return nil
 	}
 
-	existingAsset, err := p.publisher.CheckExistingAsset(ctx, p.apkInfo.PackageID, p.apkInfo.VersionName)
+	existingAsset, err := p.publisher.CheckExistingAsset(ctx, p.assetInfo.Identifier, p.assetInfo.Version)
 	if err != nil {
 		if p.opts.Global.Verbose {
 			fmt.Printf("  Could not check relays: %v\n", err)
@@ -374,7 +436,7 @@ func (p *Publisher) checkExistingAsset(ctx context.Context) error {
 	if existingAsset != nil {
 		if p.opts.Publish.ShouldShowSpinners() {
 			ui.PrintWarning(fmt.Sprintf("Asset %s@%s already exists on %s",
-				p.apkInfo.PackageID, p.apkInfo.VersionName, existingAsset.RelayURL))
+				p.assetInfo.Identifier, p.assetInfo.Version, existingAsset.RelayURL))
 			fmt.Println("  Use --overwrite-release to publish anyway.")
 		}
 		return ErrNothingToDo
@@ -399,7 +461,7 @@ func (p *Publisher) gatherMetadata(ctx context.Context) error {
 	p.releaseNotes = p.release.Changelog
 	if p.cfg.ReleaseNotes != "" {
 		var err error
-		p.releaseNotes, err = source.FetchReleaseNotes(ctx, p.cfg.ReleaseNotes, p.apkInfo.VersionName, p.cfg.BaseDir)
+		p.releaseNotes, err = source.FetchReleaseNotes(ctx, p.cfg.ReleaseNotes, p.assetInfo.Version, p.cfg.BaseDir)
 		if err != nil {
 			return fmt.Errorf("failed to fetch release notes: %w", err)
 		}
@@ -423,8 +485,8 @@ func (p *Publisher) fetchExternalMetadata(ctx context.Context) error {
 		return nil
 	}
 
-	fetcher := source.NewMetadataFetcherWithPackageID(p.cfg, p.apkInfo.PackageID)
-	fetcher.APKName = p.apkInfo.Label
+	fetcher := source.NewMetadataFetcherWithPackageID(p.cfg, p.assetInfo.Identifier)
+	fetcher.APKName = p.assetInfo.Name
 
 	err := WithSpinnerMsg(p.opts, "Fetching metadata from external sources...", func() error {
 		return fetcher.FetchMetadata(ctx, metadataSources)
@@ -501,7 +563,8 @@ func (p *Publisher) handlePreview(ctx context.Context) error {
 
 // showPreview displays the browser preview.
 func (p *Publisher) showPreview(ctx context.Context) error {
-	previewData := nostr.BuildPreviewDataFromAPK(p.apkInfo, p.cfg, p.releaseNotes, p.blossomURL, p.publisher.RelayURLs())
+	// Build preview data from AssetInfo (works for all asset types: APK, Mach-O, ELF, etc.)
+	previewData := nostr.BuildPreviewDataFromAsset(p.assetInfo, p.cfg, p.releaseNotes, p.blossomURL, p.publisher.RelayURLs())
 
 	// Override icon with pre-downloaded icon if available
 	if p.preDownloaded != nil && p.preDownloaded.Icon != nil {
@@ -636,13 +699,13 @@ func (p *Publisher) isOffline() bool {
 // buildEventsWithoutUpload builds events without uploading files (offline / npub mode).
 func (p *Publisher) buildEventsWithoutUpload(ctx context.Context) error {
 	var err error
-	p.iconURL, p.imageURLs, err = ResolveURLsWithoutUpload(ctx, p.cfg, p.apkInfo, p.blossomURL, p.preDownloaded, p.opts)
+	p.iconURL, p.imageURLs, err = ResolveURLsWithoutUpload(ctx, p.cfg, p.assetInfo, p.blossomURL, p.preDownloaded, p.opts)
 	if err != nil {
 		return err
 	}
 
 	p.events = nostr.BuildEventSet(nostr.BuildEventSetParams{
-		APKInfo:                   p.apkInfo,
+		Asset:                     p.assetInfo,
 		Config:                    p.cfg,
 		Pubkey:                    p.signer.PublicKey(),
 		OriginalURL:               p.getOriginalURL(),
@@ -676,8 +739,8 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 		var err error
 		p.events, err = UploadAndSignWithBatch(ctx, UploadParams{
 			Cfg:                 p.cfg,
-			APKInfo:             p.apkInfo,
-			APKPath:             p.apkPath,
+			AssetInfo:           p.assetInfo,
+			AssetPath:           p.assetPath,
 			Release:             p.release,
 			Client:              client,
 			OriginalURL:         p.getOriginalURL(),
@@ -701,8 +764,8 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 	var err error
 	p.iconURL, p.imageURLs, err = UploadWithIndividualSigning(ctx, UploadParams{
 		Cfg:           p.cfg,
-		APKInfo:       p.apkInfo,
-		APKPath:       p.apkPath,
+		AssetInfo:     p.assetInfo,
+		AssetPath:     p.assetPath,
 		Client:        client,
 		Signer:        p.signer,
 		PreDownloaded: p.preDownloaded,
@@ -713,7 +776,7 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 	}
 
 	p.events = nostr.BuildEventSet(nostr.BuildEventSetParams{
-		APKInfo:                   p.apkInfo,
+		Asset:                     p.assetInfo,
 		Config:                    p.cfg,
 		Pubkey:                    p.signer.PublicKey(),
 		OriginalURL:               p.getOriginalURL(),
@@ -782,7 +845,7 @@ func (p *Publisher) matchVariant() string {
 		return ""
 	}
 
-	filename := filepath.Base(p.apkInfo.FilePath)
+	filename := filepath.Base(p.assetInfo.FilePath)
 	for name, pattern := range p.cfg.Variants {
 		re, err := regexp.Compile(pattern)
 		if err != nil {
@@ -818,12 +881,16 @@ type UploadManifestEntry struct {
 func (p *Publisher) outputUploadManifest() {
 	var entries []UploadManifestEntry
 
-	// APK entry
+	// Asset entry
+	assetLabel := "Asset"
+	if p.assetInfo.IsAPK() {
+		assetLabel = "APK"
+	}
 	entries = append(entries, UploadManifestEntry{
-		Description: "APK",
-		FilePath:    p.apkPath,
-		SHA256:      p.apkInfo.SHA256,
-		BlossomURL:  fmt.Sprintf("%s/%s", p.blossomURL, p.apkInfo.SHA256),
+		Description: assetLabel,
+		FilePath:    p.assetPath,
+		SHA256:      p.assetInfo.SHA256,
+		BlossomURL:  fmt.Sprintf("%s/%s", p.blossomURL, p.assetInfo.SHA256),
 	})
 
 	// Icon entry
@@ -868,9 +935,9 @@ func (p *Publisher) resolveIconPath(hash string) string {
 		return resolvePath(p.cfg.Icon, p.cfg.BaseDir)
 	}
 
-	// APK-extracted icon
-	if p.apkInfo.Icon != nil {
-		return p.saveToTemp("icon", p.apkInfo.Icon, hash)
+	// Asset-extracted icon (APKs may embed icons)
+	if p.assetInfo.Icon != nil {
+		return p.saveToTemp("icon", p.assetInfo.Icon, hash)
 	}
 
 	return "(none)"
@@ -1010,7 +1077,7 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 	if p.opts.Publish.ShouldShowSpinners() {
 		if allSuccess {
 			ui.PrintCompletionSummary(true, fmt.Sprintf("Published %s v%s to %s",
-				p.apkInfo.PackageID, p.apkInfo.VersionName, strings.Join(p.publisher.RelayURLs(), ", ")))
+				p.assetInfo.Identifier, p.assetInfo.Version, strings.Join(p.publisher.RelayURLs(), ", ")))
 		} else {
 			ui.PrintCompletionSummary(false, "Published with some failures")
 		}

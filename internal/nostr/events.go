@@ -8,6 +8,7 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/zapstore/zsp/internal/apk"
+	"github.com/zapstore/zsp/internal/artifact"
 	"github.com/zapstore/zsp/internal/config"
 )
 
@@ -68,10 +69,11 @@ type AssetMetadata struct {
 	SHA256                string
 	Size                  int64
 	URLs                  []string // Download URLs (Blossom)
-	CertFingerprint       string   // APK signing certificate SHA256
-	MinSDK                int32
-	TargetSDK             int32
-	Platforms             []string // Full platform identifiers (e.g., "android-arm64-v8a")
+	MIMEType              string   // NIP-82 MIME type (e.g., "application/x-executable")
+	CertFingerprint       string   // APK signing certificate SHA256 (APK only)
+	MinSDK                int32    // Minimum platform version (APK only)
+	TargetSDK             int32    // Target platform version (APK only)
+	Platforms             []string // Full platform identifiers (e.g., "linux-x86_64")
 	Filename              string   // Original filename (for variant detection)
 	Variant               string   // Explicit variant name (e.g., "fdroid", "google")
 	Commit                string   // Git commit hash for reproducible builds
@@ -262,7 +264,9 @@ func BuildSoftwareAssetEvent(meta *AssetMetadata, pubkey string) *nostr.Event {
 		}
 
 		tags = append(tags, nostr.Tag{"version", meta.Version})
-		tags = append(tags, nostr.Tag{"version_code", strconv.FormatInt(meta.VersionCode, 10)})
+		if meta.VersionCode > 0 {
+			tags = append(tags, nostr.Tag{"version_code", strconv.FormatInt(meta.VersionCode, 10)})
+		}
 
 		// Platform version info - legacy uses min_sdk_version/target_sdk_version
 		if meta.MinSDK > 0 {
@@ -272,8 +276,12 @@ func BuildSoftwareAssetEvent(meta *AssetMetadata, pubkey string) *nostr.Event {
 			tags = append(tags, nostr.Tag{"target_sdk_version", strconv.Itoa(int(meta.TargetSDK))})
 		}
 
-		// MIME type
-		tags = append(tags, nostr.Tag{"m", "application/vnd.android.package-archive"})
+		// MIME type — use provided MIMEType or default to APK
+		legacyMIME := meta.MIMEType
+		if legacyMIME == "" {
+			legacyMIME = "application/vnd.android.package-archive"
+		}
+		tags = append(tags, nostr.Tag{"m", legacyMIME})
 
 		// SHA256 hash
 		tags = append(tags, nostr.Tag{"x", meta.SHA256})
@@ -302,8 +310,12 @@ func BuildSoftwareAssetEvent(meta *AssetMetadata, pubkey string) *nostr.Event {
 			tags = append(tags, nostr.Tag{"url", url})
 		}
 
-		// MIME type
-		tags = append(tags, nostr.Tag{"m", "application/vnd.android.package-archive"})
+		// MIME type — use provided MIMEType or default to APK for backward compatibility
+		mimeType := meta.MIMEType
+		if mimeType == "" {
+			mimeType = "application/vnd.android.package-archive"
+		}
+		tags = append(tags, nostr.Tag{"m", mimeType})
 
 		// File size
 		if meta.Size > 0 {
@@ -315,7 +327,7 @@ func BuildSoftwareAssetEvent(meta *AssetMetadata, pubkey string) *nostr.Event {
 			tags = append(tags, nostr.Tag{"f", platform})
 		}
 
-		// Platform version info
+		// Platform version info (APK-specific: min_sdk → min_platform_version)
 		if meta.MinSDK > 0 {
 			tags = append(tags, nostr.Tag{"min_platform_version", strconv.Itoa(int(meta.MinSDK))})
 		}
@@ -343,8 +355,10 @@ func BuildSoftwareAssetEvent(meta *AssetMetadata, pubkey string) *nostr.Event {
 			tags = append(tags, nostr.Tag{"supported_nip", nip})
 		}
 
-		// Android-specific tags
-		tags = append(tags, nostr.Tag{"version_code", strconv.FormatInt(meta.VersionCode, 10)})
+		// Android-specific tags (only for APKs)
+		if meta.VersionCode > 0 {
+			tags = append(tags, nostr.Tag{"version_code", strconv.FormatInt(meta.VersionCode, 10)})
+		}
 
 		// Minimum allowed version
 		if meta.MinAllowedVersion != "" {
@@ -404,7 +418,14 @@ func archToPlatform(arch string) string {
 
 // BuildEventSetParams contains parameters for building an event set.
 type BuildEventSetParams struct {
-	APKInfo          *apk.APKInfo
+	// Asset is the parsed asset metadata (preferred over APKInfo).
+	// When set, APKInfo is ignored.
+	Asset *artifact.AssetInfo
+
+	// APKInfo is the legacy APK metadata. Deprecated: use Asset instead.
+	// Kept for backward compatibility during migration.
+	APKInfo *apk.APKInfo
+
 	Config           *config.Config
 	Pubkey           string
 	OriginalURL      string // Original download URL (from release source)
@@ -427,43 +448,46 @@ type BuildEventSetParams struct {
 	MinReleaseTimestamp time.Time
 }
 
-// BuildEventSet creates all events for an APK release.
+// BuildEventSet creates all events for a software release.
+// Supports both APK and native executable assets via the Asset field.
 // The Release event's asset references (e tags) are populated by SignEventSet
 // after the asset event is signed.
 func BuildEventSet(params BuildEventSetParams) *EventSet {
-	apkInfo := params.APKInfo
+	// Resolve asset info: prefer Asset (new path) over APKInfo (legacy path).
+	var ai *artifact.AssetInfo
+	if params.Asset != nil {
+		ai = params.Asset
+	} else if params.APKInfo != nil {
+		ai = artifact.FromAPKInfo(params.APKInfo)
+	} else {
+		return nil // No asset info provided
+	}
+
 	cfg := params.Config
 	legacyFormat := params.LegacyFormat
 
 	// Determine app name
 	name := cfg.Name
 	if name == "" {
-		name = apkInfo.Label
+		name = ai.Name
 	}
 	if name == "" {
-		name = apkInfo.PackageID
+		name = ai.Identifier
 	}
 
-	// Build APK URLs - include original URL and/or Blossom URL
-	var apkURLs []string
+	// Build asset URLs - include original URL and/or Blossom URL
+	var assetURLs []string
 	if params.OriginalURL != "" {
-		apkURLs = append(apkURLs, params.OriginalURL)
+		assetURLs = append(assetURLs, params.OriginalURL)
 	}
 	// Always include Blossom URL as fallback (or primary if no original URL)
-	if params.BlossomServer != "" && apkInfo.SHA256 != "" {
-		blossomURL := params.BlossomServer + "/" + apkInfo.SHA256
-		apkURLs = append(apkURLs, blossomURL)
+	if params.BlossomServer != "" && ai.SHA256 != "" {
+		blossomURL := params.BlossomServer + "/" + ai.SHA256
+		assetURLs = append(assetURLs, blossomURL)
 	}
 
-	// Convert architectures to platform identifiers
-	platforms := make([]string, 0, len(apkInfo.Architectures))
-	for _, arch := range apkInfo.Architectures {
-		platforms = append(platforms, archToPlatform(arch))
-	}
-	// If no native libs, it's architecture-independent - support all Android platforms
-	if len(platforms) == 0 {
-		platforms = []string{"android-arm64-v8a", "android-armeabi-v7a", "android-x86", "android-x86_64"}
-	}
+	// Use platforms from the parsed asset
+	platforms := ai.Platforms
 
 	// Build NIP-34 repository pointer if available (new format only)
 	var nip34Repo, nip34Relay string
@@ -475,9 +499,15 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		}
 	}
 
+	// Determine version code (APK-only)
+	var versionCode int64
+	if ai.IsAPK() {
+		versionCode = ai.APK.VersionCode
+	}
+
 	// Software Application event
 	appMeta := &AppMetadata{
-		PackageID:      apkInfo.PackageID,
+		PackageID:      ai.Identifier,
 		Name:           name,
 		Description:    cfg.Description,
 		Summary:        cfg.Summary,
@@ -491,7 +521,7 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		ImageURLs:      params.ImageURLs,
 		Platforms:      platforms,
 		LegacyFormat:   legacyFormat,
-		ReleaseVersion: apkInfo.VersionName, // For legacy a-tag pointing to release
+		ReleaseVersion: ai.Version, // For legacy a-tag pointing to release
 	}
 
 	// Determine release channel (default: main)
@@ -503,9 +533,9 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 	// Software Release event
 	// AssetEventIDs will be populated by SignEventSet after asset is signed
 	releaseMeta := &ReleaseMetadata{
-		PackageID:     apkInfo.PackageID,
-		Version:       apkInfo.VersionName,
-		VersionCode:   apkInfo.VersionCode,
+		PackageID:     ai.Identifier,
+		Version:       ai.Version,
+		VersionCode:   versionCode,
 		Changelog:     params.Changelog,
 		Channel:       channel,
 		AssetEventIDs: []string{}, // Populated after signing
@@ -514,25 +544,30 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		Commit:        params.Commit,     // In legacy, commit goes on release not asset
 	}
 
-	// Software Asset event
+	// Build Software Asset metadata
 	assetMeta := &AssetMetadata{
-		Identifier:            apkInfo.PackageID, // Asset ID same as app ID for APKs
-		Version:               apkInfo.VersionName,
-		VersionCode:           apkInfo.VersionCode,
-		SHA256:                apkInfo.SHA256,
-		Size:                  apkInfo.FileSize,
-		URLs:                  apkURLs,
-		CertFingerprint:       apkInfo.CertFingerprint,
-		MinSDK:                apkInfo.MinSDK,
-		TargetSDK:             apkInfo.TargetSDK,
+		Identifier:            ai.Identifier,
+		Version:               ai.Version,
+		VersionCode:           versionCode,
+		SHA256:                ai.SHA256,
+		Size:                  ai.FileSize,
+		URLs:                  assetURLs,
+		MIMEType:              ai.MIMEType,
 		Platforms:             platforms,
-		Filename:              filepath.Base(apkInfo.FilePath),
+		Filename:              filepath.Base(ai.FilePath),
 		Variant:               params.Variant,
 		Commit:                params.Commit, // In new format, commit is on asset
 		SupportedNIPs:         cfg.SupportedNIPs,
 		MinAllowedVersion:     cfg.MinAllowedVersion,
 		MinAllowedVersionCode: cfg.MinAllowedVersionCode,
 		LegacyFormat:          legacyFormat,
+	}
+
+	// APK-specific fields
+	if ai.IsAPK() {
+		assetMeta.CertFingerprint = ai.APK.CertFingerprint
+		assetMeta.MinSDK = ai.APK.MinSDK
+		assetMeta.TargetSDK = ai.APK.TargetSDK
 	}
 
 	eventSet := &EventSet{

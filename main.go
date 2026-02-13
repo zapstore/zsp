@@ -253,7 +253,7 @@ func loadConfig(opts *cli.PublishOptions, args []string) (*config.Config, error)
 		}
 		var defaults *config.Config
 		configPath := "zapstore.yaml"
-		if len(args) > 0 && !strings.HasSuffix(strings.ToLower(args[0]), ".apk") {
+		if len(args) > 0 && isYAMLFile(args[0]) {
 			configPath = args[0]
 		}
 		if cfg, err := config.Load(configPath); err == nil {
@@ -266,17 +266,26 @@ func loadConfig(opts *cli.PublishOptions, args []string) (*config.Config, error)
 
 	// Quick mode with APK file as positional argument
 	if len(args) > 0 && strings.HasSuffix(strings.ToLower(args[0]), ".apk") {
-		return loadAPKConfig(opts, args[0])
+		return loadLocalAssetConfig(opts, args[0])
 	}
 
-	// Quick mode with -r flag only (no APK)
+	// Quick mode with -r flag only (no APK/binary)
 	if opts.RepoURL != "" {
 		return loadRepoConfig(opts)
 	}
 
-	// Config file as positional argument
-	if len(args) > 0 {
+	// YAML config file as positional argument
+	if len(args) > 0 && isYAMLFile(args[0]) {
 		return config.Load(args[0])
+	}
+
+	// Local binary file as positional argument (detect via existence on disk)
+	if len(args) > 0 {
+		if _, err := os.Stat(args[0]); err == nil {
+			return loadLocalAssetConfig(opts, args[0])
+		}
+		// File doesn't exist — give a clear error
+		return nil, fmt.Errorf("file not found: %s", args[0])
 	}
 
 	// Check for stdin
@@ -298,6 +307,12 @@ func loadConfig(opts *cli.PublishOptions, args []string) (*config.Config, error)
 	return config.RunWizardWithOptions(nil, config.WizardOptions{
 		FetchAPKInfo: fetchAPKInfoForWizard,
 	})
+}
+
+// isYAMLFile returns true if the path has a .yaml or .yml extension.
+func isYAMLFile(path string) bool {
+	lower := strings.ToLower(path)
+	return strings.HasSuffix(lower, ".yaml") || strings.HasSuffix(lower, ".yml")
 }
 
 // fetchAPKInfoForWizard downloads the APK and extracts basic info.
@@ -366,10 +381,11 @@ func fetchAPKInfoForWizard(cfg *config.Config, matchPattern string) *config.APKB
 	}
 }
 
-// loadAPKConfig creates config from a local APK path with optional -r and -s flags.
-func loadAPKConfig(opts *cli.PublishOptions, apkPath string) (*config.Config, error) {
+// loadLocalAssetConfig creates config from a local asset path (APK or native binary)
+// with optional -r and -s flags.
+func loadLocalAssetConfig(opts *cli.PublishOptions, assetPath string) (*config.Config, error) {
 	cfg := &config.Config{
-		ReleaseSource: &config.ReleaseSource{LocalPath: apkPath},
+		ReleaseSource: &config.ReleaseSource{LocalPath: assetPath},
 	}
 
 	if opts.RepoURL != "" {

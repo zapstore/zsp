@@ -79,6 +79,7 @@ func RootHelp() string {
 	writeExample(&b, "zsp publish app.apk", "Publish local APK")
 	writeExample(&b, "zsp publish -r github.com/org/repo", "Fetch and publish from GitHub (open source)")
 	writeExample(&b, "zsp publish -s github.com/user/app", "Closed-source (releases only, no source code)")
+	writeExample(&b, "zsp publish ./tool --version 1.0.0", "Publish local CLI executable with version")
 	writeExample(&b, "zsp identity --link-key key.p12", "Link signing key to Nostr identity")
 	b.WriteString("\n")
 
@@ -131,6 +132,8 @@ func PublishHelp() string {
 
 	// Release-specific flags (CLI only)
 	b.WriteString(renderPurpleBold("RELEASE FLAGS") + "\n")
+	writeFlag(&b, "--version <version>", "Version for the published asset (overrides auto-detection)")
+	b.WriteString("                            " + renderGreyDark("Required for CLI executables when version can't be auto-detected") + "\n")
 	writeFlag(&b, "--commit <hash>", "Git commit hash for reproducible builds")
 	writeFlag(&b, "--channel <name>", "Release channel: main, beta, nightly, dev (default: main)")
 	b.WriteString("\n")
@@ -190,6 +193,9 @@ func PublishHelp() string {
 
 	b.WriteString(renderGreyDark("  # Pipe signed events directly to nak for publishing (use -q for clean output)") + "\n")
 	b.WriteString("  " + renderGreen("zsp publish -q zapstore.yaml --offline | nak event wss://relay.zapstore.dev") + "\n\n")
+
+	b.WriteString(renderGreyDark("  # Publish a CLI executable with explicit version") + "\n")
+	b.WriteString("  " + renderGreen("zsp publish ./my-tool --version 1.5.0 -r github.com/user/my-tool") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # CI/CD mode - no prompts, auto-confirm") + "\n")
 	b.WriteString("  " + renderGreen("zsp publish -y zapstore.yaml") + "\n\n")

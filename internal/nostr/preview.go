@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/zapstore/zsp/internal/apk"
+	"github.com/zapstore/zsp/internal/artifact"
 	"github.com/zapstore/zsp/internal/config"
 )
 
@@ -155,6 +157,61 @@ func BuildPreviewDataFromAPKs(apkInfos []*apk.APKInfo, cfg *config.Config, chang
 		Channel:       "main",
 		Changelog:     changelog,
 		Assets:        assets,
+		BlossomServer: blossomURL,
+		RelayURLs:     relayURLs,
+	}
+}
+
+// BuildPreviewDataFromAsset creates preview data from an AssetInfo and config.
+// Works for all asset types (APK, Mach-O, ELF, etc.) without requiring apk.APKInfo.
+func BuildPreviewDataFromAsset(asset *artifact.AssetInfo, cfg *config.Config, changelog string, blossomURL string, relayURLs []string) *PreviewData {
+	if asset == nil {
+		return nil
+	}
+
+	name := cfg.Name
+	if name == "" {
+		name = asset.Name
+	}
+	if name == "" {
+		name = asset.Identifier
+	}
+
+	// Build asset preview data
+	assetPreview := AssetPreviewData{
+		SHA256:    asset.SHA256,
+		FileSize:  asset.FileSize,
+		Filename:  filepath.Base(asset.FilePath),
+		Platforms: asset.Platforms,
+	}
+	if asset.IsAPK() {
+		assetPreview.CertFingerprint = asset.APK.CertFingerprint
+		assetPreview.MinSDK = asset.APK.MinSDK
+		assetPreview.TargetSDK = asset.APK.TargetSDK
+	}
+
+	var versionCode int64
+	if asset.IsAPK() {
+		versionCode = asset.APK.VersionCode
+	}
+
+	return &PreviewData{
+		AppName:       name,
+		PackageID:     asset.Identifier,
+		Summary:       cfg.Summary,
+		Description:   cfg.Description,
+		Website:       cfg.Website,
+		Repository:    cfg.Repository,
+		License:       cfg.License,
+		Tags:          cfg.Tags,
+		IconData:      asset.Icon,
+		ImageURLs:     cfg.Images,
+		Platforms:     asset.Platforms,
+		Version:       asset.Version,
+		VersionCode:   versionCode,
+		Channel:       "main",
+		Changelog:     changelog,
+		Assets:        []AssetPreviewData{assetPreview},
 		BlossomServer: blossomURL,
 		RelayURLs:     relayURLs,
 	}
@@ -367,10 +424,10 @@ func (s *PreviewServer) buildHTML() string {
 		if len(d.Assets) > 1 {
 			assetNum = fmt.Sprintf(" %d", i+1)
 		}
-		assetsHTML += fmt.Sprintf(`
-    <div class="section">
-      <h2>Asset%s</h2>
-      <div class="asset-grid">
+
+		// Common fields: SHA256, File Size, Platforms
+		platformsStr := strings.Join(asset.Platforms, ", ")
+		assetItems := fmt.Sprintf(`
         <div class="asset-item">
           <div class="label">SHA256</div>
           <div class="value">%s</div>
@@ -378,27 +435,50 @@ func (s *PreviewServer) buildHTML() string {
         <div class="asset-item">
           <div class="label">File Size</div>
           <div class="value">%s</div>
-        </div>
+        </div>`,
+			html.EscapeString(asset.SHA256),
+			formatBytes(asset.FileSize),
+		)
+
+		if platformsStr != "" {
+			assetItems += fmt.Sprintf(`
+        <div class="asset-item">
+          <div class="label">Platforms</div>
+          <div class="value">%s</div>
+        </div>`, html.EscapeString(platformsStr))
+		}
+
+		// APK-specific fields (only shown when relevant)
+		if asset.MinSDK > 0 {
+			assetItems += fmt.Sprintf(`
         <div class="asset-item">
           <div class="label">Min SDK</div>
           <div class="value">%s</div>
-        </div>
+        </div>`, strconv.Itoa(int(asset.MinSDK)))
+		}
+		if asset.TargetSDK > 0 {
+			assetItems += fmt.Sprintf(`
         <div class="asset-item">
           <div class="label">Target SDK</div>
           <div class="value">%s</div>
-        </div>
+        </div>`, strconv.Itoa(int(asset.TargetSDK)))
+		}
+		if asset.CertFingerprint != "" {
+			assetItems += fmt.Sprintf(`
         <div class="asset-item" style="grid-column: 1 / -1;">
           <div class="label">APK Certificate Hash</div>
           <div class="value">%s</div>
-        </div>
+        </div>`, html.EscapeString(asset.CertFingerprint))
+		}
+
+		assetsHTML += fmt.Sprintf(`
+    <div class="section">
+      <h2>Asset%s</h2>
+      <div class="asset-grid">%s
       </div>
     </div>`,
 			assetNum,
-			html.EscapeString(asset.SHA256),
-			formatBytes(asset.FileSize),
-			strconv.Itoa(int(asset.MinSDK)),
-			strconv.Itoa(int(asset.TargetSDK)),
-			html.EscapeString(asset.CertFingerprint),
+			assetItems,
 		)
 	}
 

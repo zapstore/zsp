@@ -13,7 +13,7 @@ import (
 	"time"
 
 	gonostr "github.com/nbd-wtf/go-nostr"
-	"github.com/zapstore/zsp/internal/apk"
+	"github.com/zapstore/zsp/internal/artifact"
 	"github.com/zapstore/zsp/internal/blossom"
 	"github.com/zapstore/zsp/internal/cli"
 	"github.com/zapstore/zsp/internal/config"
@@ -39,8 +39,8 @@ type PreDownloadedImages struct {
 // UploadParams contains parameters for upload functions.
 type UploadParams struct {
 	Cfg                 *config.Config
-	APKInfo             *apk.APKInfo
-	APKPath             string
+	AssetInfo           *artifact.AssetInfo
+	AssetPath           string
 	Release             *source.Release
 	Client              *blossom.Client
 	OriginalURL         string
@@ -157,9 +157,9 @@ func downloadImageWithSpinner(ctx context.Context, url, imageType string, opts *
 
 // ResolveURLsWithoutUpload computes Blossom URLs by downloading/reading files and computing hashes,
 // but without actually uploading to Blossom. Used for offline and npub modes.
-func ResolveURLsWithoutUpload(ctx context.Context, cfg *config.Config, apkInfo *apk.APKInfo, blossomURL string, preDownloaded *PreDownloadedImages, opts *cli.Options) (iconURL string, imageURLs []string, err error) {
+func ResolveURLsWithoutUpload(ctx context.Context, cfg *config.Config, assetInfo *artifact.AssetInfo, blossomURL string, preDownloaded *PreDownloadedImages, opts *cli.Options) (iconURL string, imageURLs []string, err error) {
 	// Process icon
-	iconURL, err = resolveIconURL(ctx, cfg, apkInfo, blossomURL, preDownloaded, opts)
+	iconURL, err = resolveIconURL(ctx, cfg, assetInfo, blossomURL, preDownloaded, opts)
 	if err != nil {
 		return "", nil, err
 	}
@@ -174,7 +174,7 @@ func ResolveURLsWithoutUpload(ctx context.Context, cfg *config.Config, apkInfo *
 }
 
 // resolveIconURL resolves the icon URL without uploading.
-func resolveIconURL(ctx context.Context, cfg *config.Config, apkInfo *apk.APKInfo, blossomURL string, preDownloaded *PreDownloadedImages, opts *cli.Options) (string, error) {
+func resolveIconURL(ctx context.Context, cfg *config.Config, assetInfo *artifact.AssetInfo, blossomURL string, preDownloaded *PreDownloadedImages, opts *cli.Options) (string, error) {
 	if preDownloaded != nil && preDownloaded.Icon != nil {
 		return fmt.Sprintf("%s/%s", blossomURL, preDownloaded.Icon.Hash), nil
 	}
@@ -209,8 +209,8 @@ func resolveIconURL(ctx context.Context, cfg *config.Config, apkInfo *apk.APKInf
 		return fmt.Sprintf("%s/%s", blossomURL, hex.EncodeToString(hash[:])), nil
 	}
 
-	if apkInfo.Icon != nil {
-		hash := sha256.Sum256(apkInfo.Icon)
+	if assetInfo != nil && assetInfo.Icon != nil {
+		hash := sha256.Sum256(assetInfo.Icon)
 		return fmt.Sprintf("%s/%s", blossomURL, hex.EncodeToString(hash[:])), nil
 	}
 
@@ -271,19 +271,19 @@ func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.Ev
 	imageURLs = append(imageURLs, imgURLs...)
 	uploads = append(uploads, imgUploads...)
 
-	// Add APK upload
+	// Add asset upload
 	uploads = append(uploads, uploadItem{
-		isAPK:     true,
-		apkPath:   params.APKPath,
-		hash:      params.APKInfo.SHA256,
-		authEvent: nostr.BuildBlossomAuthEvent(params.APKInfo.SHA256, params.Pubkey, expiration),
+		isAPK:     true, // reuse field name — means "is the main asset"
+		apkPath:   params.AssetPath,
+		hash:      params.AssetInfo.SHA256,
+		authEvent: nostr.BuildBlossomAuthEvent(params.AssetInfo.SHA256, params.Pubkey, expiration),
 	})
 
 	// Build main events
 	releaseNotes := params.Release.Changelog
 	if params.Cfg.ReleaseNotes != "" {
 		var err error
-		releaseNotes, err = source.FetchReleaseNotes(ctx, params.Cfg.ReleaseNotes, params.APKInfo.VersionName, params.Cfg.BaseDir)
+		releaseNotes, err = source.FetchReleaseNotes(ctx, params.Cfg.ReleaseNotes, params.AssetInfo.Version, params.Cfg.BaseDir)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch release notes: %w", err)
 		}
@@ -297,7 +297,7 @@ func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.Ev
 	}
 
 	events := nostr.BuildEventSet(nostr.BuildEventSetParams{
-		APKInfo:                   params.APKInfo,
+		Asset:                     params.AssetInfo,
 		Config:                    params.Cfg,
 		Pubkey:                    params.Pubkey,
 		OriginalURL:               params.OriginalURL,
@@ -418,9 +418,9 @@ func uploadIcon(ctx context.Context, params UploadParams) (string, error) {
 		return uploadLocalIcon(ctx, client, signer, params.Cfg.Icon, params.Cfg.BaseDir, opts)
 	}
 
-	// APK icon
-	if params.APKInfo.Icon != nil {
-		return uploadAPKIcon(ctx, client, signer, params.APKInfo.Icon, opts)
+	// Asset-embedded icon (APKs may embed icons)
+	if params.AssetInfo != nil && params.AssetInfo.Icon != nil {
+		return uploadAPKIcon(ctx, client, signer, params.AssetInfo.Icon, opts)
 	}
 
 	return "", nil
@@ -707,28 +707,33 @@ func uploadLocalImage(ctx context.Context, client *blossom.Client, signer nostr.
 	return result.URL, nil
 }
 
-// uploadAPK uploads the APK file.
+// uploadAPK uploads the asset file to Blossom.
 func uploadAPK(ctx context.Context, params UploadParams) error {
+	label := "asset"
+	if params.AssetInfo.IsAPK() {
+		label = "APK"
+	}
+
 	var tracker *ui.DownloadTracker
 	var uploadCallback func(uploaded, total int64)
 	if params.Opts.Publish.ShouldShowSpinners() {
-		fileInfo, _ := os.Stat(params.APKPath)
+		fileInfo, _ := os.Stat(params.AssetPath)
 		var size int64
 		if fileInfo != nil {
 			size = fileInfo.Size()
 		}
-		tracker = ui.NewDownloadTracker(fmt.Sprintf("Uploading APK to %s", params.Client.ServerURL()), size)
+		tracker = ui.NewDownloadTracker(fmt.Sprintf("Uploading %s to %s", label, params.Client.ServerURL()), size)
 		uploadCallback = tracker.Callback()
 	}
 
-	result, err := params.Client.Upload(ctx, params.APKPath, params.APKInfo.SHA256, params.Signer, uploadCallback)
+	result, err := params.Client.Upload(ctx, params.AssetPath, params.AssetInfo.SHA256, params.Signer, uploadCallback)
 	if err != nil {
-		return fmt.Errorf("failed to upload APK: %w", err)
+		return fmt.Errorf("failed to upload %s: %w", label, err)
 	}
 
 	if tracker != nil {
 		if result.Existed {
-			tracker.DoneWithMessage(fmt.Sprintf("APK already exists (%s)", result.URL))
+			tracker.DoneWithMessage(fmt.Sprintf("%s already exists (%s)", label, result.URL))
 		} else {
 			tracker.Done()
 		}
@@ -791,12 +796,12 @@ func collectIconUpload(ctx context.Context, params UploadParams, expiration time
 		return iconURL, uploads
 	}
 
-	if params.APKInfo.Icon != nil {
-		hash := sha256.Sum256(params.APKInfo.Icon)
+	if params.AssetInfo != nil && params.AssetInfo.Icon != nil {
+		hash := sha256.Sum256(params.AssetInfo.Icon)
 		iconHash := hex.EncodeToString(hash[:])
 		iconURL = fmt.Sprintf("%s/%s", client.ServerURL(), iconHash)
 		uploads = append(uploads, uploadItem{
-			data:       params.APKInfo.Icon,
+			data:       params.AssetInfo.Icon,
 			hash:       iconHash,
 			mimeType:   "image/png",
 			authEvent:  nostr.BuildBlossomAuthEvent(iconHash, params.Pubkey, expiration),

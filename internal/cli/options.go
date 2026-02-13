@@ -37,6 +37,7 @@ type PublishOptions struct {
 	Match         string
 
 	// Release-specific options (CLI-only, not in config)
+	Version string // Explicit version for the published asset (overrides auto-detection)
 	Commit  string // Git commit hash for reproducible builds
 	Channel string // Release channel: main (default), beta, nightly, dev
 
@@ -177,6 +178,7 @@ func parsePublishFlags(opts *Options, args []string) {
 	fs.StringVar(&opts.Publish.ReleaseSource, "s", "", "Release source URL (defaults to -r)")
 	fs.Var(&metadataFlags, "m", "Fetch metadata from source (repeatable: -m github -m fdroid)")
 	fs.StringVar(&opts.Publish.Match, "match", "", "Regex pattern to filter APK assets")
+	fs.StringVar(&opts.Publish.Version, "version", "", "Version for the published asset (overrides auto-detection)")
 	fs.StringVar(&opts.Publish.Commit, "commit", "", "Git commit hash for reproducible builds")
 	fs.StringVar(&opts.Publish.Channel, "channel", "main", "Release channel: main, beta, nightly, dev")
 	fs.BoolVar(&opts.Publish.Yes, "y", false, "Skip confirmations (auto-yes)")
@@ -202,7 +204,7 @@ func parsePublishFlags(opts *Options, args []string) {
 
 	// Reorder args to put flags before positional arguments
 	reorderedArgs := reorderArgsForFlagSet(args, map[string]bool{
-		"-r": true, "-s": true, "-m": true, "--match": true, "--commit": true, "--channel": true, "--port": true,
+		"-r": true, "-s": true, "-m": true, "--match": true, "--version": true, "--commit": true, "--channel": true, "--port": true,
 	})
 
 	if err := fs.Parse(reorderedArgs); err != nil {

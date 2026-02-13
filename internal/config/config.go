@@ -403,6 +403,12 @@ func isLocalPath(value string) bool {
 	if strings.HasSuffix(strings.ToLower(value), ".apk") && !strings.Contains(value, "://") {
 		return true
 	}
+	// Any existing file without URL scheme is a local path
+	if !strings.Contains(value, "://") {
+		if _, err := os.Stat(value); err == nil {
+			return true
+		}
+	}
 	return false
 }
 

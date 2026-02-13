@@ -36,7 +36,8 @@ func (l *Local) Type() config.SourceType {
 	return config.SourceLocal
 }
 
-// FetchLatestRelease finds local APK files matching the pattern.
+// FetchLatestRelease finds local asset files matching the pattern.
+// Accepts APK files and native executables (ELF, Mach-O).
 func (l *Local) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	// Resolve pattern relative to base directory if set
 	pattern := l.pattern
@@ -56,32 +57,20 @@ func (l *Local) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		if _, err := os.Stat(pattern); err == nil {
 			matches = []string{pattern}
 		} else {
-			return nil, fmt.Errorf("no APK files found matching %q", l.pattern)
+			return nil, fmt.Errorf("no files found matching %q", l.pattern)
 		}
-	}
-
-	// Filter to only .apk files
-	var apkFiles []string
-	for _, m := range matches {
-		if filepath.Ext(m) == ".apk" {
-			apkFiles = append(apkFiles, m)
-		}
-	}
-
-	if len(apkFiles) == 0 {
-		return nil, fmt.Errorf("no APK files found matching %q", l.pattern)
 	}
 
 	// Create assets from found files
-	assets := make([]*Asset, 0, len(apkFiles))
-	for _, path := range apkFiles {
+	assets := make([]*Asset, 0, len(matches))
+	for _, path := range matches {
 		absPath, err := filepath.Abs(path)
 		if err != nil {
 			absPath = path
 		}
 
 		fi, err := os.Stat(absPath)
-		if err != nil {
+		if err != nil || fi.IsDir() {
 			continue
 		}
 
@@ -93,12 +82,11 @@ func (l *Local) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	}
 
 	if len(assets) == 0 {
-		return nil, fmt.Errorf("no accessible APK files found matching %q", l.pattern)
+		return nil, fmt.Errorf("no accessible files found matching %q", l.pattern)
 	}
 
 	return &Release{
-		Version: "local",
-		Assets:  assets,
+		Assets: assets,
 	}, nil
 }
 
