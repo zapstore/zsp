@@ -1,21 +1,31 @@
 BINARY_NAME := zsp
 CMD_PATH := .
+DIST := dist
 
-.PHONY: all build build-linux-amd64 build-linux-arm64 clean test install fmt vet
+.PHONY: all build build-linux-amd64 build-linux-arm64 build-darwin-arm64 clean test install fmt vet
 
-all: build
-
+# Default: build for current arch only
 build:
 	go build -o $(BINARY_NAME) $(CMD_PATH)
 
-build-linux-amd64:
-	GOOS=linux GOARCH=amd64 go build -o $(BINARY_NAME)-linux-amd64 $(CMD_PATH)
+# Build all 3 arches into dist/
+all: $(DIST)/$(BINARY_NAME)-linux-amd64 $(DIST)/$(BINARY_NAME)-linux-arm64 $(DIST)/$(BINARY_NAME)-darwin-arm64
 
-build-linux-arm64:
-	GOOS=linux GOARCH=arm64 go build -o $(BINARY_NAME)-linux-arm64 $(CMD_PATH)
+$(DIST):
+	mkdir -p $(DIST)
+
+$(DIST)/$(BINARY_NAME)-linux-amd64: $(DIST)
+	GOOS=linux GOARCH=amd64 go build -o $@ $(CMD_PATH)
+
+$(DIST)/$(BINARY_NAME)-linux-arm64: $(DIST)
+	GOOS=linux GOARCH=arm64 go build -o $@ $(CMD_PATH)
+
+$(DIST)/$(BINARY_NAME)-darwin-arm64: $(DIST)
+	GOOS=darwin GOARCH=arm64 go build -o $@ $(CMD_PATH)
 
 clean:
-	rm -f $(BINARY_NAME) $(BINARY_NAME)-linux-amd64 $(BINARY_NAME)-linux-arm64
+	rm -f $(BINARY_NAME)
+	rm -rf $(DIST)
 	go clean
 
 test:
