@@ -38,9 +38,10 @@ type PublishOptions struct {
 	ConfigFile    string // Config file path (-c flag)
 
 	// Release-specific options (CLI-only, not in config)
-	Identifier string // Explicit app identifier (ignored for APKs which use package ID)
-	Version    string // Explicit version for the published asset (overrides auto-detection)
-	Commit     string // Git commit hash for reproducible builds
+	Identifier     string // Explicit app identifier (ignored for APKs which use package ID)
+	Version        string // Explicit version for the published asset (overrides auto-detection)
+	BinaryVersion  string // Version of the zsp binary (set by main; used as fallback when Version and release have none)
+	Commit         string // Git commit hash for reproducible builds
 	Channel    string // Release channel: main (default), beta, nightly, dev
 
 	// Behavior flags

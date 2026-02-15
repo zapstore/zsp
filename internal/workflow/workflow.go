@@ -441,6 +441,11 @@ func (p *Publisher) postParseValidation(ctx context.Context) error {
 		p.release.Version = p.opts.Publish.Version
 	}
 
+	// If still unknown, use the zsp binary's own version (from ldflags or Go build info) when it's a real version
+	if p.release.Version == "" && p.opts.Publish.BinaryVersion != "" && p.opts.Publish.BinaryVersion != "dev" {
+		p.release.Version = p.opts.Publish.BinaryVersion
+	}
+
 	// Version is required — fail if still unknown after all sources
 	if p.release.Version == "" {
 		return fmt.Errorf("could not determine version; use --version <version> to set it explicitly")

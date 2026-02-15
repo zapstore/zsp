@@ -150,6 +150,9 @@ func runPublishCommand(ctx context.Context, opts *cli.Options) int {
 		cfg.Match = opts.Publish.Match
 	}
 
+	// Use binary version as fallback when --version was not provided (workflow uses it only if no other source has a version)
+	opts.Publish.BinaryVersion = getVersion()
+
 	// Run the publish workflow
 	if err := runPublish(ctx, opts, cfg); err != nil {
 		if errors.Is(err, workflow.ErrNothingToDo) {
