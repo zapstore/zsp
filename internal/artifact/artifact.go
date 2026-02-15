@@ -5,6 +5,7 @@
 package artifact
 
 import (
+	"archive/zip"
 	"bytes"
 	"fmt"
 	"io"
@@ -181,32 +182,18 @@ func DetectMIMEType(path string) (string, error) {
 
 // isAPKFile checks whether a ZIP file is an Android APK by looking for AndroidManifest.xml.
 func isAPKFile(path string) bool {
-	f, err := os.Open(path)
+	r, err := zip.OpenReader(path)
 	if err != nil {
 		return false
 	}
-	defer f.Close()
+	defer r.Close()
 
-	fi, err := f.Stat()
-	if err != nil {
-		return false
+	for _, f := range r.File {
+		if f.Name == "AndroidManifest.xml" {
+			return true
+		}
 	}
-
-	// Read the central directory from the end of the ZIP.
-	// We scan a tail buffer for the AndroidManifest.xml filename.
-	// This avoids parsing the full ZIP for a quick heuristic check.
-	size := fi.Size()
-	bufSize := int64(4096)
-	if bufSize > size {
-		bufSize = size
-	}
-
-	buf := make([]byte, bufSize)
-	if _, err := f.ReadAt(buf, size-bufSize); err != nil && err != io.EOF {
-		return false
-	}
-
-	return bytes.Contains(buf, []byte("AndroidManifest.xml"))
+	return false
 }
 
 // ---------------------------------------------------------------------------
