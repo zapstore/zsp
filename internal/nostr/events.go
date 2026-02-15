@@ -416,11 +416,23 @@ func archToPlatform(arch string) string {
 	}
 }
 
+// AssetBuildParams holds per-asset parameters for building an event set with multiple assets.
+type AssetBuildParams struct {
+	Asset       *artifact.AssetInfo
+	OriginalURL string // Original download URL (from release source)
+	Variant     string // Explicit variant name (from config variants map)
+}
+
 // BuildEventSetParams contains parameters for building an event set.
 type BuildEventSetParams struct {
 	// Asset is the parsed asset metadata (preferred over APKInfo).
 	// When set, APKInfo is ignored.
+	// For single-asset publishing (backward compatible).
 	Asset *artifact.AssetInfo
+
+	// Assets holds multiple asset parameters for multi-asset publishing.
+	// When set, Asset/OriginalURL/Variant are ignored.
+	Assets []AssetBuildParams
 
 	// APKInfo is the legacy APK metadata. Deprecated: use Asset instead.
 	// Kept for backward compatibility during migration.
@@ -450,44 +462,52 @@ type BuildEventSetParams struct {
 
 // BuildEventSet creates all events for a software release.
 // Supports both APK and native executable assets via the Asset field.
+// Supports multi-asset publishing via the Assets field.
 // The Release event's asset references (e tags) are populated by SignEventSet
 // after the asset event is signed.
 func BuildEventSet(params BuildEventSetParams) *EventSet {
-	// Resolve asset info: prefer Asset (new path) over APKInfo (legacy path).
-	var ai *artifact.AssetInfo
-	if params.Asset != nil {
-		ai = params.Asset
-	} else if params.APKInfo != nil {
-		ai = artifact.FromAPKInfo(params.APKInfo)
-	} else {
-		return nil // No asset info provided
+	// Normalize to multi-asset path: if Assets is empty, populate from single-asset fields
+	assets := params.Assets
+	if len(assets) == 0 {
+		var ai *artifact.AssetInfo
+		if params.Asset != nil {
+			ai = params.Asset
+		} else if params.APKInfo != nil {
+			ai = artifact.FromAPKInfo(params.APKInfo)
+		}
+		if ai == nil {
+			return nil // No asset info provided
+		}
+		assets = []AssetBuildParams{{
+			Asset:       ai,
+			OriginalURL: params.OriginalURL,
+			Variant:     params.Variant,
+		}}
 	}
+
+	// Use the first asset as the "primary" for app-level metadata
+	primary := assets[0].Asset
 
 	cfg := params.Config
 	legacyFormat := params.LegacyFormat
 
-	// Determine app name
+	// Determine app name: config > identifier > filename
+	// For non-APK assets, prefer identifier over filename since filename
+	// often includes platform suffix (e.g., "myapp-linux-amd64").
 	name := cfg.Name
 	if name == "" {
-		name = ai.Name
+		if !primary.IsAPK() && primary.Identifier != "" {
+			name = primary.Identifier
+		} else {
+			name = primary.Name
+		}
 	}
 	if name == "" {
-		name = ai.Identifier
+		name = primary.Identifier
 	}
 
-	// Build asset URLs - include original URL and/or Blossom URL
-	var assetURLs []string
-	if params.OriginalURL != "" {
-		assetURLs = append(assetURLs, params.OriginalURL)
-	}
-	// Always include Blossom URL as fallback (or primary if no original URL)
-	if params.BlossomServer != "" && ai.SHA256 != "" {
-		blossomURL := params.BlossomServer + "/" + ai.SHA256
-		assetURLs = append(assetURLs, blossomURL)
-	}
-
-	// Use platforms from the parsed asset
-	platforms := ai.Platforms
+	// Collect all platforms across all assets for app metadata
+	allPlatforms := collectAllPlatforms(assets)
 
 	// Build NIP-34 repository pointer if available (new format only)
 	var nip34Repo, nip34Relay string
@@ -499,15 +519,15 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		}
 	}
 
-	// Determine version code (APK-only)
+	// Determine version code from primary asset (APK-only)
 	var versionCode int64
-	if ai.IsAPK() {
-		versionCode = ai.APK.VersionCode
+	if primary.IsAPK() {
+		versionCode = primary.APK.VersionCode
 	}
 
 	// Software Application event
 	appMeta := &AppMetadata{
-		PackageID:      ai.Identifier,
+		PackageID:      primary.Identifier,
 		Name:           name,
 		Description:    cfg.Description,
 		Summary:        cfg.Summary,
@@ -519,9 +539,9 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		Tags:           cfg.Tags,
 		IconURL:        params.IconURL,
 		ImageURLs:      params.ImageURLs,
-		Platforms:      platforms,
+		Platforms:      allPlatforms,
 		LegacyFormat:   legacyFormat,
-		ReleaseVersion: ai.Version, // For legacy a-tag pointing to release
+		ReleaseVersion: primary.Version, // For legacy a-tag pointing to release
 	}
 
 	// Determine release channel (default: main)
@@ -531,10 +551,10 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 	}
 
 	// Software Release event
-	// AssetEventIDs will be populated by SignEventSet after asset is signed
+	// AssetEventIDs will be populated by SignEventSet after assets are signed
 	releaseMeta := &ReleaseMetadata{
-		PackageID:     ai.Identifier,
-		Version:       ai.Version,
+		PackageID:     primary.Identifier,
+		Version:       primary.Version,
 		VersionCode:   versionCode,
 		Changelog:     params.Changelog,
 		Channel:       channel,
@@ -544,36 +564,59 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		Commit:        params.Commit,     // In legacy, commit goes on release not asset
 	}
 
-	// Build Software Asset metadata
-	assetMeta := &AssetMetadata{
-		Identifier:            ai.Identifier,
-		Version:               ai.Version,
-		VersionCode:           versionCode,
-		SHA256:                ai.SHA256,
-		Size:                  ai.FileSize,
-		URLs:                  assetURLs,
-		MIMEType:              ai.MIMEType,
-		Platforms:             platforms,
-		Filename:              filepath.Base(ai.FilePath),
-		Variant:               params.Variant,
-		Commit:                params.Commit, // In new format, commit is on asset
-		SupportedNIPs:         cfg.SupportedNIPs,
-		MinAllowedVersion:     cfg.MinAllowedVersion,
-		MinAllowedVersionCode: cfg.MinAllowedVersionCode,
-		LegacyFormat:          legacyFormat,
-	}
+	// Build Software Asset events for each asset
+	var softwareAssets []*nostr.Event
+	for _, ap := range assets {
+		ai := ap.Asset
 
-	// APK-specific fields
-	if ai.IsAPK() {
-		assetMeta.CertFingerprint = ai.APK.CertFingerprint
-		assetMeta.MinSDK = ai.APK.MinSDK
-		assetMeta.TargetSDK = ai.APK.TargetSDK
+		// Build asset URLs
+		var assetURLs []string
+		if ap.OriginalURL != "" {
+			assetURLs = append(assetURLs, ap.OriginalURL)
+		}
+		if params.BlossomServer != "" && ai.SHA256 != "" {
+			blossomURL := params.BlossomServer + "/" + ai.SHA256
+			assetURLs = append(assetURLs, blossomURL)
+		}
+
+		// Determine per-asset version code
+		var assetVersionCode int64
+		if ai.IsAPK() {
+			assetVersionCode = ai.APK.VersionCode
+		}
+
+		assetMeta := &AssetMetadata{
+			Identifier:            ai.Identifier,
+			Version:               ai.Version,
+			VersionCode:           assetVersionCode,
+			SHA256:                ai.SHA256,
+			Size:                  ai.FileSize,
+			URLs:                  assetURLs,
+			MIMEType:              ai.MIMEType,
+			Platforms:             ai.Platforms,
+			Filename:              filepath.Base(ai.FilePath),
+			Variant:               ap.Variant,
+			Commit:                params.Commit, // In new format, commit is on asset
+			SupportedNIPs:         cfg.SupportedNIPs,
+			MinAllowedVersion:     cfg.MinAllowedVersion,
+			MinAllowedVersionCode: cfg.MinAllowedVersionCode,
+			LegacyFormat:          legacyFormat,
+		}
+
+		// APK-specific fields
+		if ai.IsAPK() {
+			assetMeta.CertFingerprint = ai.APK.CertFingerprint
+			assetMeta.MinSDK = ai.APK.MinSDK
+			assetMeta.TargetSDK = ai.APK.TargetSDK
+		}
+
+		softwareAssets = append(softwareAssets, BuildSoftwareAssetEvent(assetMeta, params.Pubkey))
 	}
 
 	eventSet := &EventSet{
 		AppMetadata:    BuildAppMetadataEvent(appMeta, params.Pubkey),
 		Release:        BuildReleaseEvent(releaseMeta, params.Pubkey),
-		SoftwareAssets: []*nostr.Event{BuildSoftwareAssetEvent(assetMeta, params.Pubkey)},
+		SoftwareAssets: softwareAssets,
 	}
 
 	// If a release timestamp is provided, use it for release and asset events
@@ -603,6 +646,21 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 	}
 
 	return eventSet
+}
+
+// collectAllPlatforms returns deduplicated platforms across all assets.
+func collectAllPlatforms(assets []AssetBuildParams) []string {
+	seen := make(map[string]bool)
+	var platforms []string
+	for _, ap := range assets {
+		for _, p := range ap.Asset.Platforms {
+			if !seen[p] {
+				seen[p] = true
+				platforms = append(platforms, p)
+			}
+		}
+	}
+	return platforms
 }
 
 // AddAssetReference adds an asset event ID reference to the Release event.

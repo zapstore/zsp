@@ -36,27 +36,67 @@ type PreDownloadedImages struct {
 	Images []*DownloadedImage // Screenshots (from cfg.Images if remote URLs)
 }
 
+// VariantMatcher is a function that returns the variant name for an asset.
+type VariantMatcher func(ai *artifact.AssetInfo) string
+
 // UploadParams contains parameters for upload functions.
 type UploadParams struct {
 	Cfg                 *config.Config
-	AssetInfo           *artifact.AssetInfo
-	AssetPath           string
+	AssetInfos          []*artifact.AssetInfo // Multiple assets
+	AssetPaths          []string              // Local paths per asset
+	SelectedAssets      []*source.Asset       // Source assets (for URL info)
 	Release             *source.Release
 	Client              *blossom.Client
-	OriginalURL         string
 	BlossomServer       string
 	BatchSigner         nostr.BatchSigner
 	Signer              nostr.Signer
 	Pubkey              string
 	RelayHint           string
 	PreDownloaded       *PreDownloadedImages
-	Variant             string
+	VariantMatcher      VariantMatcher
 	Commit              string
 	Channel             string
 	Opts                *cli.Options
 	Legacy              bool
 	AppCreatedAtRelease bool
 	MinReleaseTimestamp time.Time // Bump Release.CreatedAt above this (--overwrite-release)
+
+	// Deprecated single-asset fields (for backward compat in tests)
+	AssetInfo   *artifact.AssetInfo
+	AssetPath   string
+	OriginalURL string
+	Variant     string
+}
+
+// resolvedAssetInfos returns the asset info list, falling back to single-asset field.
+func (p UploadParams) resolvedAssetInfos() []*artifact.AssetInfo {
+	if len(p.AssetInfos) > 0 {
+		return p.AssetInfos
+	}
+	if p.AssetInfo != nil {
+		return []*artifact.AssetInfo{p.AssetInfo}
+	}
+	return nil
+}
+
+// resolvedAssetPaths returns the asset path list, falling back to single-asset field.
+func (p UploadParams) resolvedAssetPaths() []string {
+	if len(p.AssetPaths) > 0 {
+		return p.AssetPaths
+	}
+	if p.AssetPath != "" {
+		return []string{p.AssetPath}
+	}
+	return nil
+}
+
+// primaryAssetInfo returns the first asset info.
+func (p UploadParams) primaryAssetInfo() *artifact.AssetInfo {
+	infos := p.resolvedAssetInfos()
+	if len(infos) > 0 {
+		return infos[0]
+	}
+	return nil
 }
 
 // uploadItem represents a file to upload with its auth event.
@@ -271,19 +311,29 @@ func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.Ev
 	imageURLs = append(imageURLs, imgURLs...)
 	uploads = append(uploads, imgUploads...)
 
-	// Add asset upload
-	uploads = append(uploads, uploadItem{
-		isAPK:     true, // reuse field name — means "is the main asset"
-		apkPath:   params.AssetPath,
-		hash:      params.AssetInfo.SHA256,
-		authEvent: nostr.BuildBlossomAuthEvent(params.AssetInfo.SHA256, params.Pubkey, expiration),
-	})
+	// Add asset uploads for each asset
+	assetInfos := params.resolvedAssetInfos()
+	assetPaths := params.resolvedAssetPaths()
+	for i, ai := range assetInfos {
+		uploads = append(uploads, uploadItem{
+			isAPK:     true, // reuse field name — means "is the main asset"
+			apkPath:   assetPaths[i],
+			hash:      ai.SHA256,
+			authEvent: nostr.BuildBlossomAuthEvent(ai.SHA256, params.Pubkey, expiration),
+		})
+	}
 
-	// Build main events
-	releaseNotes := params.Release.Changelog
+	// Build asset params for multi-asset event set
+	assetBuildParams := buildAssetBuildParams(params)
+
+	primary := params.primaryAssetInfo()
+	releaseNotes := ""
+	if params.Release != nil {
+		releaseNotes = params.Release.Changelog
+	}
 	if params.Cfg.ReleaseNotes != "" {
 		var err error
-		releaseNotes, err = source.FetchReleaseNotes(ctx, params.Cfg.ReleaseNotes, params.AssetInfo.Version, params.Cfg.BaseDir)
+		releaseNotes, err = source.FetchReleaseNotes(ctx, params.Cfg.ReleaseNotes, primary.Version, params.Cfg.BaseDir)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch release notes: %w", err)
 		}
@@ -297,15 +347,13 @@ func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.Ev
 	}
 
 	events := nostr.BuildEventSet(nostr.BuildEventSetParams{
-		Asset:                     params.AssetInfo,
+		Assets:                    assetBuildParams,
 		Config:                    params.Cfg,
 		Pubkey:                    params.Pubkey,
-		OriginalURL:               params.OriginalURL,
 		BlossomServer:             params.BlossomServer,
 		IconURL:                   iconURL,
 		ImageURLs:                 imageURLs,
 		Changelog:                 releaseNotes,
-		Variant:                   params.Variant,
 		Commit:                    params.Commit,
 		Channel:                   params.Channel,
 		ReleaseURL:                releaseURL,
@@ -357,6 +405,31 @@ func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.Ev
 	return events, nil
 }
 
+// buildAssetBuildParams creates AssetBuildParams from UploadParams.
+func buildAssetBuildParams(params UploadParams) []nostr.AssetBuildParams {
+	assetInfos := params.resolvedAssetInfos()
+	result := make([]nostr.AssetBuildParams, len(assetInfos))
+	for i, ai := range assetInfos {
+		originalURL := ""
+		variant := ""
+		if i < len(params.SelectedAssets) && params.SelectedAssets[i] != nil {
+			asset := params.SelectedAssets[i]
+			if !asset.ExcludeURL {
+				originalURL = asset.URL
+			}
+		}
+		if params.VariantMatcher != nil {
+			variant = params.VariantMatcher(ai)
+		}
+		result[i] = nostr.AssetBuildParams{
+			Asset:       ai,
+			OriginalURL: originalURL,
+			Variant:     variant,
+		}
+	}
+	return result
+}
+
 // UploadWithIndividualSigning handles uploads with regular signers.
 func UploadWithIndividualSigning(ctx context.Context, params UploadParams) (iconURL string, imageURLs []string, err error) {
 	// Process icon
@@ -381,9 +454,13 @@ func UploadWithIndividualSigning(ctx context.Context, params UploadParams) (icon
 	}
 	imageURLs = append(imageURLs, urls...)
 
-	// Upload APK
-	if err := uploadAPK(ctx, params); err != nil {
-		return "", nil, err
+	// Upload all assets
+	assetInfos := params.resolvedAssetInfos()
+	assetPaths := params.resolvedAssetPaths()
+	for i, ai := range assetInfos {
+		if err := uploadAsset(ctx, params, ai, assetPaths[i]); err != nil {
+			return "", nil, err
+		}
 	}
 
 	return iconURL, imageURLs, nil
@@ -419,8 +496,9 @@ func uploadIcon(ctx context.Context, params UploadParams) (string, error) {
 	}
 
 	// Asset-embedded icon (APKs may embed icons)
-	if params.AssetInfo != nil && params.AssetInfo.Icon != nil {
-		return uploadAPKIcon(ctx, client, signer, params.AssetInfo.Icon, opts)
+	primary := params.primaryAssetInfo()
+	if primary != nil && primary.Icon != nil {
+		return uploadAPKIcon(ctx, client, signer, primary.Icon, opts)
 	}
 
 	return "", nil
@@ -707,17 +785,17 @@ func uploadLocalImage(ctx context.Context, client *blossom.Client, signer nostr.
 	return result.URL, nil
 }
 
-// uploadAPK uploads the asset file to Blossom.
-func uploadAPK(ctx context.Context, params UploadParams) error {
-	label := "asset"
-	if params.AssetInfo.IsAPK() {
-		label = "APK"
+// uploadAsset uploads a single asset file to Blossom.
+func uploadAsset(ctx context.Context, params UploadParams, ai *artifact.AssetInfo, assetPath string) error {
+	label := filepath.Base(assetPath)
+	if ai.IsAPK() {
+		label = "APK " + label
 	}
 
 	var tracker *ui.DownloadTracker
 	var uploadCallback func(uploaded, total int64)
 	if params.Opts.Publish.ShouldShowSpinners() {
-		fileInfo, _ := os.Stat(params.AssetPath)
+		fileInfo, _ := os.Stat(assetPath)
 		var size int64
 		if fileInfo != nil {
 			size = fileInfo.Size()
@@ -726,7 +804,7 @@ func uploadAPK(ctx context.Context, params UploadParams) error {
 		uploadCallback = tracker.Callback()
 	}
 
-	result, err := params.Client.Upload(ctx, params.AssetPath, params.AssetInfo.SHA256, params.Signer, uploadCallback)
+	result, err := params.Client.Upload(ctx, assetPath, ai.SHA256, params.Signer, uploadCallback)
 	if err != nil {
 		return fmt.Errorf("failed to upload %s: %w", label, err)
 	}
@@ -796,12 +874,13 @@ func collectIconUpload(ctx context.Context, params UploadParams, expiration time
 		return iconURL, uploads
 	}
 
-	if params.AssetInfo != nil && params.AssetInfo.Icon != nil {
-		hash := sha256.Sum256(params.AssetInfo.Icon)
+	primary := params.primaryAssetInfo()
+	if primary != nil && primary.Icon != nil {
+		hash := sha256.Sum256(primary.Icon)
 		iconHash := hex.EncodeToString(hash[:])
 		iconURL = fmt.Sprintf("%s/%s", client.ServerURL(), iconHash)
 		uploads = append(uploads, uploadItem{
-			data:       params.AssetInfo.Icon,
+			data:       primary.Icon,
 			hash:       iconHash,
 			mimeType:   "image/png",
 			authEvent:  nostr.BuildBlossomAuthEvent(iconHash, params.Pubkey, expiration),

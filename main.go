@@ -253,7 +253,9 @@ func loadConfig(opts *cli.PublishOptions, args []string) (*config.Config, error)
 		}
 		var defaults *config.Config
 		configPath := "zapstore.yaml"
-		if len(args) > 0 && isYAMLFile(args[0]) {
+		if opts.ConfigFile != "" {
+			configPath = opts.ConfigFile
+		} else if len(args) > 0 && isYAMLFile(args[0]) {
 			configPath = args[0]
 		}
 		if cfg, err := config.Load(configPath); err == nil {
@@ -264,28 +266,34 @@ func loadConfig(opts *cli.PublishOptions, args []string) (*config.Config, error)
 		})
 	}
 
-	// Quick mode with APK file as positional argument
-	if len(args) > 0 && strings.HasSuffix(strings.ToLower(args[0]), ".apk") {
-		return loadLocalAssetConfig(opts, args[0])
+	// -c flag: load config from explicit path, positional args are asset files
+	if opts.ConfigFile != "" {
+		cfg, err := config.Load(opts.ConfigFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load config %s: %w", opts.ConfigFile, err)
+		}
+		// If positional args are present, they are local asset files
+		if len(args) > 0 {
+			cfg.LocalAssetFiles = args
+		}
+		return cfg, nil
 	}
 
 	// Quick mode with -r flag only (no APK/binary)
-	if opts.RepoURL != "" {
+	if len(args) == 0 && opts.RepoURL != "" {
 		return loadRepoConfig(opts)
 	}
 
-	// YAML config file as positional argument
-	if len(args) > 0 && isYAMLFile(args[0]) {
+	// YAML config file as positional argument (single arg, must be YAML)
+	if len(args) == 1 && isYAMLFile(args[0]) {
 		return config.Load(args[0])
 	}
 
-	// Local binary file as positional argument (detect via existence on disk)
+	// Local file(s) as positional arguments
+	// Single file: `zsp publish app.apk` or `zsp publish ./mybinary`
+	// Multiple files: `zsp publish build/*` or `zsp publish a.apk b.apk c.apk`
 	if len(args) > 0 {
-		if _, err := os.Stat(args[0]); err == nil {
-			return loadLocalAssetConfig(opts, args[0])
-		}
-		// File doesn't exist — give a clear error
-		return nil, fmt.Errorf("file not found: %s", args[0])
+		return loadLocalAssetFilesConfig(opts, args)
 	}
 
 	// Check for stdin
@@ -301,7 +309,7 @@ func loadConfig(opts *cli.PublishOptions, args []string) (*config.Config, error)
 
 	// Launch interactive wizard
 	if opts.Quiet {
-		return nil, fmt.Errorf("no configuration provided. Use 'zsp publish <config.yaml>' or 'zsp publish -r <repo-url>'")
+		return nil, fmt.Errorf("no configuration provided. Use 'zsp publish -c <config.yaml>' or 'zsp publish -r <repo-url>'")
 	}
 
 	return config.RunWizardWithOptions(nil, config.WizardOptions{
@@ -381,11 +389,25 @@ func fetchAPKInfoForWizard(cfg *config.Config, matchPattern string) *config.APKB
 	}
 }
 
-// loadLocalAssetConfig creates config from a local asset path (APK or native binary)
-// with optional -r and -s flags.
-func loadLocalAssetConfig(opts *cli.PublishOptions, assetPath string) (*config.Config, error) {
-	cfg := &config.Config{
-		ReleaseSource: &config.ReleaseSource{LocalPath: assetPath},
+// loadLocalAssetFilesConfig creates config from one or more local asset files.
+// For a single file, uses the legacy ReleaseSource.LocalPath for backward compat.
+// For multiple files, populates LocalAssetFiles.
+func loadLocalAssetFilesConfig(opts *cli.PublishOptions, args []string) (*config.Config, error) {
+	// Validate all files exist
+	for _, arg := range args {
+		if _, err := os.Stat(arg); err != nil {
+			return nil, fmt.Errorf("file not found: %s", arg)
+		}
+	}
+
+	cfg := &config.Config{}
+
+	if len(args) == 1 {
+		// Single file: use legacy local path (backward compat)
+		cfg.ReleaseSource = &config.ReleaseSource{LocalPath: args[0]}
+	} else {
+		// Multiple files: use LocalAssetFiles
+		cfg.LocalAssetFiles = args
 	}
 
 	if opts.RepoURL != "" {

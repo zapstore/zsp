@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
+	"github.com/zapstore/zsp/internal/artifact"
 	"github.com/zapstore/zsp/internal/cli"
 	"github.com/zapstore/zsp/internal/nostr"
 	"github.com/zapstore/zsp/internal/picker"
@@ -99,6 +101,41 @@ func selectAssetInteractive(ranked []picker.ScoredAsset) (*source.Asset, error) 
 	return ranked[idx].Asset, nil
 }
 
+// selectAssetsInteractive prompts the user to select one or more assets.
+// Top-ranked assets are pre-selected.
+func selectAssetsInteractive(ranked []picker.ScoredAsset) ([]*source.Asset, error) {
+	ui.PrintSectionHeader("Select Assets")
+	fmt.Printf("  %s\n", ui.Dim("Select assets to publish. Space to toggle, Enter to confirm."))
+
+	options := make([]string, len(ranked))
+	for i, sa := range ranked {
+		sizeStr := ""
+		if sa.Asset.Size > 0 {
+			sizeMB := float64(sa.Asset.Size) / (1024 * 1024)
+			sizeStr = fmt.Sprintf(" (%.1f MB)", sizeMB)
+		}
+		options[i] = fmt.Sprintf("%s%s", sa.Asset.Name, sizeStr)
+	}
+
+	// Pre-select the top-ranked asset
+	preselected := []int{0}
+
+	indices, err := ui.SelectMultipleWithDefaults("", options, preselected)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(indices) == 0 {
+		return nil, fmt.Errorf("no assets selected")
+	}
+
+	result := make([]*source.Asset, len(indices))
+	for i, idx := range indices {
+		result[i] = ranked[idx].Asset
+	}
+	return result, nil
+}
+
 // confirmHash asks the user to confirm the file hash they just signed.
 func confirmHash(sha256Hash string, isClosedSource bool, isLegacy bool) (bool, error) {
 	kindStr := "3063"
@@ -124,6 +161,37 @@ func confirmHash(sha256Hash string, isClosedSource bool, isLegacy bool) (bool, e
 	}
 
 	return ui.Confirm("Confirm hash is correct?", false)
+}
+
+// confirmHashes asks the user to confirm file hashes for one or more assets.
+func confirmHashes(assetInfos []*artifact.AssetInfo, assetPaths []string, isClosedSource bool, isLegacy bool) (bool, error) {
+	// Single asset: use original format
+	if len(assetInfos) == 1 {
+		return confirmHash(assetInfos[0].SHA256, isClosedSource, isLegacy)
+	}
+
+	kindStr := "3063"
+	if isLegacy {
+		kindStr = "1063"
+	}
+
+	fmt.Println()
+	ui.PrintWarning(fmt.Sprintf("You just signed events attesting to these file hashes (kind %s):", kindStr))
+	fmt.Println()
+	for i, ai := range assetInfos {
+		filename := filepath.Base(assetPaths[i])
+		fmt.Printf("  %s  %s\n", ui.Bold(ai.SHA256), filename)
+	}
+	fmt.Println()
+	fmt.Printf("  %s\n", ui.Bold("Make sure they match the files you intend to distribute."))
+	fmt.Println()
+
+	if isClosedSource {
+		ui.PrintWarning("This application has no repository (closed source).")
+		fmt.Println()
+	}
+
+	return ui.Confirm("Confirm hashes are correct?", false)
 }
 
 // confirmPublish shows a pre-publish summary and asks for confirmation.
@@ -160,7 +228,11 @@ func confirmPublish(events *nostr.EventSet, relayURLs []string) (bool, error) {
 
 	ui.PrintSectionHeader("Ready to Publish")
 	fmt.Printf("  App: %s v%s\n", packageID, version)
-	fmt.Printf("  Events: Kind 32267 (App) + Kind 30063 (Release) + Kind %s (Asset)\n", assetKind)
+	assetStr := fmt.Sprintf("Kind %s (Asset)", assetKind)
+	if len(events.SoftwareAssets) > 1 {
+		assetStr = fmt.Sprintf("Kind %s (Assets x%d)", assetKind, len(events.SoftwareAssets))
+	}
+	fmt.Printf("  Events: Kind 32267 (App) + Kind 30063 (Release) + %s\n", assetStr)
 	fmt.Printf("  Target: %s\n", strings.Join(relayURLs, ", "))
 	fmt.Println()
 

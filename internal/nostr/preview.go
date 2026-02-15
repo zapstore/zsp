@@ -165,53 +165,76 @@ func BuildPreviewDataFromAPKs(apkInfos []*apk.APKInfo, cfg *config.Config, chang
 // BuildPreviewDataFromAsset creates preview data from an AssetInfo and config.
 // Works for all asset types (APK, Mach-O, ELF, etc.) without requiring apk.APKInfo.
 func BuildPreviewDataFromAsset(asset *artifact.AssetInfo, cfg *config.Config, changelog string, blossomURL string, relayURLs []string) *PreviewData {
-	if asset == nil {
+	return BuildPreviewDataFromAssets([]*artifact.AssetInfo{asset}, cfg, changelog, blossomURL, relayURLs)
+}
+
+// BuildPreviewDataFromAssets creates preview data from multiple assets.
+func BuildPreviewDataFromAssets(assets []*artifact.AssetInfo, cfg *config.Config, changelog string, blossomURL string, relayURLs []string) *PreviewData {
+	if len(assets) == 0 || assets[0] == nil {
 		return nil
 	}
 
+	primary := assets[0]
+
 	name := cfg.Name
 	if name == "" {
-		name = asset.Name
+		if !primary.IsAPK() && primary.Identifier != "" {
+			name = primary.Identifier
+		} else {
+			name = primary.Name
+		}
 	}
 	if name == "" {
-		name = asset.Identifier
+		name = primary.Identifier
 	}
 
-	// Build asset preview data
-	assetPreview := AssetPreviewData{
-		SHA256:    asset.SHA256,
-		FileSize:  asset.FileSize,
-		Filename:  filepath.Base(asset.FilePath),
-		Platforms: asset.Platforms,
-	}
-	if asset.IsAPK() {
-		assetPreview.CertFingerprint = asset.APK.CertFingerprint
-		assetPreview.MinSDK = asset.APK.MinSDK
-		assetPreview.TargetSDK = asset.APK.TargetSDK
+	// Build asset preview data for all assets
+	var assetPreviews []AssetPreviewData
+	var allPlatforms []string
+	seen := make(map[string]bool)
+	for _, asset := range assets {
+		ap := AssetPreviewData{
+			SHA256:    asset.SHA256,
+			FileSize:  asset.FileSize,
+			Filename:  filepath.Base(asset.FilePath),
+			Platforms: asset.Platforms,
+		}
+		if asset.IsAPK() {
+			ap.CertFingerprint = asset.APK.CertFingerprint
+			ap.MinSDK = asset.APK.MinSDK
+			ap.TargetSDK = asset.APK.TargetSDK
+		}
+		assetPreviews = append(assetPreviews, ap)
+		for _, p := range asset.Platforms {
+			if !seen[p] {
+				seen[p] = true
+				allPlatforms = append(allPlatforms, p)
+			}
+		}
 	}
 
 	var versionCode int64
-	if asset.IsAPK() {
-		versionCode = asset.APK.VersionCode
+	if primary.IsAPK() {
+		versionCode = primary.APK.VersionCode
 	}
 
 	return &PreviewData{
 		AppName:       name,
-		PackageID:     asset.Identifier,
+		PackageID:     primary.Identifier,
 		Summary:       cfg.Summary,
 		Description:   cfg.Description,
 		Website:       cfg.Website,
 		Repository:    cfg.Repository,
 		License:       cfg.License,
 		Tags:          cfg.Tags,
-		IconData:      asset.Icon,
+		IconData:      primary.Icon,
 		ImageURLs:     cfg.Images,
-		Platforms:     asset.Platforms,
-		Version:       asset.Version,
+		Platforms:     allPlatforms,
+		Version:       primary.Version,
 		VersionCode:   versionCode,
 		Channel:       "main",
 		Changelog:     changelog,
-		Assets:        []AssetPreviewData{assetPreview},
+		Assets:        assetPreviews,
 		BlossomServer: blossomURL,
 		RelayURLs:     relayURLs,
 	}
@@ -419,10 +442,10 @@ func (s *PreviewServer) buildHTML() string {
 
 	// Build assets HTML
 	assetsHTML := ""
-	for i, asset := range d.Assets {
-		assetNum := ""
-		if len(d.Assets) > 1 {
-			assetNum = fmt.Sprintf(" %d", i+1)
+	for _, asset := range d.Assets {
+		assetTitle := "Asset"
+		if asset.Filename != "" {
+			assetTitle = asset.Filename
 		}
 
 		// Common fields: SHA256, File Size, Platforms
@@ -473,11 +496,11 @@ func (s *PreviewServer) buildHTML() string {
 
 		assetsHTML += fmt.Sprintf(`
     <div class="section">
-      <h2>Asset%s</h2>
+      <h2>%s</h2>
       <div class="asset-grid">%s
       </div>
     </div>`,
-			assetNum,
+			html.EscapeString(assetTitle),
 			assetItems,
 		)
 	}

@@ -35,11 +35,13 @@ type PublishOptions struct {
 	ReleaseSource string
 	Metadata      []string
 	Match         string
+	ConfigFile    string // Config file path (-c flag)
 
 	// Release-specific options (CLI-only, not in config)
-	Version string // Explicit version for the published asset (overrides auto-detection)
-	Commit  string // Git commit hash for reproducible builds
-	Channel string // Release channel: main (default), beta, nightly, dev
+	Identifier string // Explicit app identifier (ignored for APKs which use package ID)
+	Version    string // Explicit version for the published asset (overrides auto-detection)
+	Commit     string // Git commit hash for reproducible builds
+	Channel    string // Release channel: main (default), beta, nightly, dev
 
 	// Behavior flags
 	Yes                 bool
@@ -174,10 +176,12 @@ func parsePublishFlags(opts *Options, args []string) {
 
 	var metadataFlags stringSliceFlag
 
+	fs.StringVar(&opts.Publish.ConfigFile, "c", "", "Config file path (positional args become asset files)")
 	fs.StringVar(&opts.Publish.RepoURL, "r", "", "Repository URL (GitHub/GitLab/F-Droid)")
 	fs.StringVar(&opts.Publish.ReleaseSource, "s", "", "Release source URL (defaults to -r)")
 	fs.Var(&metadataFlags, "m", "Fetch metadata from source (repeatable: -m github -m fdroid)")
-	fs.StringVar(&opts.Publish.Match, "match", "", "Regex pattern to filter APK assets")
+	fs.StringVar(&opts.Publish.Match, "match", "", "Regex pattern to filter assets")
+	fs.StringVar(&opts.Publish.Identifier, "id", "", "App identifier for executables (ignored for APKs)")
 	fs.StringVar(&opts.Publish.Version, "version", "", "Version for the published asset (overrides auto-detection)")
 	fs.StringVar(&opts.Publish.Commit, "commit", "", "Git commit hash for reproducible builds")
 	fs.StringVar(&opts.Publish.Channel, "channel", "main", "Release channel: main, beta, nightly, dev")
@@ -204,7 +208,7 @@ func parsePublishFlags(opts *Options, args []string) {
 
 	// Reorder args to put flags before positional arguments
 	reorderedArgs := reorderArgsForFlagSet(args, map[string]bool{
-		"-r": true, "-s": true, "-m": true, "--match": true, "--version": true, "--commit": true, "--channel": true, "--port": true,
+		"-c": true, "-r": true, "-s": true, "-m": true, "--match": true, "--id": true, "--version": true, "--commit": true, "--channel": true, "--port": true,
 	})
 
 	if err := fs.Parse(reorderedArgs); err != nil {

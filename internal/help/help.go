@@ -63,20 +63,21 @@ func RootHelp() string {
 	var b strings.Builder
 
 	b.WriteString(ui.RenderLogo())
-	b.WriteString(renderWhite("Publish Android apps to Nostr relays used by Zapstore") + "\n")
+	b.WriteString(renderWhite("Publish apps and executables to Nostr relays used by Zapstore") + "\n")
 
 	b.WriteString(renderPurpleBold("USAGE") + "\n")
 	b.WriteString("  " + renderGreen("zsp") + " <command> [options]\n\n")
 
 	b.WriteString(renderPurpleBold("COMMANDS") + "\n")
-	b.WriteString("  " + renderGreen("publish") + "     " + renderWhite("Publish APK releases to Nostr relays") + "\n")
+	b.WriteString("  " + renderGreen("publish") + "     " + renderWhite("Publish releases to Nostr relays") + "\n")
 	b.WriteString("  " + renderGreen("identity") + "    " + renderWhite("Manage cryptographic identity proofs (NIP-C1)") + "\n")
 	b.WriteString("  " + renderGreen("apk") + "         " + renderWhite("APK utility commands (extract metadata)") + "\n\n")
 
 	b.WriteString(renderPurpleBold("EXAMPLES") + "\n")
 	writeExample(&b, "zsp publish --wizard", "Interactive wizard (recommended for first-time setup)")
-	writeExample(&b, "zsp publish config.yaml", "Publish from config file")
+	writeExample(&b, "zsp publish -c zapstore.yaml", "Publish from config file")
 	writeExample(&b, "zsp publish app.apk", "Publish local APK")
+	writeExample(&b, "zsp publish build/*", "Publish multiple executables at once")
 	writeExample(&b, "zsp publish -r github.com/org/repo", "Fetch and publish from GitHub (open source)")
 	writeExample(&b, "zsp publish -s github.com/user/app", "Closed-source (releases only, no source code)")
 	writeExample(&b, "zsp publish ./tool --version 1.0.0", "Publish local CLI executable with version")
@@ -109,29 +110,35 @@ func PublishHelp() string {
 	var b strings.Builder
 
 	b.WriteString(ui.RenderLogo())
-	b.WriteString(renderGreenBold("zsp publish") + " " + renderWhite("- Publish APK releases to Nostr relays") + "\n")
+	b.WriteString(renderGreenBold("zsp publish") + " " + renderWhite("- Publish releases to Nostr relays") + "\n")
 	b.WriteString("\n")
 
 	b.WriteString(renderPurpleBold("USAGE") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish") + " [options] [config.yaml | app.apk]\n\n")
+	b.WriteString("  " + renderGreen("zsp publish") + " [options] [file ...]\n")
+	b.WriteString("  " + renderGreen("zsp publish") + " -c <config.yaml> [file ...]\n\n")
 
 	b.WriteString(renderGreyDark("  With no arguments, runs the interactive wizard (unless zapstore.yaml exists).") + "\n")
-	b.WriteString(renderGreyDark("  With a config file, publishes according to that configuration.") + "\n")
-	b.WriteString(renderGreyDark("  With an APK file, publishes that APK directly.") + "\n\n")
+	b.WriteString(renderGreyDark("  With file arguments, publishes those local files (APKs or executables).") + "\n")
+	b.WriteString(renderGreyDark("  With -c, loads config and treats remaining args as asset files.") + "\n")
+	b.WriteString(renderGreyDark("  Multiple files create a single release with multiple assets.") + "\n\n")
 
 	// Source flags
 	b.WriteString(renderPurpleBold("SOURCE FLAGS") + "\n")
+	writeFlag(&b, "-c <config.yaml>", "Config file path (positional args become asset files)")
 	writeFlag(&b, "-r <url>", "Source code repository URL (GitHub/GitLab/Codeberg/Gitea)")
 	b.WriteString("                            " + renderGreyDark("Also fetches releases from here unless -s is specified") + "\n")
 	writeFlag(&b, "-s <url>", "Release/download source URL (F-Droid, web page, etc)")
 	b.WriteString("                            " + renderGreyDark("Use alone (no -r) for closed-source apps") + "\n")
 	writeFlag(&b, "-m <source>", "Fetch metadata from source (repeatable: -m github -m fdroid)")
 	b.WriteString("                            " + renderGreyDark("Fetched automatically for new releases") + "\n")
-	writeFlag(&b, "--match <pattern>", "Regex pattern to filter APK assets (rarely needed)")
+	writeFlag(&b, "--match <pattern>", "Regex pattern to filter assets")
+	b.WriteString("                            " + renderGreyDark("In non-interactive mode, selects all matches") + "\n")
 	b.WriteString("\n")
 
 	// Release-specific flags (CLI only)
 	b.WriteString(renderPurpleBold("RELEASE FLAGS") + "\n")
+	writeFlag(&b, "--id <identifier>", "App identifier for executables (ignored for APKs)")
+	b.WriteString("                            " + renderGreyDark("Default: slugified filename (e.g., my-tool from ./my-tool)") + "\n")
 	writeFlag(&b, "--version <version>", "Version for the published asset (overrides auto-detection)")
 	b.WriteString("                            " + renderGreyDark("Required for CLI executables when version can't be auto-detected") + "\n")
 	writeFlag(&b, "--commit <hash>", "Git commit hash for reproducible builds")
@@ -174,13 +181,25 @@ func PublishHelp() string {
 	b.WriteString("  " + renderGreen("zsp publish --wizard") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Publish from config file") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish zapstore.yaml") + "\n\n")
+	b.WriteString("  " + renderGreen("zsp publish -c zapstore.yaml") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Publish local APK with repository metadata") + "\n")
 	b.WriteString("  " + renderGreen("zsp publish app-release.apk -r github.com/user/app") + "\n\n")
 
+	b.WriteString(renderGreyDark("  # Publish multiple local executables (multi-platform release)") + "\n")
+	b.WriteString("  " + renderGreen("zsp publish build/* --version 1.0.0 -r github.com/user/tool") + "\n\n")
+
+	b.WriteString(renderGreyDark("  # Multi-platform with config (metadata, screenshots, etc.)") + "\n")
+	b.WriteString("  " + renderGreen("zsp publish -c zapstore.yaml dist/app-linux-amd64 dist/app-darwin-arm64") + "\n\n")
+
+	b.WriteString(renderGreyDark("  # Publish multiple APK variants with config") + "\n")
+	b.WriteString("  " + renderGreen("zsp publish -c zapstore.yaml build/app-fdroid.apk build/app-google.apk") + "\n\n")
+
 	b.WriteString(renderGreyDark("  # Fetch latest release from GitHub and publish") + "\n")
 	b.WriteString("  " + renderGreen("zsp publish -r github.com/AeonBTC/mempal") + "\n\n")
+
+	b.WriteString(renderGreyDark("  # Remote release with --match to select multiple assets") + "\n")
+	b.WriteString("  " + renderGreen("zsp publish -c zapstore.yaml --match 'myapp-(linux|darwin)-.*' -y") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Closed-source app (releases on GitHub, but no source code)") + "\n")
 	b.WriteString("  " + renderGreen("zsp publish -s github.com/user/app -m playstore") + "\n\n")
@@ -189,19 +208,19 @@ func PublishHelp() string {
 	b.WriteString("  " + renderGreen("zsp publish -r github.com/user/app -s f-droid.org/packages/com.example") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Offline mode - sign events, output to stdout, defer upload/publish") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish zapstore.yaml --offline > events.json") + "\n\n")
+	b.WriteString("  " + renderGreen("zsp publish -c zapstore.yaml --offline > events.json") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Pipe signed events directly to nak for publishing (use -q for clean output)") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish -q zapstore.yaml --offline | nak event wss://relay.zapstore.dev") + "\n\n")
+	b.WriteString("  " + renderGreen("zsp publish -q -c zapstore.yaml --offline | nak event wss://relay.zapstore.dev") + "\n\n")
 
-	b.WriteString(renderGreyDark("  # Publish a CLI executable with explicit version") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish ./my-tool --version 1.5.0 -r github.com/user/my-tool") + "\n\n")
+	b.WriteString(renderGreyDark("  # Publish a CLI executable with explicit version and identifier") + "\n")
+	b.WriteString("  " + renderGreen("zsp publish ./my-tool --id my-tool --version 1.5.0 -r github.com/user/my-tool") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # CI/CD mode - no prompts, auto-confirm") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish -y zapstore.yaml") + "\n\n")
+	b.WriteString("  " + renderGreen("zsp publish -y -c zapstore.yaml") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Force re-publish even if unchanged") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish zapstore.yaml --overwrite-release") + "\n\n")
+	b.WriteString("  " + renderGreen("zsp publish -c zapstore.yaml --overwrite-release") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Validate config fetches correct APK (CI/CD)") + "\n")
 	b.WriteString("  " + renderGreen("zsp publish --check zapstore.yaml") + "\n\n")

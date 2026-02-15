@@ -72,6 +72,10 @@ type Config struct {
 	// BaseDir is the directory containing the config file (for relative paths).
 	// Not parsed from YAML, set by Load().
 	BaseDir string `yaml:"-"`
+
+	// LocalAssetFiles holds explicit local file paths passed as positional args
+	// when using -c flag. Not parsed from YAML, set by loadConfig().
+	LocalAssetFiles []string `yaml:"-"`
 }
 
 // NIP34RepoPointer represents a parsed NIP-34 repository naddr.
@@ -414,7 +418,8 @@ func isLocalPath(value string) bool {
 
 // Validate checks if the config has required fields and valid URLs.
 func (c *Config) Validate() error {
-	if c.Repository == "" && c.ReleaseSource == nil {
+	// LocalAssetFiles bypass the need for repository/release_source
+	if c.Repository == "" && c.ReleaseSource == nil && len(c.LocalAssetFiles) == 0 {
 		return fmt.Errorf("no source specified: need 'repository' or 'release_source'")
 	}
 
