@@ -11,52 +11,50 @@ import (
 	"github.com/zapstore/zsp/internal/ui"
 )
 
-// Color palette: green, dark purple, greyscale
-var (
-	// Green tones
-	green = lipgloss.Color("35") // Green
-
-	// Purple tones
-	purple = lipgloss.Color("54") // Dark purple
-
-	// Greyscale
-	grey     = lipgloss.Color("245")
-	greyDark = lipgloss.Color("242")
-	white    = lipgloss.Color("252")
-)
-
-// Render functions that don't add extra whitespace
-func renderGreen(s string) string {
-	return lipgloss.NewStyle().Foreground(green).Render(s)
+// Semantic color helpers using the design-guide palette (from ui.Color*).
+// Falls back to plain text when ui.NoColor is true.
+func renderAccent(s string) string {
+	return lipgloss.NewStyle().Foreground(ui.ColorAccent).Bold(true).Render(s)
 }
 
-func renderPurple(s string) string {
-	return lipgloss.NewStyle().Foreground(purple).Render(s)
+func renderAccentPlain(s string) string {
+	return lipgloss.NewStyle().Foreground(ui.ColorAccent).Render(s)
 }
 
-func renderPurpleBold(s string) string {
-	return lipgloss.NewStyle().Foreground(purple).Bold(true).Render(s)
+func renderSuccess(s string) string {
+	return lipgloss.NewStyle().Foreground(ui.ColorSuccess).Render(s)
 }
 
-func renderGreenBold(s string) string {
-	return lipgloss.NewStyle().Foreground(green).Bold(true).Render(s)
+func renderSuccessBold(s string) string {
+	return lipgloss.NewStyle().Foreground(ui.ColorSuccess).Bold(true).Render(s)
 }
 
-func renderWhite(s string) string {
-	return lipgloss.NewStyle().Foreground(white).Render(s)
+func renderInfo(s string) string {
+	return lipgloss.NewStyle().Foreground(ui.ColorInfo).Render(s)
 }
 
-func renderGrey(s string) string {
-	return lipgloss.NewStyle().Foreground(grey).Render(s)
+func renderDim(s string) string {
+	return lipgloss.NewStyle().Foreground(ui.ColorDim).Render(s)
 }
 
-func renderGreyDark(s string) string {
-	return lipgloss.NewStyle().Foreground(greyDark).Render(s)
+func renderDimDark(s string) string {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("#555566")).Render(s)
 }
 
 func renderURL(s string) string {
-	return lipgloss.NewStyle().Foreground(green).Underline(true).Render(s)
+	return lipgloss.NewStyle().Foreground(ui.ColorInfo).Underline(true).Render(s)
 }
+
+// Aliases for the help text (accent = section headings, success = commands/flags, dim = examples).
+var (
+	renderGreen     = renderSuccess
+	renderPurple    = renderAccentPlain
+	renderPurpleBold = renderAccent
+	renderGreenBold  = renderSuccessBold
+	renderWhite      = renderInfo
+	renderGrey       = renderDim
+	renderGreyDark   = renderDimDark
+)
 
 // RootHelp returns the top-level --help output.
 func RootHelp() string {
@@ -69,9 +67,9 @@ func RootHelp() string {
 	b.WriteString("  " + renderGreen("zsp") + " <command> [options]\n\n")
 
 	b.WriteString(renderPurpleBold("COMMANDS") + "\n")
-	b.WriteString("  " + renderGreen("publish") + "     " + renderWhite("Publish releases to Nostr relays") + "\n")
-	b.WriteString("  " + renderGreen("identity") + "    " + renderWhite("Manage cryptographic identity proofs (NIP-C1)") + "\n")
-	b.WriteString("  " + renderGreen("apk") + "         " + renderWhite("APK utility commands (extract metadata)") + "\n\n")
+	b.WriteString("  " + renderGreen("publish") + "         " + renderWhite("Publish releases to Nostr relays") + "\n")
+	b.WriteString("  " + renderGreen("link-identity") + "   " + renderWhite("Manage cryptographic identity proofs (NIP-C1)") + "\n")
+	b.WriteString("  " + renderGreen("extract") + "         " + renderWhite("Extract APK metadata as JSON") + "\n\n")
 
 	b.WriteString(renderPurpleBold("EXAMPLES") + "\n")
 	writeExample(&b, "zsp publish --wizard", "Interactive wizard (recommended for first-time setup)")
@@ -81,7 +79,7 @@ func RootHelp() string {
 	writeExample(&b, "zsp publish -r github.com/org/repo", "Fetch and publish from GitHub (open source)")
 	writeExample(&b, "zsp publish -s github.com/user/app", "Closed-source (releases only, no source code)")
 	writeExample(&b, "zsp publish ./tool --version 1.0.0", "Publish local CLI executable with version")
-	writeExample(&b, "zsp identity --link-key key.p12", "Link signing key to Nostr identity")
+	writeExample(&b, "zsp link-identity --set key.p12", "Link signing key to Nostr identity")
 	b.WriteString("\n")
 
 	b.WriteString(renderPurpleBold("ENVIRONMENT") + "\n")
@@ -92,14 +90,17 @@ func RootHelp() string {
 
 	b.WriteString(renderPurpleBold("GLOBAL FLAGS") + "\n")
 	b.WriteString("  " + renderGreen("-h, --help") + "      " + renderWhite("Show help") + "\n")
-	b.WriteString("  " + renderGreen("-v, --version") + "   " + renderWhite("Show version") + "\n")
-	b.WriteString("  " + renderGreen("--verbose") + "       " + renderWhite("Debug output") + "\n")
+	b.WriteString("  " + renderGreen("--version") + "       " + renderWhite("Show version") + "\n")
+	b.WriteString("  " + renderGreen("-v, --verbose") + "   " + renderWhite("Verbose output (-vv for debug)") + "\n")
+	b.WriteString("  " + renderGreen("--json") + "          " + renderWhite("Machine-readable JSON to stdout") + "\n")
+	b.WriteString("  " + renderGreen("-y, --yes") + "       " + renderWhite("Skip confirmation prompts") + "\n")
 	b.WriteString("  " + renderGreen("--no-color") + "      " + renderWhite("Disable colored output") + "\n\n")
 
 	b.WriteString(renderPurpleBold("MORE INFO") + "\n")
 	b.WriteString("  " + renderGreen("zsp publish --wizard") + "  " + renderWhite("Interactive wizard to determine best options") + "\n")
 	b.WriteString("  " + renderGreen("zsp publish --help") + "    " + renderWhite("Detailed publish help") + "\n")
-	b.WriteString("  " + renderGreen("zsp identity --help") + "   " + renderWhite("Detailed identity help") + "\n")
+	b.WriteString("  " + renderGreen("zsp link-identity --help") + "   " + renderWhite("Detailed link-identity help") + "\n")
+	b.WriteString("  " + renderGreen("zsp extract --help") + "       " + renderWhite("Extract APK metadata help") + "\n")
 	b.WriteString("  " + renderURL("https://github.com/zapstore/zsp") + "\n")
 
 	return b.String()
@@ -147,7 +148,8 @@ func PublishHelp() string {
 
 	// Behavior flags
 	b.WriteString(renderPurpleBold("BEHAVIOR FLAGS") + "\n")
-	writeFlag(&b, "-y", "Skip confirmations (auto-yes)")
+	writeFlag(&b, "-y, --yes", "Skip confirmations (also a global flag)")
+	writeFlag(&b, "--json", "Output JSON to stdout (status to stderr)")
 	writeFlag(&b, "--offline", "Sign events without uploading/publishing (outputs JSON)")
 	b.WriteString("                            " + renderGreyDark("Events go to stdout, upload manifest to stderr") + "\n")
 	writeFlag(&b, "--quiet", "Minimal output, no prompts (implies -y)")
@@ -168,8 +170,8 @@ func PublishHelp() string {
 	b.WriteString(renderPurpleBold("OTHER FLAGS") + "\n")
 	writeFlag(&b, "--check", "Verify config fetches arm64-v8a APK (exit 0=success)")
 	b.WriteString("                            " + renderGreyDark("Useful for CI/CD validation") + "\n")
-	writeFlag(&b, "--legacy", "Use legacy event format (default: false)")
-	writeFlag(&b, "--verbose", "Debug output")
+	writeFlag(&b, "--legacy", "Use legacy event format (default: true)")
+	writeFlag(&b, "-v, --verbose", "Verbose output (also a global flag)")
 	writeFlag(&b, "--no-color", "Disable colored output")
 	writeFlag(&b, "-h, --help", "Show this help")
 	b.WriteString("\n")
@@ -245,12 +247,12 @@ func PublishHelp() string {
 	return b.String()
 }
 
-// IdentityHelp returns colorful help for the identity subcommand.
-func IdentityHelp() string {
+// LinkIdentityHelp returns colorful help for the link-identity subcommand.
+func LinkIdentityHelp() string {
 	var b strings.Builder
 
 	b.WriteString(ui.RenderLogo())
-	b.WriteString(renderGreenBold("zsp identity") + " " + renderWhite("- Manage cryptographic identity proofs (NIP-C1)") + "\n")
+	b.WriteString(renderGreenBold("zsp link-identity") + " " + renderWhite("- Manage cryptographic identity proofs (NIP-C1)") + "\n")
 
 	b.WriteString(renderPurpleBold("WHAT IS THIS?") + "\n")
 	b.WriteString(renderWhite("  Links your Android signing key to your Nostr identity.") + "\n")
@@ -258,12 +260,12 @@ func IdentityHelp() string {
 	b.WriteString(renderWhite("  Users can verify that apps signed with your key are published by you.") + "\n\n")
 
 	b.WriteString(renderPurpleBold("USAGE") + "\n")
-	b.WriteString("  " + renderGreen("zsp identity --link-key") + " <certificate>\n")
-	b.WriteString("  " + renderGreen("zsp identity --verify") + " <certificate|apk>\n\n")
+	b.WriteString("  " + renderGreen("zsp link-identity --set") + " <certificate>\n")
+	b.WriteString("  " + renderGreen("zsp link-identity --verify") + " <certificate|apk>\n\n")
 
 	// Commands
 	b.WriteString(renderPurpleBold("COMMANDS") + "\n")
-	writeFlag(&b, "--link-key <file>", "Publish cryptographic identity proof (kind 30509)")
+	writeFlag(&b, "--set <file>", "Publish cryptographic identity proof (kind 30509)")
 	b.WriteString("                            " + renderGreyDark("Supported: .p12, .pfx (PKCS12), .pem, .crt (PEM)") + "\n")
 	writeFlag(&b, "--verify <file>", "Verify identity proof against certificate or APK")
 	b.WriteString("                            " + renderGreyDark("For APKs, extracts the signing certificate automatically") + "\n")
@@ -271,7 +273,7 @@ func IdentityHelp() string {
 
 	// Options
 	b.WriteString(renderPurpleBold("OPTIONS") + "\n")
-	writeFlag(&b, "--link-key-expiry <duration>", "Validity period (default: 1y)")
+	writeFlag(&b, "--set-expiry <duration>", "Validity period when using --set (default: 1y)")
 	b.WriteString("                            " + renderGreyDark("Examples: 1y, 6mo, 30d, 720h") + "\n")
 	writeFlag(&b, "--relays <url>", "Relays for identity proofs (repeatable)")
 	b.WriteString("                            " + renderGreyDark("Defaults: relay.primal.net, relay.damus.io, relay.zapstore.dev") + "\n")
@@ -281,7 +283,8 @@ func IdentityHelp() string {
 	b.WriteString(renderPurpleBold("OTHER FLAGS") + "\n")
 	writeFlag(&b, "--offline", "Output event JSON to stdout instead of publishing")
 	b.WriteString("                            " + renderGreyDark("Event is signed unless SIGN_WITH is npub (unsigned)") + "\n")
-	writeFlag(&b, "--verbose", "Debug output")
+	writeFlag(&b, "--json", "Output JSON to stdout (also a global flag)")
+	writeFlag(&b, "-v, --verbose", "Verbose output (also a global flag)")
 	writeFlag(&b, "--no-color", "Disable colored output")
 	writeFlag(&b, "-h, --help", "Show this help")
 	b.WriteString("\n")
@@ -290,25 +293,25 @@ func IdentityHelp() string {
 	b.WriteString(renderPurpleBold("EXAMPLES") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Link your Android signing key to your Nostr identity") + "\n")
-	b.WriteString("  " + renderGreen("zsp identity --link-key release-key.p12") + "\n\n")
+	b.WriteString("  " + renderGreen("zsp link-identity --set release-key.p12") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Link with 2-year expiry") + "\n")
-	b.WriteString("  " + renderGreen("zsp identity --link-key release-key.p12 --link-key-expiry 2y") + "\n\n")
+	b.WriteString("  " + renderGreen("zsp link-identity --set release-key.p12 --set-expiry 2y") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Output signed event for external publishing (e.g., with nak)") + "\n")
-	b.WriteString("  " + renderGreen("KEYSTORE_PASSWORD=... SIGN_WITH=nsec1... zsp identity --link-key key.p12 --offline | nak event") + "\n\n")
+	b.WriteString("  " + renderGreen("KEYSTORE_PASSWORD=... SIGN_WITH=nsec1... zsp link-identity --set key.p12 --offline | nak event") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Output unsigned event (when SIGN_WITH is npub)") + "\n")
-	b.WriteString("  " + renderGreen("KEYSTORE_PASSWORD=... SIGN_WITH=npub1... zsp identity --link-key key.p12 --offline") + "\n\n")
+	b.WriteString("  " + renderGreen("KEYSTORE_PASSWORD=... SIGN_WITH=npub1... zsp link-identity --set key.p12 --offline") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Use custom relays") + "\n")
-	b.WriteString("  " + renderGreen("zsp identity --link-key key.p12 --relays wss://my-relay.com") + "\n\n")
+	b.WriteString("  " + renderGreen("zsp link-identity --set key.p12 --relays wss://my-relay.com") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Verify that an APK's signing key is linked to a Nostr identity") + "\n")
-	b.WriteString("  " + renderGreen("zsp identity --verify downloaded-app.apk") + "\n\n")
+	b.WriteString("  " + renderGreen("zsp link-identity --verify downloaded-app.apk") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Verify using your certificate file") + "\n")
-	b.WriteString("  " + renderGreen("zsp identity --verify release-key.p12") + "\n\n")
+	b.WriteString("  " + renderGreen("zsp link-identity --verify release-key.p12") + "\n\n")
 
 	// Certificate formats
 	b.WriteString(renderPurpleBold("CERTIFICATE FORMATS") + "\n")
@@ -336,25 +339,20 @@ func IdentityHelp() string {
 	return b.String()
 }
 
-// APKHelp returns colorful help for the apk subcommand.
-func APKHelp() string {
+// ExtractHelp returns colorful help for the extract subcommand.
+func ExtractHelp() string {
 	var b strings.Builder
 
 	b.WriteString(ui.RenderLogo())
-	b.WriteString(renderGreenBold("zsp apk") + " " + renderWhite("- APK utility commands") + "\n")
+	b.WriteString(renderGreenBold("zsp extract") + " " + renderWhite("- Extract APK metadata as JSON") + "\n")
 
 	b.WriteString(renderPurpleBold("USAGE") + "\n")
-	b.WriteString("  " + renderGreen("zsp apk --extract") + " <file.apk>\n\n")
-
-	// Commands
-	b.WriteString(renderPurpleBold("COMMANDS") + "\n")
-	writeFlag(&b, "--extract <file.apk>", "Extract APK metadata as JSON")
-	b.WriteString("                            " + renderGreyDark("Also extracts the app icon to <name>_icon.png") + "\n")
-	b.WriteString("\n")
+	b.WriteString("  " + renderGreen("zsp extract") + " <file.apk>\n\n")
 
 	// Options
 	b.WriteString(renderPurpleBold("OPTIONS") + "\n")
-	writeFlag(&b, "--verbose", "Debug output")
+	writeFlag(&b, "--json", "Output JSON to stdout (also a global flag)")
+	writeFlag(&b, "-v, --verbose", "Verbose output (also a global flag)")
 	writeFlag(&b, "--no-color", "Disable colored output")
 	writeFlag(&b, "-h, --help", "Show this help")
 	b.WriteString("\n")
@@ -363,10 +361,12 @@ func APKHelp() string {
 	b.WriteString(renderPurpleBold("EXAMPLES") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Extract metadata from an APK") + "\n")
-	b.WriteString("  " + renderGreen("zsp apk --extract myapp.apk") + "\n\n")
+	b.WriteString("  " + renderGreen("zsp extract myapp.apk") + "\n\n")
+
+	b.WriteString(renderGreyDark("  Also extracts the app icon to <name>_icon.png in the current directory.") + "\n\n")
 
 	// Output
-	b.WriteString(renderPurpleBold("OUTPUT (--extract)") + "\n")
+	b.WriteString(renderPurpleBold("OUTPUT") + "\n")
 	b.WriteString(renderGreyDark("  {") + "\n")
 	b.WriteString(renderGreyDark("    \"package_id\": \"com.example.app\",") + "\n")
 	b.WriteString(renderGreyDark("    \"version_name\": \"1.2.3\",") + "\n")
@@ -389,10 +389,10 @@ func HandleHelp(cmd cli.Command, args []string) {
 	switch cmd {
 	case cli.CommandPublish:
 		fmt.Fprint(os.Stdout, PublishHelp())
-	case cli.CommandIdentity:
-		fmt.Fprint(os.Stdout, IdentityHelp())
-	case cli.CommandAPK:
-		fmt.Fprint(os.Stdout, APKHelp())
+	case cli.CommandLinkIdentity:
+		fmt.Fprint(os.Stdout, LinkIdentityHelp())
+	case cli.CommandExtract:
+		fmt.Fprint(os.Stdout, ExtractHelp())
 	default:
 		fmt.Fprint(os.Stdout, RootHelp())
 	}

@@ -64,7 +64,7 @@ func RunWizardWithOptions(defaults *Config, opts WizardOptions) (*Config, error)
 	if defaults != nil {
 		fmt.Println(ui.Title("Edit Configuration"))
 	} else {
-		fmt.Println(ui.Title("Welcome to the Wizard of Publishing 🧙"))
+		fmt.Println(ui.Title("Welcome to the Wizard of Publishing"))
 		fmt.Println(ui.Dim("Let's get your app published in no time."))
 	}
 	fmt.Println()
@@ -134,7 +134,7 @@ repoLoop:
 
 		// Web sources (unknown type) are not supported in the wizard
 		if sourceType == SourceUnknown {
-			fmt.Printf("\n%s Web sources require YAML configuration.\n", ui.Warning("⚠"))
+			ui.WarningStatus("Warning", "Web sources require YAML configuration.")
 			fmt.Println(ui.Dim("The wizard supports GitHub, GitLab, Gitea, F-Droid, or local paths."))
 			fmt.Println(ui.Dim("For web sources, create a zapstore.yaml with release_source config."))
 			fmt.Println()
@@ -155,15 +155,15 @@ repoLoop:
 			}
 
 			if validation.Error != nil {
-				fmt.Printf("%s Could not validate: %v\n", ui.Warning("⚠"), validation.Error)
+				ui.WarningStatus("Warning", fmt.Sprintf("Could not validate: %v", validation.Error))
 				hasWarning = true
 				noViableAPKs = true
 			} else if !validation.HasReleases {
-				fmt.Printf("%s No releases found\n", ui.Warning("⚠"))
+				ui.WarningStatus("Warning", "No releases found")
 				hasWarning = true
 				noViableAPKs = true
 			} else if validation.APKCount == 0 {
-				fmt.Printf("%s Release found but no APK assets\n", ui.Warning("⚠"))
+				ui.WarningStatus("Warning", "Release found but no APK assets")
 				hasWarning = true
 				noViableAPKs = true
 			} else {
@@ -171,13 +171,13 @@ repoLoop:
 				viableNames := filterViableAPKNames(validation.APKNames)
 
 				if len(viableNames) == 0 {
-					fmt.Printf("%s Found %d APK(s) but none are viable (all debug/x86/etc)\n", ui.Warning("⚠"), validation.APKCount)
+					ui.WarningStatus("Warning", fmt.Sprintf("Found %d APK(s) but none are viable (all debug/x86/etc)", validation.APKCount))
 					hasWarning = true
 					noViableAPKs = true
 				} else {
 					// Auto-select best APK (picker will handle selection during fetch)
 					bestName := selectBestAPKName(viableNames)
-					fmt.Printf("%s Found APK: %s\n", ui.Success("✓"), bestName)
+					ui.Status("Found", fmt.Sprintf("APK: %s", bestName))
 				}
 			}
 		}
@@ -242,7 +242,7 @@ repoLoop:
 		if source == "" {
 			// Release source is required if no repo
 			if cfg.Repository == "" && cfg.ReleaseSource == nil {
-				fmt.Printf("%s Release source is required when no repository is specified\n", ui.Warning("⚠"))
+				ui.WarningStatus("Warning", "Release source is required when no repository is specified")
 				continue
 			}
 			break
@@ -258,7 +258,7 @@ repoLoop:
 
 			// Web sources (unknown type) are not supported in the wizard
 			if rsType == SourceUnknown {
-				fmt.Printf("\n%s Web sources require YAML configuration.\n", ui.Warning("⚠"))
+				ui.WarningStatus("Warning", "Web sources require YAML configuration.")
 				fmt.Println(ui.Dim("The wizard supports GitHub, GitLab, Gitea, or F-Droid URLs."))
 				fmt.Println(ui.Dim("For web sources, create a zapstore.yaml with release_source config."))
 				fmt.Println()
@@ -485,17 +485,17 @@ repoLoop:
 		if err := os.WriteFile("zapstore.yaml", yamlBytes, 0644); err != nil {
 			return nil, fmt.Errorf("failed to save config: %w", err)
 		}
-		ui.PrintSuccess("Saved to zapstore.yaml")
+		ui.Status("Saved", "zapstore.yaml")
 		fmt.Println()
 
 		// Show simplified command since config was saved
-		fmt.Println(ui.Bold("🎉 Your command is ready! Run this to publish:"))
+		fmt.Println(ui.Bold("Your command is ready! Run this to publish:"))
 		fmt.Println()
 		fmt.Printf("  %s\n", ui.Success("zsp publish"))
 		fmt.Println()
 	} else {
 		// No config needed, just show the command
-		fmt.Println(ui.Bold("🎉 Your command is ready! Run this to publish:"))
+		fmt.Println(ui.Bold("Your command is ready! Run this to publish:"))
 		fmt.Println()
 		fmt.Printf("  %s\n", ui.Success(command))
 		fmt.Println()
@@ -771,13 +771,13 @@ func GetKeystorePassword() string {
 // warnIfNsecInEnv prints a security warning if an nsec is stored in an insecure location.
 func warnIfNsecInEnv(value, source string) {
 	if strings.HasPrefix(value, "nsec1") {
-		fmt.Fprintf(os.Stderr, "\n⚠️  WARNING: Private key (nsec) found in %s\n", source)
+		ui.WarningStatus("Warning", fmt.Sprintf("Private key (nsec) found in %s", source))
 		fmt.Fprintf(os.Stderr, "   This is insecure. Consider using:\n")
 		fmt.Fprintf(os.Stderr, "   - A bunker:// URL for remote signing\n")
 		fmt.Fprintf(os.Stderr, "   - Browser extension (NIP-07)\n")
 		fmt.Fprintf(os.Stderr, "   - Environment variable set per-session (not persisted)\n")
 		if source == ".env file" && !isInGitignore(".env") {
-			fmt.Fprintf(os.Stderr, "   ⚠️  .env is NOT in .gitignore - risk of committing secrets!\n")
+			ui.WarningStatus("Warning", ".env is NOT in .gitignore - risk of committing secrets!")
 		}
 		fmt.Fprintln(os.Stderr)
 	}
@@ -813,7 +813,7 @@ func PromptSignWith() (string, error) {
 			return "", fmt.Errorf("invalid nsec format")
 		}
 		// Security: Do not offer to save nsec to .env - it's too risky
-		ui.PrintInfo("Set SIGN_WITH environment variable for future runs (do not store in files)")
+		ui.Status("Info", "Set SIGN_WITH environment variable for future runs (do not store in files)")
 	case 1:
 		signWith, err = ui.Prompt("Enter your npub: ")
 		if err != nil {
@@ -859,14 +859,14 @@ func offerSaveToEnv(signWith string) error {
 	if saveEnv {
 		// Warn about .gitignore
 		if !isInGitignore(".env") {
-			ui.PrintWarning("Consider adding .env to your .gitignore file")
+			ui.WarningStatus("Warning", "Consider adding .env to your .gitignore file")
 		}
 
 		envContent := fmt.Sprintf("SIGN_WITH=%s\n", signWith)
 		if err := appendToEnvFile(envContent); err != nil {
-			ui.PrintWarning(fmt.Sprintf("Could not save to .env: %v", err))
+			ui.WarningStatus("Warning", fmt.Sprintf("Could not save to .env: %v", err))
 		} else {
-			ui.PrintSuccess("Saved to .env")
+			ui.Status("Saved", ".env")
 		}
 	}
 	return nil

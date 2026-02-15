@@ -128,7 +128,7 @@ func PreDownloadImages(ctx context.Context, cfg *config.Config, opts *cli.Option
 	if remoteImages > 0 {
 		var spinner *ui.Spinner
 		if opts.Publish.ShouldShowSpinners() {
-			spinner = ui.NewSpinner(fmt.Sprintf("Downloading 0/%d screenshots...", remoteImages))
+			spinner = ui.NewStatusSpinner("Downloading", fmt.Sprintf("0/%d screenshots...", remoteImages))
 			spinner.Start()
 		}
 
@@ -141,7 +141,7 @@ func PreDownloadImages(ctx context.Context, cfg *config.Config, opts *cli.Option
 			data, hash, mimeType, err := downloadRemoteImage(ctx, img)
 			if err != nil {
 				if spinner != nil {
-					spinner.StopWithWarning(fmt.Sprintf("Failed to download screenshot: %v", err))
+					spinner.Warn("Warning", fmt.Sprintf("Failed to download screenshot: %v", err))
 				}
 				continue
 			}
@@ -160,7 +160,7 @@ func PreDownloadImages(ctx context.Context, cfg *config.Config, opts *cli.Option
 		}
 
 		if spinner != nil {
-			spinner.StopWithSuccess(fmt.Sprintf("Downloaded %d screenshots", len(result.Images)))
+			spinner.Done("Downloaded", fmt.Sprintf("%d screenshots", len(result.Images)))
 		}
 	}
 
@@ -171,20 +171,20 @@ func PreDownloadImages(ctx context.Context, cfg *config.Config, opts *cli.Option
 func downloadImageWithSpinner(ctx context.Context, url, imageType string, opts *cli.Options) (*DownloadedImage, error) {
 	var spinner *ui.Spinner
 	if opts.Publish.ShouldShowSpinners() {
-		spinner = ui.NewSpinner(fmt.Sprintf("Downloading %s...", imageType))
+		spinner = ui.NewStatusSpinner("Downloading", imageType+"...")
 		spinner.Start()
 	}
 
 	data, hash, mimeType, err := downloadRemoteImage(ctx, url)
 	if err != nil {
 		if spinner != nil {
-			spinner.StopWithError(fmt.Sprintf("Failed to download %s", imageType))
+			spinner.Fail("Error", fmt.Sprintf("Failed to download %s", imageType))
 		}
 		return nil, err
 	}
 
 	if spinner != nil {
-		spinner.StopWithSuccess(fmt.Sprintf("Downloaded %s", imageType))
+		spinner.Done("Downloaded", imageType)
 	}
 
 	return &DownloadedImage{
@@ -223,18 +223,18 @@ func resolveIconURL(ctx context.Context, cfg *config.Config, assetInfo *artifact
 		if isRemoteURL(cfg.Icon) {
 			var spinner *ui.Spinner
 			if opts.Publish.ShouldShowSpinners() {
-				spinner = ui.NewSpinner("Fetching icon (for hash)...")
+				spinner = ui.NewStatusSpinner("Fetching", "icon (for hash)...")
 				spinner.Start()
 			}
 			_, hashStr, _, err := downloadRemoteImage(ctx, cfg.Icon)
 			if err != nil {
 				if spinner != nil {
-					spinner.StopWithError("Failed to fetch icon")
+					spinner.Fail("Error", "Failed to fetch icon")
 				}
 				return "", fmt.Errorf("failed to fetch icon from %s: %w", cfg.Icon, err)
 			}
 			if spinner != nil {
-				spinner.StopWithSuccess("Fetched icon")
+				spinner.Done("Fetched", "icon")
 			}
 			return fmt.Sprintf("%s/%s", blossomURL, hashStr), nil
 		}
@@ -384,17 +384,17 @@ func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.Ev
 	// Batch sign everything
 	var signSpinner *ui.Spinner
 	if params.Opts.Publish.ShouldShowSpinners() {
-		signSpinner = ui.NewSpinner(fmt.Sprintf("Signing %d events...", len(allEvents)))
+		signSpinner = ui.NewStatusSpinner("Signing", fmt.Sprintf("%d events...", len(allEvents)))
 		signSpinner.Start()
 	}
 	if err := params.BatchSigner.SignBatch(ctx, allEvents); err != nil {
 		if signSpinner != nil {
-			signSpinner.StopWithError("Failed to sign events")
+			signSpinner.Fail("Error", "Failed to sign events")
 		}
 		return nil, fmt.Errorf("failed to batch sign events: %w", err)
 	}
 	if signSpinner != nil {
-		signSpinner.StopWithSuccess("Signed events")
+		signSpinner.Done("Signed", "events")
 	}
 
 	// Perform uploads
@@ -508,23 +508,23 @@ func uploadIcon(ctx context.Context, params UploadParams) (string, error) {
 func uploadIconData(ctx context.Context, client *blossom.Client, signer nostr.Signer, img *DownloadedImage, opts *cli.Options) (string, error) {
 	var spinner *ui.Spinner
 	if opts.Publish.ShouldShowSpinners() {
-		spinner = ui.NewSpinner("Uploading icon...")
+		spinner = ui.NewStatusSpinner("Uploading", "icon...")
 		spinner.Start()
 	}
 
 	result, err := client.UploadBytes(ctx, img.Data, img.Hash, img.MimeType, signer)
 	if err != nil {
 		if spinner != nil {
-			spinner.StopWithError("Failed to upload icon")
+			spinner.Fail("Error", "Failed to upload icon")
 		}
 		return "", fmt.Errorf("failed to upload icon: %w", err)
 	}
 
 	if spinner != nil {
 		if result.Existed {
-			spinner.StopWithSuccess(fmt.Sprintf("Icon already exists (%s)", result.URL))
+			spinner.Done("Exists", fmt.Sprintf("Icon (%s)", result.URL))
 		} else {
-			spinner.StopWithSuccess("Uploaded icon")
+			spinner.Done("Uploaded", "icon")
 		}
 	}
 
@@ -535,14 +535,14 @@ func uploadIconData(ctx context.Context, client *blossom.Client, signer nostr.Si
 func downloadAndUploadIcon(ctx context.Context, client *blossom.Client, signer nostr.Signer, url string, opts *cli.Options) (string, error) {
 	var spinner *ui.Spinner
 	if opts.Publish.ShouldShowSpinners() {
-		spinner = ui.NewSpinner("Fetching icon...")
+		spinner = ui.NewStatusSpinner("Fetching", "icon...")
 		spinner.Start()
 	}
 
 	iconData, hashStr, mimeType, err := downloadRemoteImage(ctx, url)
 	if err != nil {
 		if spinner != nil {
-			spinner.StopWithError("Failed to fetch icon")
+			spinner.Fail("Error", "Failed to fetch icon")
 		}
 		return "", fmt.Errorf("failed to fetch icon from %s: %w", url, err)
 	}
@@ -554,16 +554,16 @@ func downloadAndUploadIcon(ctx context.Context, client *blossom.Client, signer n
 	result, err := client.UploadBytes(ctx, iconData, hashStr, mimeType, signer)
 	if err != nil {
 		if spinner != nil {
-			spinner.StopWithError("Failed to upload icon")
+			spinner.Fail("Error", "Failed to upload icon")
 		}
 		return "", fmt.Errorf("failed to upload icon: %w", err)
 	}
 
 	if spinner != nil {
 		if result.Existed {
-			spinner.StopWithSuccess(fmt.Sprintf("Icon already exists (%s)", result.URL))
+			spinner.Done("Exists", fmt.Sprintf("Icon (%s)", result.URL))
 		} else {
-			spinner.StopWithSuccess("Uploaded icon")
+			spinner.Done("Uploaded", "icon")
 		}
 	}
 
@@ -584,23 +584,23 @@ func uploadLocalIcon(ctx context.Context, client *blossom.Client, signer nostr.S
 
 	var spinner *ui.Spinner
 	if opts.Publish.ShouldShowSpinners() {
-		spinner = ui.NewSpinner("Uploading icon...")
+		spinner = ui.NewStatusSpinner("Uploading", "icon...")
 		spinner.Start()
 	}
 
 	result, err := client.UploadBytes(ctx, iconData, hashStr, mimeType, signer)
 	if err != nil {
 		if spinner != nil {
-			spinner.StopWithError("Failed to upload icon")
+			spinner.Fail("Error", "Failed to upload icon")
 		}
 		return "", fmt.Errorf("failed to upload icon: %w", err)
 	}
 
 	if spinner != nil {
 		if result.Existed {
-			spinner.StopWithSuccess(fmt.Sprintf("Icon already exists (%s)", result.URL))
+			spinner.Done("Exists", fmt.Sprintf("Icon (%s)", result.URL))
 		} else {
-			spinner.StopWithSuccess("Uploaded icon")
+			spinner.Done("Uploaded", "icon")
 		}
 	}
 
@@ -614,23 +614,23 @@ func uploadAPKIcon(ctx context.Context, client *blossom.Client, signer nostr.Sig
 
 	var spinner *ui.Spinner
 	if opts.Publish.ShouldShowSpinners() {
-		spinner = ui.NewSpinner("Uploading icon...")
+		spinner = ui.NewStatusSpinner("Uploading", "icon...")
 		spinner.Start()
 	}
 
 	result, err := client.UploadBytes(ctx, iconData, hashStr, "image/png", signer)
 	if err != nil {
 		if spinner != nil {
-			spinner.StopWithError("Failed to upload icon")
+			spinner.Fail("Error", "Failed to upload icon")
 		}
 		return "", fmt.Errorf("failed to upload icon: %w", err)
 	}
 
 	if spinner != nil {
 		if result.Existed {
-			spinner.StopWithSuccess(fmt.Sprintf("Icon already exists (%s)", result.URL))
+			spinner.Done("Exists", fmt.Sprintf("Icon (%s)", result.URL))
 		} else {
-			spinner.StopWithSuccess("Uploaded icon")
+			spinner.Done("Uploaded", "icon")
 		}
 	}
 
@@ -645,23 +645,23 @@ func uploadPreDownloadedImages(ctx context.Context, params UploadParams) ([]stri
 	for i, img := range params.PreDownloaded.Images {
 		var spinner *ui.Spinner
 		if params.Opts.Publish.ShouldShowSpinners() {
-			spinner = ui.NewSpinner(fmt.Sprintf("Uploading screenshot (%d/%d)...", i+1, total))
+			spinner = ui.NewStatusSpinner("Uploading", fmt.Sprintf("screenshot (%d/%d)...", i+1, total))
 			spinner.Start()
 		}
 
 		result, err := params.Client.UploadBytes(ctx, img.Data, img.Hash, img.MimeType, params.Signer)
 		if err != nil {
 			if spinner != nil {
-				spinner.StopWithError(fmt.Sprintf("Failed to upload screenshot %d", i+1))
+				spinner.Fail("Error", fmt.Sprintf("Failed to upload screenshot %d", i+1))
 			}
 			return nil, fmt.Errorf("failed to upload screenshot: %w", err)
 		}
 
 		if spinner != nil {
 			if result.Existed {
-				spinner.StopWithSuccess(fmt.Sprintf("Screenshot (%d/%d) already exists (%s)", i+1, total, result.URL))
-			} else {
-				spinner.StopWithSuccess(fmt.Sprintf("Uploaded screenshot (%d/%d)", i+1, total))
+spinner.Done("Exists", fmt.Sprintf("Screenshot (%d/%d) (%s)", i+1, total, result.URL))
+				} else {
+					spinner.Done("Uploaded", fmt.Sprintf("screenshot (%d/%d)", i+1, total))
 			}
 		}
 
@@ -691,8 +691,8 @@ func uploadConfigImages(ctx context.Context, params UploadParams) ([]string, err
 			// Download and upload
 			url, err := downloadAndUploadImage(ctx, params.Client, params.Signer, img, i+1, total, params.Opts)
 			if err != nil {
-				if params.Opts.Global.Verbose {
-					fmt.Printf("  Warning: failed to upload screenshot: %v\n", err)
+				if params.Opts.Global.Verbosity >= 1 {
+					ui.WarningStatus("Warning", fmt.Sprintf("failed to upload screenshot: %v", err))
 				}
 				continue
 			}
@@ -713,14 +713,14 @@ func uploadConfigImages(ctx context.Context, params UploadParams) ([]string, err
 func downloadAndUploadImage(ctx context.Context, client *blossom.Client, signer nostr.Signer, url string, index, total int, opts *cli.Options) (string, error) {
 	var spinner *ui.Spinner
 	if opts.Publish.ShouldShowSpinners() {
-		spinner = ui.NewSpinner(fmt.Sprintf("Fetching screenshot (%d/%d)...", index, total))
+		spinner = ui.NewStatusSpinner("Fetching", fmt.Sprintf("screenshot (%d/%d)...", index, total))
 		spinner.Start()
 	}
 
 	imgData, hashStr, mimeType, err := downloadRemoteImage(ctx, url)
 	if err != nil {
 		if spinner != nil {
-			spinner.StopWithError(fmt.Sprintf("Failed to fetch screenshot %d", index))
+			spinner.Fail("Error", fmt.Sprintf("Failed to fetch screenshot %d", index))
 		}
 		return "", err
 	}
@@ -732,16 +732,16 @@ func downloadAndUploadImage(ctx context.Context, client *blossom.Client, signer 
 	result, err := client.UploadBytes(ctx, imgData, hashStr, mimeType, signer)
 	if err != nil {
 		if spinner != nil {
-			spinner.StopWithError(fmt.Sprintf("Failed to upload screenshot %d", index))
+			spinner.Fail("Error", fmt.Sprintf("Failed to upload screenshot %d", index))
 		}
 		return "", err
 	}
 
 	if spinner != nil {
 		if result.Existed {
-			spinner.StopWithSuccess(fmt.Sprintf("Screenshot (%d/%d) already exists (%s)", index, total, result.URL))
-		} else {
-			spinner.StopWithSuccess(fmt.Sprintf("Uploaded screenshot (%d/%d)", index, total))
+spinner.Done("Exists", fmt.Sprintf("Screenshot (%d/%d) (%s)", index, total, result.URL))
+			} else {
+				spinner.Done("Uploaded", fmt.Sprintf("screenshot (%d/%d)", index, total))
 		}
 	}
 
@@ -762,23 +762,23 @@ func uploadLocalImage(ctx context.Context, client *blossom.Client, signer nostr.
 
 	var spinner *ui.Spinner
 	if opts.Publish.ShouldShowSpinners() {
-		spinner = ui.NewSpinner(fmt.Sprintf("Uploading image %s...", imgPath))
+		spinner = ui.NewStatusSpinner("Uploading", fmt.Sprintf("image %s...", imgPath))
 		spinner.Start()
 	}
 
 	result, err := client.UploadBytes(ctx, imgData, hashStr, mimeType, signer)
 	if err != nil {
 		if spinner != nil {
-			spinner.StopWithError(fmt.Sprintf("Failed to upload image %s", imgPath))
+			spinner.Fail("Error", fmt.Sprintf("Failed to upload image %s", imgPath))
 		}
 		return "", fmt.Errorf("failed to upload image %s: %w", imgPath, err)
 	}
 
 	if spinner != nil {
 		if result.Existed {
-			spinner.StopWithSuccess(fmt.Sprintf("Image %s already exists (%s)", imgPath, result.URL))
+			spinner.Done("Exists", fmt.Sprintf("Image %s (%s)", imgPath, result.URL))
 		} else {
-			spinner.StopWithSuccess(fmt.Sprintf("Uploaded image %s", imgPath))
+			spinner.Done("Uploaded", fmt.Sprintf("image %s", imgPath))
 		}
 	}
 
@@ -969,7 +969,7 @@ func checkUploadsExist(ctx context.Context, client *blossom.Client, uploads []up
 
 	var spinner *ui.Spinner
 	if opts.Publish.ShouldShowSpinners() {
-		spinner = ui.NewSpinner(fmt.Sprintf("Checking %d files...", len(nonAPKHashes)))
+		spinner = ui.NewStatusSpinner("Checking", fmt.Sprintf("%d files...", len(nonAPKHashes)))
 		spinner.Start()
 	}
 
@@ -983,9 +983,9 @@ func checkUploadsExist(ctx context.Context, client *blossom.Client, uploads []up
 			}
 		}
 		if existCount > 0 {
-			spinner.StopWithSuccess(fmt.Sprintf("Checked files (%d already exist)", existCount))
-		} else {
-			spinner.StopWithSuccess("Checked files")
+spinner.Done("Checked", fmt.Sprintf("files (%d already exist)", existCount))
+			} else {
+				spinner.Done("Checked", "files")
 		}
 	}
 
@@ -1024,25 +1024,25 @@ func performUploads(ctx context.Context, client *blossom.Client, uploads []uploa
 			existed := existsMap[u.hash]
 			if existed {
 				if opts.Publish.ShouldShowSpinners() {
-					ui.PrintSuccess(fmt.Sprintf("%s already exists (%s/%s)", u.uploadType, client.ServerURL(), u.hash))
+					ui.Status("Exists", fmt.Sprintf("%s (%s/%s)", u.uploadType, client.ServerURL(), u.hash))
 				}
 			} else {
 				var spinner *ui.Spinner
 				if opts.Publish.ShouldShowSpinners() {
-					spinner = ui.NewSpinner(fmt.Sprintf("Uploading %s...", u.uploadType))
+					spinner = ui.NewStatusSpinner("Uploading", u.uploadType+"...")
 					spinner.Start()
 				}
 
 				_, err := client.UploadBytesWithAuthPreChecked(ctx, u.data, u.hash, u.mimeType, u.authEvent, false)
 				if err != nil {
 					if spinner != nil {
-						spinner.StopWithError(fmt.Sprintf("Failed to upload %s", u.uploadType))
+						spinner.Fail("Error", fmt.Sprintf("Failed to upload %s", u.uploadType))
 					}
 					return fmt.Errorf("failed to upload file: %w", err)
 				}
 
 				if spinner != nil {
-					spinner.StopWithSuccess(fmt.Sprintf("Uploaded %s", u.uploadType))
+					spinner.Done("Uploaded", u.uploadType)
 				}
 			}
 		}

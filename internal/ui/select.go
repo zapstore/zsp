@@ -34,11 +34,11 @@ type selectStyles struct {
 func newSelectModel(title string, options []string, recommended int) selectModel {
 	styles := selectStyles{
 		title:       lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#e0e0e0")),
-		cursor:      lipgloss.NewStyle().Foreground(lipgloss.Color("#6b8c6b")), // Muted green
+		cursor:      lipgloss.NewStyle().Foreground(ColorAccent),
 		selected:    lipgloss.NewStyle().Foreground(lipgloss.Color("#e0e0e0")).Bold(true),
-		unselected:  lipgloss.NewStyle().Foreground(lipgloss.Color("#808080")),
-		recommended: lipgloss.NewStyle().Foreground(lipgloss.Color("#606060")).Italic(true),
-		dim:         lipgloss.NewStyle().Foreground(lipgloss.Color("#505050")),
+		unselected:  lipgloss.NewStyle().Foreground(ColorDim),
+		recommended: lipgloss.NewStyle().Foreground(ColorDim).Italic(true),
+		dim:         lipgloss.NewStyle().Foreground(ColorDim),
 	}
 
 	if NoColor {
@@ -251,11 +251,11 @@ func newMultiSelectModel(title string, options []string) multiSelectModel {
 func newMultiSelectModelWithPreselected(title string, options []string, preselected []int) multiSelectModel {
 	styles := selectStyles{
 		title:       lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#e0e0e0")),
-		cursor:      lipgloss.NewStyle().Foreground(lipgloss.Color("#6b8c6b")), // Muted green
-		selected:    lipgloss.NewStyle().Foreground(lipgloss.Color("#6b8c6b")).Bold(true), // Green for selected
-		unselected:  lipgloss.NewStyle().Foreground(lipgloss.Color("#808080")),
-		recommended: lipgloss.NewStyle().Foreground(lipgloss.Color("#606060")).Italic(true),
-		dim:         lipgloss.NewStyle().Foreground(lipgloss.Color("#505050")),
+		cursor:      lipgloss.NewStyle().Foreground(ColorAccent),
+		selected:    lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true),
+		unselected:  lipgloss.NewStyle().Foreground(ColorDim),
+		recommended: lipgloss.NewStyle().Foreground(ColorDim).Italic(true),
+		dim:         lipgloss.NewStyle().Foreground(ColorDim),
 	}
 
 	if NoColor {

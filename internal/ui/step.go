@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// Logo is the ASCII art logo for Zapstore Publisher.
+// Logo is the ASCII art logo for Zapstore.
 const Logo = `
  _____                _
 / _  / __ _ _ __  ___| |_ ___  _ __ ___
@@ -15,8 +15,6 @@ const Logo = `
  / //\ (_| | |_) \__ \ || (_) | | |  __/
 /____/\__,_| .__/|___/\__\___/|_|  \___|
            |_|
-    ═══════════════════════════════
-           P U B L I S H E R
 `
 
 // Version holds the application version, set at startup.
@@ -73,40 +71,16 @@ func (s *StepTracker) StartStep(name string) {
 
 // printStepHeader prints a formatted step header.
 func (s *StepTracker) printStepHeader(name string) {
-	// Print banner before the first step
-	if s.current == 1 {
-		s.printBanner()
-	}
-
-	// Create the step indicator
-	stepNum := fmt.Sprintf("%d/%d", s.current, s.total)
-
-	// Box-drawing line (heavy)
-	lineWidth := 60
-	line := strings.Repeat("━", lineWidth)
-
 	fmt.Fprintln(s.writer)
 
 	if NoColor {
-		fmt.Fprintf(s.writer, "=== STEP %s: %s ===\n", stepNum, strings.ToUpper(name))
+		fmt.Fprintf(s.writer, "=== STEP %s: %s ===\n",
+			fmt.Sprintf("%d/%d", s.current, s.total), strings.ToUpper(name))
 	} else {
-		// Top line
-		fmt.Fprintln(s.writer, DimStyle.Render(line))
-		// Step header with number and name
-		header := fmt.Sprintf(" %s ▸ %s", stepNum, strings.ToUpper(name))
+		// Compact step header: " 1/4 > FETCH ASSETS"
+		header := fmt.Sprintf(" %d/%d > %s", s.current, s.total, strings.ToUpper(name))
 		fmt.Fprintln(s.writer, BoldStyle.Render(header))
-		// Bottom line
-		fmt.Fprintln(s.writer, DimStyle.Render(line))
 	}
-}
-
-// printBanner prints the zapstore ASCII art logo.
-func (s *StepTracker) printBanner() {
-	if NoColor {
-		fmt.Fprintln(s.writer, "=== ZAPSTORE ===")
-		return
-	}
-	fmt.Fprint(s.writer, RenderLogo())
 }
 
 // SetTotal updates the total number of steps (useful when steps are conditional).
@@ -135,17 +109,17 @@ func (s *StepTracker) PrintSubStep(message string) {
 	fmt.Fprintf(s.writer, "  %s\n", message)
 }
 
-// PrintStepSummary prints a summary section with key-value pairs.
+// PrintStepSummary prints a summary section with key-value pairs (to stderr).
 func PrintStepSummary(items map[string]string) {
 	for key, value := range items {
-		fmt.Printf("  %s: %s\n", Bold(key), value)
+		fmt.Fprintf(os.Stderr, "  %s: %s\n", Bold(key), value)
 	}
 }
 
-// PrintStepSummaryOrdered prints a summary section with key-value pairs in order.
+// PrintStepSummaryOrdered prints a summary section with key-value pairs in order (to stderr).
 func PrintStepSummaryOrdered(items []KeyValue) {
 	for _, item := range items {
-		fmt.Printf("  %s: %s\n", Bold(item.Key), item.Value)
+		fmt.Fprintf(os.Stderr, "  %s: %s\n", Bold(item.Key), item.Value)
 	}
 }
 
@@ -155,37 +129,18 @@ type KeyValue struct {
 	Value string
 }
 
-// PrintSectionHeader prints a minor section header within a step.
+// PrintSectionHeader prints a minor section header (legacy; prefer Status()).
 func PrintSectionHeader(name string) {
-	fmt.Println()
-	if NoColor {
-		fmt.Printf("  --- %s ---\n", name)
-	} else {
-		fmt.Printf("  %s\n", InfoStyle.Render("─── "+name+" ───"))
-	}
+	Status("Summary", name)
 }
 
-// PrintCompletionSummary prints a final summary when all steps are done.
+// PrintCompletionSummary prints a final summary (legacy; prefer Status/ErrorStatus).
 func PrintCompletionSummary(success bool, message string) {
-	lineWidth := 60
-	line := strings.Repeat("━", lineWidth)
-
-	fmt.Println()
-	if NoColor {
-		if success {
-			fmt.Printf("=== COMPLETE: %s ===\n", message)
-		} else {
-			fmt.Printf("=== FAILED: %s ===\n", message)
-		}
+	fmt.Fprintln(os.Stderr)
+	if success {
+		Status("Finished", message)
 	} else {
-		fmt.Println(DimStyle.Render(line))
-		if success {
-			fmt.Printf(" %s %s\n", SuccessStyle.Render("✓"), BoldStyle.Render(message))
-		} else {
-			fmt.Printf(" %s %s\n", ErrorStyle.Render("✗"), BoldStyle.Render(message))
-		}
-		fmt.Println(DimStyle.Render(line))
+		ErrorStatus("Error", message)
 	}
-	fmt.Println()
 }
 

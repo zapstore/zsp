@@ -8,25 +8,38 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// Semantic color palette (names by meaning).
+var (
+	ColorSuccess = lipgloss.Color("#A8CC8C") // Sage green
+	ColorError   = lipgloss.Color("#E88388") // Soft red
+	ColorWarning = lipgloss.Color("#DBAB79") // Warm gold
+	ColorInfo    = lipgloss.Color("#71BEF2") // Sky blue
+	ColorAccent  = lipgloss.Color("#71BEF2") // Sky blue (action verbs)
+	ColorDim     = lipgloss.Color("#6B7089") // Muted gray
+)
+
 var (
 	// NoColor disables colored output when true.
 	NoColor = false
 
 	// Styles
-	TitleStyle   lipgloss.Style
-	SuccessStyle lipgloss.Style
-	ErrorStyle   lipgloss.Style
-	WarningStyle lipgloss.Style
-	InfoStyle    lipgloss.Style
-	DimStyle     lipgloss.Style
-	BoldStyle    lipgloss.Style
-	CodeStyle    lipgloss.Style
-	LogoStyle    lipgloss.Style
+	TitleStyle    lipgloss.Style
+	SuccessStyle  lipgloss.Style
+	ErrorStyle    lipgloss.Style
+	WarningStyle  lipgloss.Style
+	InfoStyle     lipgloss.Style
+	DimStyle      lipgloss.Style
+	BoldStyle     lipgloss.Style
+	CodeStyle     lipgloss.Style
+	LogoStyle     lipgloss.Style
+	AccentStyle   lipgloss.Style // Right-aligned action verbs (bold + accent color)
 )
 
 func init() {
-	// Check for NO_COLOR environment variable
-	if _, ok := os.LookupEnv("NO_COLOR"); ok {
+	// FORCE_COLOR overrides NO_COLOR (e.g. in CI that sets NO_COLOR but we want color)
+	if _, ok := os.LookupEnv("FORCE_COLOR"); ok {
+		NoColor = false
+	} else if _, ok := os.LookupEnv("NO_COLOR"); ok {
 		NoColor = true
 	}
 
@@ -45,38 +58,30 @@ func initStyles() {
 		BoldStyle = lipgloss.NewStyle().Bold(true)
 		CodeStyle = lipgloss.NewStyle()
 		LogoStyle = lipgloss.NewStyle()
+		AccentStyle = lipgloss.NewStyle().Bold(true)
 		return
 	}
 
 	TitleStyle = lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("#e0e0e0")) // Light grey
+		Foreground(lipgloss.Color("#e0e0e0"))
 
-	SuccessStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#6b8c6b")) // Muted sage green
+	SuccessStyle = lipgloss.NewStyle().Foreground(ColorSuccess)
+	ErrorStyle   = lipgloss.NewStyle().Foreground(ColorError)
+	WarningStyle = lipgloss.NewStyle().Foreground(ColorWarning)
+	InfoStyle    = lipgloss.NewStyle().Foreground(ColorInfo)
+	DimStyle     = lipgloss.NewStyle().Foreground(ColorDim)
 
-	ErrorStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#c87070")) // Muted coral red
-
-	WarningStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#c9a866")) // Muted gold
-
-	InfoStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#a0a0a0")) // Medium grey
-
-	DimStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#606060")) // Dark grey
-
-	BoldStyle = lipgloss.NewStyle().
-		Bold(true)
+	BoldStyle = lipgloss.NewStyle().Bold(true)
 
 	CodeStyle = lipgloss.NewStyle().
 		Background(lipgloss.Color("#1a1a1a")).
 		Foreground(lipgloss.Color("#c8c8c8")).
 		Padding(0, 1)
 
-	LogoStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#5a5a6e")) // Subtle dusty violet
+	LogoStyle = lipgloss.NewStyle().Foreground(ColorDim)
+
+	AccentStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
 }
 
 // SetNoColor enables or disables colored output.
@@ -147,11 +152,11 @@ func initJSONStyles() {
 	}
 
 	jsonKeyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#e0e0e0")).Bold(true)
-	jsonStringStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#6b8c6b")) // Green for strings
-	jsonNumberStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#c9a866")) // Gold for numbers
-	jsonBoolStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#c9a866"))   // Gold for bools
-	jsonNullStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080"))   // Grey for null
-	jsonBracketStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080")) // Grey for brackets
+	jsonStringStyle = lipgloss.NewStyle().Foreground(ColorSuccess)
+	jsonNumberStyle = lipgloss.NewStyle().Foreground(ColorWarning)
+	jsonBoolStyle   = lipgloss.NewStyle().Foreground(ColorWarning)
+	jsonNullStyle   = lipgloss.NewStyle().Foreground(ColorDim)
+	jsonBracketStyle = lipgloss.NewStyle().Foreground(ColorDim)
 }
 
 // ColorizeJSON adds syntax highlighting to JSON string.

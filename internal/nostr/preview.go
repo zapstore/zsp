@@ -401,6 +401,14 @@ func (s *PreviewServer) ConfirmFromCLI() {
 	close(s.cliConfirm)
 }
 
+// versionForDisplay returns the version with a single leading "v" (no double v).
+func versionForDisplay(v string) string {
+	if v == "" || strings.HasPrefix(v, "v") {
+		return v
+	}
+	return "v" + v
+}
+
 func (s *PreviewServer) buildHTML() string {
 	d := s.data
 
@@ -523,13 +531,13 @@ func (s *PreviewServer) buildHTML() string {
     <div class="section">
       <h2>Release</h2>
       <div class="version-badge">
-        <span class="ver">v%s</span>
+        <span class="ver">%s</span>
         <span class="code">(%d)</span>
         <span class="channel-badge">%s</span>
       </div>
       <div class="changelog">%s</div>
     </div>`,
-			html.EscapeString(d.Version),
+			html.EscapeString(versionForDisplay(d.Version)),
 			d.VersionCode,
 			html.EscapeString(d.Channel),
 			changelogHTML,
@@ -540,12 +548,12 @@ func (s *PreviewServer) buildHTML() string {
     <div class="section">
       <h2>Release</h2>
       <div class="version-badge">
-        <span class="ver">v%s</span>
+        <span class="ver">%s</span>
         <span class="code">(%d)</span>
         <span class="channel-badge">%s</span>
       </div>
     </div>`,
-			html.EscapeString(d.Version),
+			html.EscapeString(versionForDisplay(d.Version)),
 			d.VersionCode,
 			html.EscapeString(d.Channel),
 		)

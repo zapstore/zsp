@@ -14,6 +14,8 @@ import (
 // Spinner displays a spinning animation during long operations.
 type Spinner struct {
 	message string
+	verb    string // If set, use verb-prefix status line format (right-aligned verb + detail)
+	detail  string
 	frames  []string
 	index   int
 	done    chan struct{}
@@ -38,6 +40,22 @@ func NewSpinner(message string) *Spinner {
 
 	return &Spinner{
 		message: message,
+		frames:  frames,
+		writer:  os.Stderr,
+		done:    make(chan struct{}),
+	}
+}
+
+// NewStatusSpinner creates a spinner that shows verb-aligned status (e.g. "  Fetching  release info... ⠋").
+func NewStatusSpinner(verb, detail string) *Spinner {
+	frames := DefaultFrames
+	if NoColor {
+		frames = SimpleFrames
+	}
+	return &Spinner{
+		message: detail,
+		verb:    verb,
+		detail:  detail,
 		frames:  frames,
 		writer:  os.Stderr,
 		done:    make(chan struct{}),
@@ -70,9 +88,16 @@ func (s *Spinner) Start() {
 				frame := s.frames[s.index]
 				s.index = (s.index + 1) % len(s.frames)
 				msg := s.message
+				verb := s.verb
+				detail := s.detail
 				s.mu.Unlock()
 
-				fmt.Fprintf(s.writer, "\r%s %s", frame, msg)
+				if verb != "" {
+					styled := AccentStyle.Render(fmt.Sprintf("%*s", VerbWidth, verb))
+					fmt.Fprintf(s.writer, "\r%s  %s %s", styled, detail, frame)
+				} else {
+					fmt.Fprintf(s.writer, "\r%s %s", frame, msg)
+				}
 			}
 		}
 	}()
@@ -129,10 +154,34 @@ func (s *Spinner) StopWithWarning(message string) {
 	fmt.Fprintf(s.writer, "%s %s\n", Warning(warning), message)
 }
 
-// UpdateMessage updates the spinner message.
+// Done clears the spinner and prints a verb-aligned status line (success).
+func (s *Spinner) Done(verb, detail string) {
+	s.Stop()
+	styled := AccentStyle.Render(fmt.Sprintf("%*s", VerbWidth, verb))
+	fmt.Fprintf(s.writer, "%s  %s\n", styled, detail)
+}
+
+// Warn clears the spinner and prints a verb-aligned warning line.
+func (s *Spinner) Warn(verb, detail string) {
+	s.Stop()
+	styled := WarningStyle.Render(fmt.Sprintf("%*s", VerbWidth, verb))
+	fmt.Fprintf(s.writer, "%s  %s\n", styled, detail)
+}
+
+// Fail clears the spinner and prints a verb-aligned error line.
+func (s *Spinner) Fail(verb, detail string) {
+	s.Stop()
+	styled := ErrorStyle.Render(fmt.Sprintf("%*s", VerbWidth, verb))
+	fmt.Fprintf(s.writer, "%s  %s\n", styled, detail)
+}
+
+// UpdateMessage updates the spinner message (and detail for status spinners).
 func (s *Spinner) UpdateMessage(message string) {
 	s.mu.Lock()
 	s.message = message
+	if s.verb != "" {
+		s.detail = message
+	}
 	s.mu.Unlock()
 }
 
@@ -268,58 +317,66 @@ func (dt *DownloadTracker) Update(downloaded, total int64) {
 	}
 
 	if dt.total > 0 {
-		// Known total: show progress bar
+		// Known total: verb-aligned progress bar
+		verb := "Downloading"
+		if strings.HasPrefix(dt.message, "Uploading") {
+			verb = "Uploading"
+		}
 		pct := float64(downloaded) / float64(dt.total)
 		currentMB := float64(downloaded) / (1024 * 1024)
 		totalMB := float64(dt.total) / (1024 * 1024)
 		barView := dt.bar.ViewAs(pct)
-		fmt.Fprintf(dt.writer, "\r\033[K%s %s %.1f%% (%.1f / %.1f MB)", dt.message, barView, pct*100, currentMB, totalMB)
+		styled := AccentStyle.Render(fmt.Sprintf("%*s", VerbWidth, verb))
+		fmt.Fprintf(dt.writer, "\r\033[K%s  %s %s %.1f%% (%.1f / %.1f MB)", styled, dt.message, barView, pct*100, currentMB, totalMB)
 	} else {
-		// Unknown total: show spinner with bytes downloaded
+		// Unknown total: verb-aligned spinner
+		verb := "Downloading"
+		if strings.HasPrefix(dt.message, "Uploading") {
+			verb = "Uploading"
+		}
 		frame := dt.frames[dt.frameIndex]
 		dt.frameIndex = (dt.frameIndex + 1) % len(dt.frames)
-		fmt.Fprintf(dt.writer, "\r\033[K%s %s %s", frame, dt.message, formatBytes(downloaded))
+		styled := AccentStyle.Render(fmt.Sprintf("%*s", VerbWidth, verb))
+		fmt.Fprintf(dt.writer, "\r\033[K%s  %s %s %s", styled, dt.message, formatBytes(downloaded), frame)
 	}
 }
 
-// Done marks the download as complete.
+// Done marks the download as complete using verb-prefix pattern.
 func (dt *DownloadTracker) Done() {
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
 
-	checkmark := "✓"
-	if NoColor {
-		checkmark = "[OK]"
+	// Derive a past-tense verb from the message
+	verb := "Done"
+	detail := dt.message
+	if strings.HasPrefix(dt.message, "Downloading ") {
+		verb = "Downloaded"
+		detail = strings.TrimPrefix(dt.message, "Downloading ")
+	} else if strings.HasPrefix(dt.message, "Uploading ") {
+		verb = "Uploaded"
+		detail = strings.TrimPrefix(dt.message, "Uploading ")
 	}
 
-	// Convert "Downloading X" to "Downloaded X" for completion message
-	completionMsg := strings.Replace(dt.message, "Downloading ", "Downloaded ", 1)
-	completionMsg = strings.Replace(completionMsg, "Uploading ", "Uploaded ", 1)
-
-	// Include size in completion message
 	size := dt.total
 	if size == 0 {
 		size = dt.downloaded
 	}
 
 	if size > 0 {
-		fmt.Fprintf(dt.writer, "\r\033[K%s %s (%s)\n", Success(checkmark), completionMsg, formatBytes(size))
+		styled := AccentStyle.Render(fmt.Sprintf("%*s", VerbWidth, verb))
+		fmt.Fprintf(dt.writer, "\r\033[K%s  %s (%s)\n", styled, detail, formatBytes(size))
 	} else {
 		fmt.Fprintf(dt.writer, "\r\033[K\n")
 	}
 }
 
-// DoneWithMessage marks the download as complete with a custom message.
+// DoneWithMessage marks the download as complete with a custom verb-prefix message.
 func (dt *DownloadTracker) DoneWithMessage(message string) {
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
 
-	checkmark := "✓"
-	if NoColor {
-		checkmark = "[OK]"
-	}
-
-	fmt.Fprintf(dt.writer, "\r\033[K%s %s\n", Success(checkmark), message)
+	styled := AccentStyle.Render(fmt.Sprintf("%*s", VerbWidth, "Done"))
+	fmt.Fprintf(dt.writer, "\r\033[K%s  %s\n", styled, message)
 }
 
 // formatBytes formats bytes into human-readable form.

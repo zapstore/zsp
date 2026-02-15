@@ -44,12 +44,12 @@ func WithSpinner[T any](opts *cli.Options, message string, fn func() (T, error))
 		return fn()
 	}
 
-	spinner := ui.NewSpinner(message)
+	spinner := ui.NewStatusSpinner("Working", message)
 	spinner.Start()
 
 	result, err := fn()
 	if err != nil {
-		spinner.StopWithError(err.Error())
+		spinner.Fail("Error", err.Error())
 		return zero, err
 	}
 
@@ -63,16 +63,16 @@ func WithSpinnerMsg(opts *cli.Options, message string, fn func() error, successM
 		return fn()
 	}
 
-	spinner := ui.NewSpinner(message)
+	spinner := ui.NewStatusSpinner("Working", message)
 	spinner.Start()
 
 	err := fn()
 	msg := successMsg(err)
 
 	if err != nil {
-		spinner.StopWithWarning(msg)
+		spinner.Warn("Warning", msg)
 	} else {
-		spinner.StopWithSuccess(msg)
+		spinner.Done("Done", msg)
 	}
 
 	return err
@@ -80,8 +80,8 @@ func WithSpinnerMsg(opts *cli.Options, message string, fn func() error, successM
 
 // selectAssetInteractive prompts the user to select an asset from a ranked list.
 func selectAssetInteractive(ranked []picker.ScoredAsset) (*source.Asset, error) {
-	ui.PrintSectionHeader("Select Asset")
-	fmt.Printf("  %s\n", ui.Dim("Select the best asset for your target platform."))
+	ui.Status("Summary", "Select Asset")
+	fmt.Fprintf(os.Stderr, "  %s\n", ui.Dim("Select the best asset for your target platform."))
 
 	options := make([]string, len(ranked))
 	for i, sa := range ranked {
@@ -104,8 +104,8 @@ func selectAssetInteractive(ranked []picker.ScoredAsset) (*source.Asset, error) 
 // selectAssetsInteractive prompts the user to select one or more assets.
 // Top-ranked assets are pre-selected.
 func selectAssetsInteractive(ranked []picker.ScoredAsset) ([]*source.Asset, error) {
-	ui.PrintSectionHeader("Select Assets")
-	fmt.Printf("  %s\n", ui.Dim("Select assets to publish. Space to toggle, Enter to confirm."))
+	ui.Status("Summary", "Select Assets")
+	fmt.Fprintf(os.Stderr, "  %s\n", ui.Dim("Select assets to publish. Space to toggle, Enter to confirm."))
 
 	options := make([]string, len(ranked))
 	for i, sa := range ranked {
@@ -143,21 +143,21 @@ func confirmHash(sha256Hash string, isClosedSource bool, isLegacy bool) (bool, e
 		kindStr = "1063"
 	}
 	
-	fmt.Println()
-	ui.PrintWarning(fmt.Sprintf("You just signed an event attesting to this file hash (kind %s):", kindStr))
-	fmt.Println()
-	fmt.Printf("  %s\n", ui.Bold(sha256Hash))
-	fmt.Println()
-	fmt.Printf("  %s\n", ui.Bold("Make sure it matches the file you intend to distribute."))
-	fmt.Println()
-	fmt.Println("  To verify, run:")
-	fmt.Printf("    %s\n", ui.Dim("shasum -a 256 <path-to-file>   # macOS"))
-	fmt.Printf("    %s\n", ui.Dim("sha256sum <path-to-file>       # Linux"))
-	fmt.Println()
+	fmt.Fprintln(os.Stderr)
+	ui.WarningStatus("Warning", fmt.Sprintf("You just signed an event attesting to this file hash (kind %s):", kindStr))
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintf(os.Stderr, "  %s\n", ui.Bold(sha256Hash))
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintf(os.Stderr, "  %s\n", ui.Bold("Make sure it matches the file you intend to distribute."))
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "  To verify, run:")
+	fmt.Fprintf(os.Stderr, "    %s\n", ui.Dim("shasum -a 256 <path-to-file>   # macOS"))
+	fmt.Fprintf(os.Stderr, "    %s\n", ui.Dim("sha256sum <path-to-file>       # Linux"))
+	fmt.Fprintln(os.Stderr)
 
 	if isClosedSource {
-		ui.PrintWarning("This application has no repository (closed source).")
-		fmt.Println()
+		ui.WarningStatus("Warning", "This application has no repository (closed source).")
+		fmt.Fprintln(os.Stderr)
 	}
 
 	return ui.Confirm("Confirm hash is correct?", false)
@@ -175,20 +175,20 @@ func confirmHashes(assetInfos []*artifact.AssetInfo, assetPaths []string, isClos
 		kindStr = "1063"
 	}
 
-	fmt.Println()
-	ui.PrintWarning(fmt.Sprintf("You just signed events attesting to these file hashes (kind %s):", kindStr))
-	fmt.Println()
+	fmt.Fprintln(os.Stderr)
+	ui.WarningStatus("Warning", fmt.Sprintf("You just signed events attesting to these file hashes (kind %s):", kindStr))
+	fmt.Fprintln(os.Stderr)
 	for i, ai := range assetInfos {
 		filename := filepath.Base(assetPaths[i])
-		fmt.Printf("  %s  %s\n", ui.Bold(ai.SHA256), filename)
+		fmt.Fprintf(os.Stderr, "  %s  %s\n", ui.Bold(ai.SHA256), filename)
 	}
-	fmt.Println()
-	fmt.Printf("  %s\n", ui.Bold("Make sure they match the files you intend to distribute."))
-	fmt.Println()
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintf(os.Stderr, "  %s\n", ui.Bold("Make sure they match the files you intend to distribute."))
+	fmt.Fprintln(os.Stderr)
 
 	if isClosedSource {
-		ui.PrintWarning("This application has no repository (closed source).")
-		fmt.Println()
+		ui.WarningStatus("Warning", "This application has no repository (closed source).")
+		fmt.Fprintln(os.Stderr)
 	}
 
 	return ui.Confirm("Confirm hashes are correct?", false)
@@ -226,15 +226,19 @@ func confirmPublish(events *nostr.EventSet, relayURLs []string) (bool, error) {
 		assetKind = "1063"
 	}
 
-	ui.PrintSectionHeader("Ready to Publish")
-	fmt.Printf("  App: %s v%s\n", packageID, version)
+	ui.Status("Summary", "Ready to Publish")
+	ver := version
+	if ver != "" && !strings.HasPrefix(ver, "v") {
+		ver = "v" + ver
+	}
+	ui.Status("App", fmt.Sprintf("%s %s", packageID, ver))
 	assetStr := fmt.Sprintf("Kind %s (Asset)", assetKind)
 	if len(events.SoftwareAssets) > 1 {
 		assetStr = fmt.Sprintf("Kind %s (Assets x%d)", assetKind, len(events.SoftwareAssets))
 	}
-	fmt.Printf("  Events: Kind 32267 (App) + Kind 30063 (Release) + %s\n", assetStr)
-	fmt.Printf("  Target: %s\n", strings.Join(relayURLs, ", "))
-	fmt.Println()
+	ui.Status("Events", fmt.Sprintf("Kind 32267 (App) + Kind 30063 (Release) + %s", assetStr))
+	ui.Status("Target", strings.Join(relayURLs, ", "))
+	fmt.Fprintln(os.Stderr)
 
 	for {
 		options := []string{
@@ -261,16 +265,16 @@ func confirmPublish(events *nostr.EventSet, relayURLs []string) (bool, error) {
 
 // previewEventsJSON outputs events as formatted JSON with syntax highlighting.
 func previewEventsJSON(events *nostr.EventSet) {
-	ui.PrintSectionHeader("Signed Events (JSON)")
-	fmt.Println()
+	ui.Status("Summary", "Signed Events (JSON)")
+	fmt.Fprintln(os.Stderr)
 
-	fmt.Printf("  %s\n", ui.Bold("Kind 32267 (Software Application):"))
+	fmt.Fprintf(os.Stderr, "  %s\n", ui.Bold("Kind 32267 (Software Application):"))
 	printColorizedJSON(events.AppMetadata)
-	fmt.Println()
+	fmt.Fprintln(os.Stderr)
 
-	fmt.Printf("  %s\n", ui.Bold("Kind 30063 (Software Release):"))
+	fmt.Fprintf(os.Stderr, "  %s\n", ui.Bold("Kind 30063 (Software Release):"))
 	printColorizedJSON(events.Release)
-	fmt.Println()
+	fmt.Fprintln(os.Stderr)
 
 	// Determine asset kind based on actual event kind
 	assetKindStr := "3063"
@@ -283,22 +287,22 @@ func previewEventsJSON(events *nostr.EventSet) {
 		if len(events.SoftwareAssets) > 1 {
 			assetLabel = fmt.Sprintf("Kind %s (Software Asset %d):", assetKindStr, i+1)
 		}
-		fmt.Printf("  %s\n", ui.Bold(assetLabel))
+		fmt.Fprintf(os.Stderr, "  %s\n", ui.Bold(assetLabel))
 		printColorizedJSON(asset)
-		fmt.Println()
+		fmt.Fprintln(os.Stderr)
 	}
 }
 
-// OutputEvents prints events as formatted, colorized JSON.
+// OutputEvents prints events as formatted, colorized JSON to stderr.
 func OutputEvents(events *nostr.EventSet) {
-	fmt.Println()
-	fmt.Printf("%s\n", ui.Bold("Kind 32267 (Software Application):"))
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintf(os.Stderr, "%s\n", ui.Bold("Kind 32267 (Software Application):"))
 	printColorizedJSON(events.AppMetadata)
-	fmt.Println()
+	fmt.Fprintln(os.Stderr)
 
-	fmt.Printf("%s\n", ui.Bold("Kind 30063 (Software Release):"))
+	fmt.Fprintf(os.Stderr, "%s\n", ui.Bold("Kind 30063 (Software Release):"))
 	printColorizedJSON(events.Release)
-	fmt.Println()
+	fmt.Fprintln(os.Stderr)
 
 	// Determine asset kind based on actual event kind
 	assetKindStr := "3063"
@@ -311,9 +315,9 @@ func OutputEvents(events *nostr.EventSet) {
 		if len(events.SoftwareAssets) > 1 {
 			assetLabel = fmt.Sprintf("Kind %s (Software Asset %d):", assetKindStr, i+1)
 		}
-		fmt.Printf("%s\n", ui.Bold(assetLabel))
+		fmt.Fprintf(os.Stderr, "%s\n", ui.Bold(assetLabel))
 		printColorizedJSON(asset)
-		fmt.Println()
+		fmt.Fprintln(os.Stderr)
 	}
 }
 
@@ -356,13 +360,13 @@ func OutputUploadManifest(entries []UploadManifestEntry, blossomServer string) {
 	}
 }
 
-// printColorizedJSON prints a value as colorized JSON.
+// printColorizedJSON prints a value as colorized JSON to stderr.
 func printColorizedJSON(v any) {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return
 	}
-	fmt.Println(ui.ColorizeJSON(string(data)))
+	fmt.Fprintln(os.Stderr, ui.ColorizeJSON(string(data)))
 }
 

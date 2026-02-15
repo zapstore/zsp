@@ -75,9 +75,12 @@ func run(sigHandler *cli.SignalHandler) int {
 		ui.SetNoColor(true)
 	}
 
+	ui.SetVerbosity(opts.Global.Verbosity)
+	ui.SetJSONMode(opts.Global.JSON)
+
 	// Handle version flag
 	if opts.Global.Version {
-		fmt.Print(ui.RenderLogo())
+		fmt.Fprint(os.Stderr, ui.RenderLogo())
 		return 0
 	}
 
@@ -91,10 +94,10 @@ func run(sigHandler *cli.SignalHandler) int {
 	switch opts.Command {
 	case cli.CommandPublish:
 		return runPublishCommand(ctx, opts)
-	case cli.CommandIdentity:
-		return runIdentityCommand(ctx, opts)
-	case cli.CommandAPK:
-		return runAPKCommand(ctx, opts)
+	case cli.CommandLinkIdentity:
+		return runLinkIdentityCommand(ctx, opts)
+	case cli.CommandExtract:
+		return runExtractCommand(ctx, opts)
 	default:
 		// No subcommand - show help
 		help.HandleHelp(cli.CommandNone, nil)
@@ -107,6 +110,10 @@ func runPublishCommand(ctx context.Context, opts *cli.Options) int {
 	// Handle no-color for subcommand
 	if opts.Global.NoColor {
 		ui.SetNoColor(true)
+	}
+	// Wire quiet mode to the UI layer
+	if opts.Publish.Quiet {
+		ui.SetQuietMode(true)
 	}
 
 	// Handle --check flag (validates config without publishing)
@@ -168,21 +175,21 @@ func runPublishCommand(ctx context.Context, opts *cli.Options) int {
 	return 0
 }
 
-// runIdentityCommand handles the identity subcommand.
-func runIdentityCommand(ctx context.Context, opts *cli.Options) int {
+// runLinkIdentityCommand handles the link-identity subcommand.
+func runLinkIdentityCommand(ctx context.Context, opts *cli.Options) int {
 	// Handle no-color for subcommand
 	if opts.Global.NoColor {
 		ui.SetNoColor(true)
 	}
 
 	// Determine which identity operation
-	if opts.Identity.LinkKey != "" {
+	if opts.LinkIdentity.Set != "" {
 		if err := runLinkKey(ctx, opts); err != nil {
 			if errors.Is(err, ui.ErrInterrupted) || errors.Is(err, context.Canceled) {
 				return 130
 			}
 			if errors.Is(err, identity.ErrJKSFormat) {
-				fmt.Fprint(os.Stderr, identity.JKSConversionHelp(opts.Identity.LinkKey))
+				fmt.Fprint(os.Stderr, identity.JKSConversionHelp(opts.LinkIdentity.Set))
 				return 1
 			}
 			fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
@@ -191,13 +198,13 @@ func runIdentityCommand(ctx context.Context, opts *cli.Options) int {
 		return 0
 	}
 
-	if opts.Identity.Verify != "" {
+	if opts.LinkIdentity.Verify != "" {
 		if err := runVerifyIdentity(ctx, opts); err != nil {
 			if errors.Is(err, ui.ErrInterrupted) || errors.Is(err, context.Canceled) {
 				return 130
 			}
 			if errors.Is(err, identity.ErrJKSFormat) {
-				fmt.Fprint(os.Stderr, identity.JKSConversionHelp(opts.Identity.Verify))
+				fmt.Fprint(os.Stderr, identity.JKSConversionHelp(opts.LinkIdentity.Verify))
 				return 1
 			}
 			fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
@@ -207,32 +214,25 @@ func runIdentityCommand(ctx context.Context, opts *cli.Options) int {
 	}
 
 	// No operation specified - show help
-	help.HandleHelp(cli.CommandIdentity, nil)
+	help.HandleHelp(cli.CommandLinkIdentity, nil)
 	return 0
 }
 
-// runAPKCommand handles the apk subcommand.
-func runAPKCommand(ctx context.Context, opts *cli.Options) int {
+// runExtractCommand handles the extract subcommand (APK metadata as JSON).
+func runExtractCommand(ctx context.Context, opts *cli.Options) int {
 	// Handle no-color for subcommand
 	if opts.Global.NoColor {
 		ui.SetNoColor(true)
 	}
 
-	if opts.APK.Extract {
-		if len(opts.Args) == 0 || !strings.HasSuffix(strings.ToLower(opts.Args[0]), ".apk") {
-			fmt.Fprintln(os.Stderr, "Error: --extract requires a local APK file as argument")
-			fmt.Fprintln(os.Stderr, "Usage: zsp apk --extract <file.apk>")
-			return 1
-		}
-		if err := extractAPKMetadata(opts.Args[0]); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
-			return 1
-		}
-		return 0
+	if len(opts.Args) == 0 || !strings.HasSuffix(strings.ToLower(opts.Args[0]), ".apk") {
+		fmt.Fprintln(os.Stderr, ui.FormatError("extract requires a local APK file", "no .apk path provided", "Usage: zsp extract <file.apk>"))
+		return 1
 	}
-
-	// No operation specified - show help
-	help.HandleHelp(cli.CommandAPK, nil)
+	if err := extractAPKMetadata(opts.Args[0]); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
+		return 1
+	}
 	return 0
 }
 
@@ -312,7 +312,7 @@ func loadConfig(opts *cli.PublishOptions, args []string) (*config.Config, error)
 
 	// Launch interactive wizard
 	if opts.Quiet {
-		return nil, fmt.Errorf("no configuration provided. Use 'zsp publish -c <config.yaml>' or 'zsp publish -r <repo-url>'")
+		return nil, fmt.Errorf("%s", ui.FormatError("no configuration provided", "no config file or repo URL given", "Use 'zsp publish -c <config.yaml>' or 'zsp publish -r <repo-url>'"))
 	}
 
 	return config.RunWizardWithOptions(nil, config.WizardOptions{
@@ -508,7 +508,7 @@ func checkAPK(ctx context.Context, opts *cli.Options) error {
 	} else if _, statErr := os.Stat("zapstore.yaml"); statErr == nil {
 		cfg, err = config.Load("zapstore.yaml")
 	} else {
-		return fmt.Errorf("no configuration provided. Use 'zsp publish --check <config.yaml>'")
+		return fmt.Errorf("%s", ui.FormatError("no configuration provided", "no config file given", "Use 'zsp publish --check <config.yaml>'"))
 	}
 
 	if err != nil {
@@ -535,7 +535,7 @@ func checkAPK(ctx context.Context, opts *cli.Options) error {
 
 	apkAssets := picker.FilterAPKs(release.Assets)
 	if len(apkAssets) == 0 {
-		if opts.Global.Verbose {
+		if opts.Global.Verbosity >= 1 {
 			fmt.Fprintf(os.Stderr, "Release: %s\n", release.Version)
 			if release.TagName != "" && release.TagName != release.Version {
 				fmt.Fprintf(os.Stderr, "Tag: %s\n", release.TagName)
@@ -596,9 +596,9 @@ func checkAPK(ctx context.Context, opts *cli.Options) error {
 	return nil
 }
 
-// runLinkKey handles the --link-key flag for cryptographic identity proofs (NIP-C1).
+// runLinkKey handles the --set flag for cryptographic identity proofs (NIP-C1).
 func runLinkKey(ctx context.Context, opts *cli.Options) error {
-	filePath := opts.Identity.LinkKey
+	filePath := opts.LinkIdentity.Set
 
 	// Check file exists
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
@@ -606,7 +606,7 @@ func runLinkKey(ctx context.Context, opts *cli.Options) error {
 	}
 
 	// Parse expiry duration
-	expiry, err := cli.ParseExpiryDuration(opts.Identity.LinkKeyExpiry)
+	expiry, err := cli.ParseExpiryDuration(opts.LinkIdentity.SetExpiry)
 	if err != nil {
 		return fmt.Errorf("invalid --link-key-expiry: %w", err)
 	}
@@ -624,19 +624,19 @@ func runLinkKey(ctx context.Context, opts *cli.Options) error {
 	}
 
 	// Show certificate summary (skip in offline mode for clean output)
-	if !opts.Identity.Offline {
-		ui.PrintSectionHeader("Certificate Summary")
-		ui.PrintKeyValue("SPKIFP", certSPKIFP)
-		ui.PrintKeyValue("Validity", fmt.Sprintf("%d year(s)", int(expiry.Hours()/24/365)))
+	if !opts.LinkIdentity.Offline {
+		ui.Status("Summary", "Certificate")
+		ui.Status("SPKIFP", certSPKIFP)
+		ui.Status("Validity", fmt.Sprintf("%d year(s)", int(expiry.Hours()/24/365)))
 	}
 
 	// 2. Get signWith config
 	signWith := config.GetSignWith()
 	if signWith == "" {
-		if opts.Identity.Offline {
+		if opts.LinkIdentity.Offline {
 			return fmt.Errorf("SIGN_WITH environment variable required in offline mode")
 		}
-		ui.PrintSectionHeader("Signing Setup")
+		ui.Status("Summary", "Signing Setup")
 		signWith, err = config.PromptSignWith()
 		if err != nil {
 			return fmt.Errorf("signing setup failed: %w", err)
@@ -645,8 +645,8 @@ func runLinkKey(ctx context.Context, opts *cli.Options) error {
 
 	// 3. Create publisher with identity-specific relays (only needed for online mode)
 	var publisher *nostrpkg.Publisher
-	if !opts.Identity.Offline {
-		publisher = nostrpkg.NewPublisher(opts.Identity.Relays)
+	if !opts.LinkIdentity.Offline {
+		publisher = nostrpkg.NewPublisher(opts.LinkIdentity.Relays)
 	}
 
 	// 4. Try to get pubkey without opening browser (for nsec/npub/hex)
@@ -654,7 +654,7 @@ func runLinkKey(ctx context.Context, opts *cli.Options) error {
 	pubkeyHex, canCheckBeforeSigner := extractPubkeyFromSignWith(signWith)
 
 	// Check for existing identity proofs (skip in offline mode)
-	if !opts.Identity.Offline && canCheckBeforeSigner {
+	if !opts.LinkIdentity.Offline && canCheckBeforeSigner {
 		checkSpinner := ui.NewSpinner("Checking existing identity proofs...")
 		checkSpinner.Start()
 		existingProof, err := publisher.FetchIdentityProof(ctx, pubkeyHex, certSPKIFP)
@@ -679,7 +679,7 @@ func runLinkKey(ctx context.Context, opts *cli.Options) error {
 		pubkeyHex = signer.PublicKey()
 
 		// Check for existing proofs (skip in offline mode)
-		if !opts.Identity.Offline {
+		if !opts.LinkIdentity.Offline {
 			checkSpinner := ui.NewSpinner("Checking existing identity proofs...")
 			checkSpinner.Start()
 			existingProof, err := publisher.FetchIdentityProof(ctx, pubkeyHex, certSPKIFP)
@@ -706,7 +706,7 @@ func runLinkKey(ctx context.Context, opts *cli.Options) error {
 	identityEvent := nostrpkg.BuildIdentityProofEvent(identityTags, pubkeyHex, proof.CreatedAt)
 
 	// 8. Sign the identity event with Nostr key
-	if !opts.Identity.Offline {
+	if !opts.LinkIdentity.Offline {
 		signSpinner := ui.NewSpinner("Signing identity event...")
 		signSpinner.Start()
 		if err := signer.Sign(ctx, identityEvent); err != nil {
@@ -722,7 +722,7 @@ func runLinkKey(ctx context.Context, opts *cli.Options) error {
 	}
 
 	// 9. Offline mode: output event JSON to stdout and exit
-	if opts.Identity.Offline {
+	if opts.LinkIdentity.Offline {
 		data, err := json.Marshal(identityEvent)
 		if err != nil {
 			return fmt.Errorf("failed to marshal event: %w", err)
@@ -738,13 +738,13 @@ func runLinkKey(ctx context.Context, opts *cli.Options) error {
 	}
 
 	// 10. Interactive menu for preview/publish
-	ui.PrintSectionHeader("Ready to Publish")
-	fmt.Printf("  SPKIFP: %s\n", proof.SPKIFP)
-	fmt.Printf("  Nostr pubkey: %s\n", npub)
-	fmt.Printf("  Created: %s\n", proof.CreatedAtTime().Format("2006-01-02 15:04:05 UTC"))
-	fmt.Printf("  Expires: %s\n", proof.ExpiryTime().Format("2006-01-02 15:04:05 UTC"))
-	fmt.Printf("  Target: %s\n", strings.Join(opts.Identity.Relays, ", "))
-	fmt.Println()
+	ui.Status("Summary", "Ready to Publish")
+	ui.Status("SPKIFP", proof.SPKIFP)
+	ui.Status("Nostr pubkey", npub)
+	ui.Status("Created", proof.CreatedAtTime().Format("2006-01-02 15:04:05 UTC"))
+	ui.Status("Expires", proof.ExpiryTime().Format("2006-01-02 15:04:05 UTC"))
+	ui.Status("Target", strings.Join(opts.LinkIdentity.Relays, ", "))
+	fmt.Fprintln(os.Stderr)
 
 	for {
 		options := []string{
@@ -761,16 +761,16 @@ func runLinkKey(ctx context.Context, opts *cli.Options) error {
 		switch idx {
 		case 0:
 			// Preview JSON
-			fmt.Println()
-			fmt.Printf("%s\n", ui.Bold("Kind 30509 (Cryptographic Identity Proof):"))
+			fmt.Fprintln(os.Stderr)
+			fmt.Fprintf(os.Stderr, "%s\n", ui.Bold("Kind 30509 (Cryptographic Identity Proof):"))
 			printIdentityEventJSON(identityEvent)
-			fmt.Println()
+			fmt.Fprintln(os.Stderr)
 		case 1:
 			// Publish
 			return publishIdentityProof(ctx, publisher, identityEvent, opts)
 		case 2:
 			// Exit
-			fmt.Println(ui.Warning("Aborted - identity proof was NOT published"))
+			ui.WarningStatus("Aborted", "identity proof was NOT published")
 			return nil
 		}
 	}
@@ -778,7 +778,7 @@ func runLinkKey(ctx context.Context, opts *cli.Options) error {
 
 // publishIdentityProof publishes the identity proof event to relays.
 func publishIdentityProof(ctx context.Context, publisher *nostrpkg.Publisher, event *nostr.Event, opts *cli.Options) error {
-	publishSpinner := ui.NewSpinner(fmt.Sprintf("Publishing to %d relays...", len(opts.Identity.Relays)))
+	publishSpinner := ui.NewStatusSpinner("Publishing", fmt.Sprintf("to %d relays...", len(opts.LinkIdentity.Relays)))
 	publishSpinner.Start()
 
 	results := publisher.Publish(ctx, event)
@@ -789,33 +789,33 @@ func publishIdentityProof(ctx context.Context, publisher *nostrpkg.Publisher, ev
 		if r.Success {
 			successCount++
 		} else {
-			failures = append(failures, fmt.Sprintf("  ✗ %s: %v", r.RelayURL, r.Error))
+			failures = append(failures, fmt.Sprintf("  %s: %v", r.RelayURL, r.Error))
 		}
 	}
 
 	if successCount == len(results) {
-		publishSpinner.StopWithSuccess("Published successfully")
+		publishSpinner.Done("Published", "successfully")
 	} else if successCount > 0 {
-		publishSpinner.StopWithWarning("Published with some failures")
+		publishSpinner.Warn("Warning", "Published with some failures")
 	} else {
-		publishSpinner.StopWithError("Failed to publish")
+		publishSpinner.Fail("Error", "Failed to publish")
 	}
 
 	// Show individual relay results
 	for _, r := range results {
 		if r.Success {
-			fmt.Printf("  ✓ %s\n", r.RelayURL)
+			ui.Status("Done", r.RelayURL)
 		}
 	}
 	for _, f := range failures {
-		fmt.Println(f)
+		ui.ErrorStatus("Failed", f)
 	}
 
 	if successCount == 0 {
 		return fmt.Errorf("failed to publish to any relay")
 	}
 
-	ui.PrintCompletionSummary(true, fmt.Sprintf("Identity proof published to %d relay(s)", successCount))
+	ui.Status("Finished", fmt.Sprintf("Identity proof published to %d relay(s)", successCount))
 	return nil
 }
 
@@ -823,15 +823,15 @@ func publishIdentityProof(ctx context.Context, publisher *nostrpkg.Publisher, ev
 func printIdentityEventJSON(event *nostr.Event) {
 	data, err := json.MarshalIndent(event, "", "  ")
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return
 	}
-	fmt.Println(ui.ColorizeJSON(string(data)))
+	fmt.Fprintln(os.Stderr, ui.ColorizeJSON(string(data)))
 }
 
 // runVerifyIdentity handles the --verify flag to verify cryptographic identity proofs (NIP-C1).
 func runVerifyIdentity(ctx context.Context, opts *cli.Options) error {
-	filePath := opts.Identity.Verify
+	filePath := opts.LinkIdentity.Verify
 
 	// Check file exists
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
@@ -847,44 +847,42 @@ func runVerifyIdentity(ctx context.Context, opts *cli.Options) error {
 
 	if isAPK {
 		// Extract certificate from APK
-		ui.PrintSectionHeader("APK Certificate")
+		ui.Status("Summary", "APK Certificate")
 		cert, err = apk.ExtractCertificate(filePath)
 		if err != nil {
 			return fmt.Errorf("failed to extract certificate from APK: %w", err)
 		}
-		fmt.Printf("  File: %s\n", filepath.Base(filePath))
+		ui.Status("File", filepath.Base(filePath))
 	} else {
 		// Load x509 certificate from file
 		_, cert, err = loadX509FromFile(filePath)
 		if err != nil {
 			return err
 		}
-		ui.PrintSectionHeader("Certificate Loaded")
+		ui.Status("Summary", "Certificate Loaded")
 	}
 
 	// Display certificate info
 	if cert.Subject.CommonName != "" {
-		fmt.Printf("  Subject: %s\n", cert.Subject.CommonName)
+		ui.Status("Subject", cert.Subject.CommonName)
 	}
 	if len(cert.Subject.Organization) > 0 {
-		fmt.Printf("  Organization: %s\n", cert.Subject.Organization[0])
+		ui.Status("Organization", cert.Subject.Organization[0])
 	}
-	fmt.Printf("  Valid: %s to %s\n",
-		cert.NotBefore.Format("2006-01-02"),
-		cert.NotAfter.Format("2006-01-02"))
+	ui.Status("Valid", fmt.Sprintf("%s to %s", cert.NotBefore.Format("2006-01-02"), cert.NotAfter.Format("2006-01-02")))
 
 	// Compute SPKIFP from certificate
 	certSPKIFP, err := identity.ComputeSPKIFP(cert)
 	if err != nil {
 		return fmt.Errorf("failed to compute SPKIFP: %w", err)
 	}
-	fmt.Printf("  SPKIFP: %s\n", certSPKIFP)
+	ui.Status("SPKIFP", certSPKIFP)
 
 	// 2. Get pubkey to verify - for APKs, prompt for npub directly
 	var pubkeyHex string
 	if isAPK {
 		// For APKs, ask for the npub to verify against
-		fmt.Println()
+		fmt.Fprintln(os.Stderr)
 		npubInput, err := ui.Prompt("Enter npub to verify: ")
 		if err != nil {
 			return fmt.Errorf("failed to read input: %w", err)
@@ -906,7 +904,7 @@ func runVerifyIdentity(ctx context.Context, opts *cli.Options) error {
 		// For certificate files, use SIGN_WITH
 		signWith := config.GetSignWith()
 		if signWith == "" {
-			ui.PrintSectionHeader("Signing Setup")
+			ui.Status("Summary", "Signing Setup")
 			signWith, err = config.PromptSignWith()
 			if err != nil {
 				return fmt.Errorf("signing setup failed: %w", err)
@@ -929,13 +927,13 @@ func runVerifyIdentity(ctx context.Context, opts *cli.Options) error {
 		return fmt.Errorf("failed to encode public key: %w", err)
 	}
 
-	fmt.Println()
-	ui.PrintSectionHeader("Fetching Identity Proof")
-	fmt.Printf("  Nostr pubkey: %s\n", npub)
-	fmt.Printf("  Relays: %v\n", opts.Identity.Relays)
+	fmt.Fprintln(os.Stderr)
+	ui.Status("Summary", "Fetching Identity Proof")
+	ui.Status("Nostr pubkey", npub)
+	ui.Status("Relays", fmt.Sprintf("%v", opts.LinkIdentity.Relays))
 
 	// 5. Fetch identity proof for this SPKIFP from relays
-	publisher := nostrpkg.NewPublisher(opts.Identity.Relays)
+	publisher := nostrpkg.NewPublisher(opts.LinkIdentity.Relays)
 	identityEvent, err := publisher.FetchIdentityProof(ctx, pubkeyHex, certSPKIFP)
 	if err != nil {
 		return fmt.Errorf("failed to fetch identity proof: %w", err)
@@ -944,7 +942,7 @@ func runVerifyIdentity(ctx context.Context, opts *cli.Options) error {
 		return fmt.Errorf("no identity proof found for SPKIFP %s", certSPKIFP)
 	}
 
-	fmt.Printf("  Found identity proof (created: %s)\n", identityEvent.CreatedAt.Time().Format("2006-01-02 15:04:05 UTC"))
+	ui.Status("Found", fmt.Sprintf("identity proof (created: %s)", identityEvent.CreatedAt.Time().Format("2006-01-02 15:04:05 UTC")))
 
 	// 6. Parse the identity event
 	proof, err := identity.ParseIdentityProofFromEvent(identityEvent)
@@ -952,55 +950,55 @@ func runVerifyIdentity(ctx context.Context, opts *cli.Options) error {
 		return fmt.Errorf("failed to parse identity event: %w", err)
 	}
 
-	fmt.Println()
-	ui.PrintSectionHeader("Kind 30509 Event")
+	fmt.Fprintln(os.Stderr)
+	ui.Status("Summary", "Kind 30509 Event")
 	eventJSON, _ := json.MarshalIndent(identityEvent, "", "  ")
-	fmt.Println(string(eventJSON))
+	fmt.Fprintln(os.Stderr, string(eventJSON))
 
 	// 7. Verify the proof against the certificate
-	fmt.Println()
-	ui.PrintSectionHeader("Verification Results")
+	fmt.Fprintln(os.Stderr)
+	ui.Status("Summary", "Verification Results")
 	result := identity.VerifyIdentityProofWithCert(proof, identityEvent, pubkeyHex, cert)
 
-	fmt.Printf("  SPKIFP: %s\n", result.SPKIFP)
-	fmt.Printf("  Expiry: %s\n", result.ExpiryTime.Format("2006-01-02 15:04:05 UTC"))
+	ui.Status("SPKIFP", result.SPKIFP)
+	ui.Status("Expiry", result.ExpiryTime.Format("2006-01-02 15:04:05 UTC"))
 
 	// Show individual check results
 	if result.SPKIFPMatch {
-		fmt.Printf("  SPKIFP match: %s\n", ui.Success("YES"))
+		ui.Status("SPKIFP match", ui.Success("YES"))
 	} else {
-		fmt.Printf("  SPKIFP match: %s\n", ui.Error("NO"))
+		ui.Status("SPKIFP match", ui.Error("NO"))
 	}
 
 	if result.Revoked {
-		fmt.Printf("  Status: %s", ui.Error("REVOKED"))
+		detail := "REVOKED"
 		if result.RevokeReason != "" {
-			fmt.Printf(" (%s)", result.RevokeReason)
+			detail = fmt.Sprintf("REVOKED (%s)", result.RevokeReason)
 		}
-		fmt.Println()
+		ui.ErrorStatus("Status", detail)
 	} else if result.Expired {
-		fmt.Printf("  Status: %s\n", ui.Warning("EXPIRED"))
+		ui.WarningStatus("Status", "EXPIRED")
 	} else {
-		fmt.Printf("  Status: %s\n", ui.Success("ACTIVE"))
+		ui.Status("Status", ui.Success("ACTIVE"))
 	}
 
 	if result.Error != nil {
-		fmt.Printf("  Signature: %s\n", ui.Error("INVALID"))
-		fmt.Printf("  Error: %v\n", result.Error)
+		ui.ErrorStatus("Signature", "INVALID")
+		ui.ErrorStatus("Error", fmt.Sprintf("%v", result.Error))
 	} else if result.Valid {
-		fmt.Printf("  Signature: %s\n", ui.Success("VALID"))
+		ui.Status("Signature", ui.Success("VALID"))
 	}
 
-	fmt.Println()
+	fmt.Fprintln(os.Stderr)
 	if result.Valid && result.SPKIFPMatch && !result.Expired && !result.Revoked {
-		fmt.Println(ui.Success("✓ Cryptographic identity proof is fully verified"))
+		ui.Status("Done", "Cryptographic identity proof is fully verified")
 	} else if result.Valid && result.SPKIFPMatch && result.Expired {
-		fmt.Println(ui.Warning("⚠ Cryptographic identity proof is valid but EXPIRED"))
+		ui.WarningStatus("Warning", "Cryptographic identity proof is valid but EXPIRED")
 	} else if result.Valid && result.SPKIFPMatch && result.Revoked {
-		fmt.Println(ui.Error("✗ Cryptographic identity proof has been REVOKED"))
+		ui.ErrorStatus("Error", "Cryptographic identity proof has been REVOKED")
 		return fmt.Errorf("identity proof revoked")
 	} else {
-		fmt.Println(ui.Error("✗ Cryptographic identity proof verification failed"))
+		ui.ErrorStatus("Error", "Cryptographic identity proof verification failed")
 		return fmt.Errorf("verification failed")
 	}
 

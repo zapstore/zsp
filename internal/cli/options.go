@@ -14,18 +14,20 @@ import (
 type Command string
 
 const (
-	CommandNone     Command = ""
-	CommandPublish  Command = "publish"
-	CommandIdentity Command = "identity"
-	CommandAPK      Command = "apk"
+	CommandNone        Command = ""
+	CommandPublish     Command = "publish"
+	CommandLinkIdentity Command = "link-identity"
+	CommandExtract     Command = "extract"
 )
 
 // GlobalOptions holds flags available at root level and shared across subcommands.
 type GlobalOptions struct {
-	Verbose bool
-	NoColor bool
-	Version bool
-	Help    bool
+	Verbosity int  // 0=normal, 1=verbose (-v), 2=debug (-vv)
+	NoColor   bool
+	Version   bool
+	Help      bool
+	JSON      bool // Machine-readable JSON output
+	Yes       bool // Skip confirmation prompts (-y/--yes)
 }
 
 // PublishOptions holds flags specific to the publish subcommand.
@@ -44,8 +46,7 @@ type PublishOptions struct {
 	Commit         string // Git commit hash for reproducible builds
 	Channel    string // Release channel: main (default), beta, nightly, dev
 
-	// Behavior flags
-	Yes                 bool
+	// Behavior flags (Yes is global; Quiet still implies yes for publish)
 	Offline             bool // Sign events without uploading/publishing (outputs to stdout)
 	Quiet               bool
 	SkipPreview         bool
@@ -61,18 +62,18 @@ type PublishOptions struct {
 	Port int
 }
 
-// IdentityOptions holds flags specific to the identity subcommand.
-type IdentityOptions struct {
-	LinkKey       string   // Path to certificate file (.p12, .pfx, .pem, .crt)
-	LinkKeyExpiry string   // Validity period for identity proof (e.g., "1y", "6mo", "30d")
-	Verify        string   // Verify identity proof (path to certificate or APK)
-	Relays        []string // Relays for identity proof operations
-	Offline       bool     // Output event JSON to stdout instead of publishing
+// LinkIdentityOptions holds flags specific to the link-identity subcommand.
+type LinkIdentityOptions struct {
+	Set          string   // Path to certificate file (.p12, .pfx, .pem, .crt) for publishing proof
+	SetExpiry    string   // Validity period for identity proof when using --set (e.g., "1y", "6mo", "30d")
+	Verify       string   // Verify identity proof (path to certificate or APK)
+	Relays       []string // Relays for identity proof operations
+	Offline      bool     // Output event JSON to stdout instead of publishing
 }
 
-// APKOptions holds flags specific to the apk subcommand.
-type APKOptions struct {
-	Extract bool // Extract APK metadata as JSON
+// ExtractOptions holds options for the extract subcommand (positional arg is the APK file).
+type ExtractOptions struct {
+	// No flags; first positional arg is the APK path
 }
 
 // Options holds all CLI configuration options.
@@ -80,10 +81,10 @@ type Options struct {
 	Command Command
 	Args    []string // Remaining positional arguments
 
-	Global   GlobalOptions
-	Publish  PublishOptions
-	Identity IdentityOptions
-	APK      APKOptions
+	Global        GlobalOptions
+	Publish       PublishOptions
+	LinkIdentity  LinkIdentityOptions
+	Extract       ExtractOptions
 }
 
 // stringSliceFlag implements flag.Value to accumulate multiple flag values.
@@ -118,53 +119,77 @@ func ParseCommand() *Options {
 		return opts
 	}
 
-	// Check first arg for global flags or subcommand
-	first := args[0]
-
-	// Handle global flags at root
-	if first == "-h" || first == "--help" || first == "-help" {
+	// Preprocess: apply global flags from anywhere in args, then find command
+	// -v / -vv / --verbose (stackable verbosity), --json, -y/--yes, --no-color
+	var command string
+	var commandArgs []string
+	i := 0
+	for i < len(args) {
+		a := args[i]
+		switch a {
+		case "-h", "--help", "-help":
+			opts.Global.Help = true
+			opts.Args = args[i+1:]
+			return opts
+		case "--version", "-version":
+			opts.Global.Version = true
+			return opts
+		case "-v":
+			opts.Global.Verbosity = 1
+			i++
+			continue
+		case "-vv":
+			opts.Global.Verbosity = 2
+			i++
+			continue
+		case "--verbose":
+			opts.Global.Verbosity = 1
+			i++
+			continue
+		case "--json":
+			opts.Global.JSON = true
+			i++
+			continue
+		case "-y", "--yes":
+			opts.Global.Yes = true
+			i++
+			continue
+		case "--no-color":
+			opts.Global.NoColor = true
+			i++
+			continue
+		}
+		// First non-global-flag is the command
+		if len(a) > 0 && a[0] != '-' {
+			command = a
+			commandArgs = args[i+1:]
+			break
+		}
+		// Unknown flag or positional; treat as command so help can show
+		command = a
+		commandArgs = args[i+1:]
+		break
+	}
+	if command == "" {
 		opts.Global.Help = true
-		opts.Args = args[1:] // Pass remaining args for help search
 		return opts
-	}
-	if first == "-v" || first == "--version" || first == "-version" {
-		opts.Global.Version = true
-		return opts
-	}
-	if first == "--verbose" {
-		opts.Global.Verbose = true
-		args = args[1:]
-		if len(args) == 0 {
-			opts.Global.Help = true
-			return opts
-		}
-		first = args[0]
-	}
-	if first == "--no-color" {
-		opts.Global.NoColor = true
-		args = args[1:]
-		if len(args) == 0 {
-			opts.Global.Help = true
-			return opts
-		}
-		first = args[0]
 	}
 
 	// Dispatch to subcommand
-	switch first {
+	switch command {
 	case "publish":
 		opts.Command = CommandPublish
-		parsePublishFlags(opts, args[1:])
-	case "identity":
-		opts.Command = CommandIdentity
-		parseIdentityFlags(opts, args[1:])
-	case "apk":
-		opts.Command = CommandAPK
-		parseAPKFlags(opts, args[1:])
+		parsePublishFlags(opts, commandArgs)
+	case "link-identity":
+		opts.Command = CommandLinkIdentity
+		parseLinkIdentityFlags(opts, commandArgs)
+	case "extract":
+		opts.Command = CommandExtract
+		parseExtractFlags(opts, commandArgs)
 	default:
 		// Unknown subcommand - show help
 		opts.Global.Help = true
-		opts.Args = args
+		opts.Args = append([]string{command}, commandArgs...)
 	}
 
 	return opts
@@ -186,11 +211,15 @@ func parsePublishFlags(opts *Options, args []string) {
 	fs.StringVar(&opts.Publish.Version, "version", "", "Version for the published asset (overrides auto-detection)")
 	fs.StringVar(&opts.Publish.Commit, "commit", "", "Git commit hash for reproducible builds")
 	fs.StringVar(&opts.Publish.Channel, "channel", "main", "Release channel: main, beta, nightly, dev")
-	fs.BoolVar(&opts.Publish.Yes, "y", false, "Skip confirmations (auto-yes)")
+	fs.BoolVar(&opts.Global.Yes, "y", false, "Skip confirmations (auto-yes)")
+	fs.BoolVar(&opts.Global.Yes, "yes", false, "Skip confirmations (auto-yes)")
 	fs.BoolVar(&opts.Publish.Offline, "offline", false, "Sign events without uploading/publishing (outputs JSON to stdout)")
 	fs.BoolVar(&opts.Publish.Quiet, "quiet", false, "Minimal output, no prompts (implies -y)")
 	fs.BoolVar(&opts.Publish.Quiet, "q", false, "Minimal output, no prompts (alias)")
-	fs.BoolVar(&opts.Global.Verbose, "verbose", false, "Debug output")
+	fs.BoolVar(&opts.Global.JSON, "json", false, "Output JSON to stdout (status to stderr)")
+	var verboseBool bool
+	fs.BoolVar(&verboseBool, "v", false, "Verbose output")
+	fs.BoolVar(&verboseBool, "verbose", false, "Verbose output")
 	fs.BoolVar(&opts.Global.NoColor, "no-color", false, "Disable colored output")
 	fs.BoolVar(&opts.Publish.SkipPreview, "skip-preview", false, "Skip the browser preview prompt")
 	fs.IntVar(&opts.Publish.Port, "port", 0, "Custom port for browser preview/signing")
@@ -222,28 +251,35 @@ func parsePublishFlags(opts *Options, args []string) {
 		return
 	}
 
+	if verboseBool && opts.Global.Verbosity < 1 {
+		opts.Global.Verbosity = 1
+	}
+
 	opts.Publish.Metadata = metadataFlags
 	opts.Args = fs.Args()
 
 	// Quiet implies yes
 	if opts.Publish.Quiet {
-		opts.Publish.Yes = true
+		opts.Global.Yes = true
 	}
 }
 
-// parseIdentityFlags parses flags for the identity subcommand.
-func parseIdentityFlags(opts *Options, args []string) {
-	fs := flag.NewFlagSet("identity", flag.ContinueOnError)
+// parseLinkIdentityFlags parses flags for the link-identity subcommand.
+func parseLinkIdentityFlags(opts *Options, args []string) {
+	fs := flag.NewFlagSet("link-identity", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 
 	var relaysFlag stringSliceFlag
 
-	fs.StringVar(&opts.Identity.LinkKey, "link-key", "", "Publish cryptographic identity proof (NIP-C1 kind 30509)")
-	fs.StringVar(&opts.Identity.LinkKeyExpiry, "link-key-expiry", "1y", "Validity period for identity proof (e.g., 1y, 6mo, 30d)")
-	fs.StringVar(&opts.Identity.Verify, "verify", "", "Verify identity proof against certificate or APK")
+	fs.StringVar(&opts.LinkIdentity.Set, "set", "", "Publish cryptographic identity proof (NIP-C1 kind 30509)")
+	fs.StringVar(&opts.LinkIdentity.SetExpiry, "set-expiry", "1y", "Validity period for identity proof when using --set (e.g., 1y, 6mo, 30d)")
+	fs.StringVar(&opts.LinkIdentity.Verify, "verify", "", "Verify identity proof against certificate or APK")
 	fs.Var(&relaysFlag, "relays", "Relays for identity proofs (repeatable, overrides defaults)")
-	fs.BoolVar(&opts.Identity.Offline, "offline", false, "Output event JSON to stdout instead of publishing")
-	fs.BoolVar(&opts.Global.Verbose, "verbose", false, "Debug output")
+	fs.BoolVar(&opts.LinkIdentity.Offline, "offline", false, "Output event JSON to stdout instead of publishing")
+	fs.BoolVar(&opts.Global.JSON, "json", false, "Output JSON to stdout (status to stderr)")
+	var verboseBool bool
+	fs.BoolVar(&verboseBool, "v", false, "Verbose output")
+	fs.BoolVar(&verboseBool, "verbose", false, "Verbose output")
 	fs.BoolVar(&opts.Global.NoColor, "no-color", false, "Disable colored output")
 
 	// Help flag
@@ -253,7 +289,7 @@ func parseIdentityFlags(opts *Options, args []string) {
 
 	// Reorder args
 	reorderedArgs := reorderArgsForFlagSet(args, map[string]bool{
-		"--link-key": true, "--link-key-expiry": true, "--verify": true, "--relays": true,
+		"--set": true, "--set-expiry": true, "--verify": true, "--relays": true,
 	})
 
 	if err := fs.Parse(reorderedArgs); err != nil {
@@ -266,23 +302,29 @@ func parseIdentityFlags(opts *Options, args []string) {
 		return
 	}
 
+	if verboseBool && opts.Global.Verbosity < 1 {
+		opts.Global.Verbosity = 1
+	}
+
 	// Set identity relays (use defaults if not specified)
 	if len(relaysFlag) > 0 {
-		opts.Identity.Relays = relaysFlag
+		opts.LinkIdentity.Relays = relaysFlag
 	} else {
-		opts.Identity.Relays = DefaultIdentityRelays
+		opts.LinkIdentity.Relays = DefaultIdentityRelays
 	}
 
 	opts.Args = fs.Args()
 }
 
-// parseAPKFlags parses flags for the apk subcommand.
-func parseAPKFlags(opts *Options, args []string) {
-	fs := flag.NewFlagSet("apk", flag.ContinueOnError)
+// parseExtractFlags parses flags for the extract subcommand (positional arg is APK file).
+func parseExtractFlags(opts *Options, args []string) {
+	fs := flag.NewFlagSet("extract", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 
-	fs.BoolVar(&opts.APK.Extract, "extract", false, "Extract APK metadata as JSON")
-	fs.BoolVar(&opts.Global.Verbose, "verbose", false, "Debug output")
+	fs.BoolVar(&opts.Global.JSON, "json", false, "Output JSON to stdout (status to stderr)")
+	var verboseBool bool
+	fs.BoolVar(&verboseBool, "v", false, "Verbose output")
+	fs.BoolVar(&verboseBool, "verbose", false, "Verbose output")
 	fs.BoolVar(&opts.Global.NoColor, "no-color", false, "Disable colored output")
 
 	// Help flag
@@ -298,6 +340,10 @@ func parseAPKFlags(opts *Options, args []string) {
 	if showHelp {
 		opts.Global.Help = true
 		return
+	}
+
+	if verboseBool && opts.Global.Verbosity < 1 {
+		opts.Global.Verbosity = 1
 	}
 
 	opts.Args = fs.Args()
@@ -324,9 +370,9 @@ func reorderArgsForFlagSet(args []string, valuedFlags map[string]bool) []string 
 	return append(flags, positional...)
 }
 
-// IsInteractive returns true if the CLI should be interactive (for publish).
-func (o *PublishOptions) IsInteractive() bool {
-	return !o.Quiet && !o.Yes
+// IsPublishInteractive returns true if the publish command should be interactive.
+func (o *Options) IsPublishInteractive() bool {
+	return !o.Publish.Quiet && !o.Global.Yes
 }
 
 // ShouldShowSpinners returns true if spinners/progress should be shown (for publish).
@@ -343,13 +389,13 @@ func (o *PublishOptions) ValidateChannel() error {
 	return nil
 }
 
-// IsInteractive returns true if the CLI should be interactive (for identity).
-func (o *IdentityOptions) IsInteractive() bool {
+// IsInteractive returns true if the CLI should be interactive (for link-identity).
+func (o *LinkIdentityOptions) IsInteractive() bool {
 	return true
 }
 
-// ShouldShowSpinners returns true if spinners/progress should be shown (for identity).
-func (o *IdentityOptions) ShouldShowSpinners() bool {
+// ShouldShowSpinners returns true if spinners/progress should be shown (for link-identity).
+func (o *LinkIdentityOptions) ShouldShowSpinners() bool {
 	return true
 }
 

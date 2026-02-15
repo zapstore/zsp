@@ -42,6 +42,7 @@ type Publisher struct {
 	blossomURL               string
 	browserPort              int
 	existingReleaseTimestamp time.Time // created_at of existing 30063 on relay (for --overwrite-release)
+	executeStart             time.Time // set at start of Execute() for elapsed time
 }
 
 // primaryAssetInfo returns the first asset info (used for app-level metadata).
@@ -89,6 +90,8 @@ func NewPublisher(opts *cli.Options, cfg *config.Config) (*Publisher, error) {
 
 // Execute runs the complete publish workflow.
 func (p *Publisher) Execute(ctx context.Context) error {
+	p.executeStart = time.Now()
+
 	// Determine total steps based on mode
 	totalSteps := 4
 	if p.opts.Publish.Offline {
@@ -140,14 +143,14 @@ func (p *Publisher) Execute(ctx context.Context) error {
 	}
 
 	// Hash confirmation
-	if !p.opts.Publish.Yes {
+	if !p.opts.Global.Yes {
 		isClosedSource := p.cfg.Repository == ""
 		confirmed, err := confirmHashes(p.assetInfos, p.assetPaths, isClosedSource, p.opts.Publish.Legacy)
 		if err != nil {
 			return fmt.Errorf("hash confirmation failed: %w", err)
 		}
 		if !confirmed {
-			fmt.Println("  Aborted. No events were published.")
+			fmt.Fprintln(os.Stderr, "  Aborted. No events were published.")
 			p.clearCache()
 			return nil
 		}
@@ -168,8 +171,8 @@ func (p *Publisher) fetchAssets(ctx context.Context) error {
 		return p.fetchLocalAssets(ctx)
 	}
 
-	if p.opts.Global.Verbose {
-		fmt.Printf("Source type: %s\n", p.src.Type())
+	if p.opts.Global.Verbosity >= 1 {
+		ui.Detail("Source", fmt.Sprintf("%v", p.src.Type()))
 	}
 
 	// Fetch release
@@ -214,8 +217,8 @@ func (p *Publisher) fetchLocalAssets(ctx context.Context) error {
 		release, err := p.fetchRelease(ctx)
 		if err != nil && err != ErrNothingToDo {
 			// Non-fatal: we can proceed without release info
-			if p.opts.Global.Verbose {
-				fmt.Printf("  Could not fetch release info: %v\n", err)
+			if p.opts.Global.Verbosity >= 1 {
+				ui.Detail("Warning", fmt.Sprintf("Could not fetch release info: %v", err))
 			}
 		} else if release != nil {
 			p.release = release
@@ -234,13 +237,13 @@ func (p *Publisher) fetchLocalAssets(ctx context.Context) error {
 
 	if p.opts.Publish.ShouldShowSpinners() {
 		if len(p.selectedAssets) == 1 {
-			ui.PrintSuccess(fmt.Sprintf("Using local file %s", p.selectedAssets[0].Name))
+			ui.Status("Using", fmt.Sprintf("local file %s", p.selectedAssets[0].Name))
 		} else {
 			names := make([]string, len(p.selectedAssets))
 			for i, a := range p.selectedAssets {
 				names[i] = a.Name
 			}
-			ui.PrintSuccess(fmt.Sprintf("Using %d local files: %s", len(p.selectedAssets), strings.Join(names, ", ")))
+			ui.Status("Using", fmt.Sprintf("%d local files: %s", len(p.selectedAssets), strings.Join(names, ", ")))
 		}
 	}
 
@@ -262,8 +265,8 @@ func (p *Publisher) fetchRelease(ctx context.Context) (*source.Release, error) {
 
 	if err == source.ErrNotModified {
 		if p.opts.Publish.ShouldShowSpinners() {
-			ui.PrintSuccess("Release unchanged, nothing to do")
-			fmt.Println("  Release has not changed since last publish. Use --overwrite-release to publish anyway.")
+			ui.Status("Skipped", "Release unchanged, nothing to do")
+			ui.Status("Skipped", "Release unchanged since last publish. Use --overwrite-release to publish anyway.")
 		}
 		return nil, ErrNothingToDo
 	}
@@ -274,9 +277,9 @@ func (p *Publisher) fetchRelease(ctx context.Context) (*source.Release, error) {
 
 	if p.opts.Publish.ShouldShowSpinners() {
 		if release.Version != "" {
-			ui.PrintSuccess(fmt.Sprintf("Found release %s with %d assets", release.Version, len(release.Assets)))
+			ui.Status("Found", fmt.Sprintf("release %s with %d assets", release.Version, len(release.Assets)))
 		} else {
-			ui.PrintSuccess(fmt.Sprintf("Found %d assets (version pending)", len(release.Assets)))
+			ui.Status("Found", fmt.Sprintf("%d assets (version pending)", len(release.Assets)))
 		}
 	}
 
@@ -301,24 +304,24 @@ func (p *Publisher) selectAssets(ctx context.Context) ([]*source.Asset, error) {
 	}
 
 	if len(assets) == 0 {
-		if p.opts.Global.Verbose {
-			fmt.Printf("Release: %s\n", p.release.Version)
+		if p.opts.Global.Verbosity >= 1 {
+			ui.Detail("Release", p.release.Version)
 			if p.release.TagName != "" && p.release.TagName != p.release.Version {
-				fmt.Printf("Tag: %s\n", p.release.TagName)
+				ui.Detail("Tag", p.release.TagName)
 			}
 			if p.release.URL != "" {
-				fmt.Printf("URL: %s\n", p.release.URL)
+				ui.Detail("URL", p.release.URL)
 			}
 			if len(p.release.Assets) == 0 {
-				fmt.Println("Assets: (none)")
+				ui.Detail("Assets", "(none)")
 			} else {
-				fmt.Printf("Assets (%d):\n", len(p.release.Assets))
+				ui.Detail("Assets", fmt.Sprintf("(%d)", len(p.release.Assets)))
 				for _, asset := range p.release.Assets {
-					fmt.Printf("  - %s\n", asset.Name)
+					ui.Detail("", "  - "+asset.Name)
 				}
 			}
 		}
-		return nil, fmt.Errorf("no supported assets found in release")
+		return nil, fmt.Errorf("%s", ui.FormatError("no supported assets found in release", "release has no arm64-v8a APKs or matching assets", "Check -match or use a different release"))
 	}
 
 	// Apply match filter if specified
@@ -333,9 +336,9 @@ func (p *Publisher) selectAssets(ctx context.Context) ([]*source.Asset, error) {
 		}
 
 		// When --match is used in non-interactive mode, select ALL matching assets
-		if !p.opts.Publish.IsInteractive() {
+		if !p.opts.IsPublishInteractive() {
 			if p.opts.Publish.ShouldShowSpinners() {
-				ui.PrintSuccess(fmt.Sprintf("Selected %d assets matching %q", len(assets), p.cfg.Match))
+				ui.Status("Selected", fmt.Sprintf("%d assets matching %q", len(assets), p.cfg.Match))
 			}
 			return assets, nil
 		}
@@ -344,7 +347,7 @@ func (p *Publisher) selectAssets(ctx context.Context) ([]*source.Asset, error) {
 	// Single asset - use it
 	if len(assets) == 1 {
 		if p.opts.Publish.ShouldShowSpinners() {
-			ui.PrintSuccess(fmt.Sprintf("Selected %s", assets[0].Name))
+			ui.Status("Selected", assets[0].Name)
 		}
 		return []*source.Asset{assets[0]}, nil
 	}
@@ -352,21 +355,21 @@ func (p *Publisher) selectAssets(ctx context.Context) ([]*source.Asset, error) {
 	// Multiple assets - rank
 	ranked := picker.DefaultModel.RankAssets(assets)
 
-	if p.opts.Global.Verbose {
-		fmt.Println("  Ranked assets:")
+	if p.opts.Global.Verbosity >= 1 {
+		ui.Detail("Ranked", "assets:")
 		for i, sa := range ranked {
-			fmt.Printf("    %d. %s (score: %.2f)\n", i+1, sa.Asset.Name, sa.Score)
+			ui.Detail("", fmt.Sprintf("  %d. %s (score: %.2f)", i+1, sa.Asset.Name, sa.Score))
 		}
 	}
 
 	// Interactive multi-select if not quiet mode
-	if p.opts.Publish.IsInteractive() && len(ranked) > 1 {
+	if p.opts.IsPublishInteractive() && len(ranked) > 1 {
 		return selectAssetsInteractive(ranked)
 	}
 
 	// Non-interactive: auto-select best match (single asset for backward compat)
 	if p.opts.Publish.ShouldShowSpinners() {
-		ui.PrintSuccess(fmt.Sprintf("Selected %s (best match)", ranked[0].Asset.Name))
+		ui.Status("Selected", fmt.Sprintf("%s (best match)", ranked[0].Asset.Name))
 	}
 	return []*source.Asset{ranked[0].Asset}, nil
 }
@@ -406,7 +409,7 @@ func (p *Publisher) downloadAndParseOne(ctx context.Context, asset *source.Asset
 	}
 
 	if p.opts.Publish.ShouldShowSpinners() {
-		ui.PrintSuccess(fmt.Sprintf("Parsed %s", label))
+		ui.Status("Parsed", label)
 	}
 
 	// Backfill version from asset if not known from release
@@ -473,9 +476,9 @@ func (p *Publisher) postParseValidation(ctx context.Context) error {
 		if i > 0 && ai.Identifier != p.assetInfos[0].Identifier {
 			// Allow it for non-APK assets where identifier is derived from filename
 			// but warn in verbose mode
-			if p.opts.Global.Verbose {
-				fmt.Printf("  Note: asset %s has identifier %q (primary: %q)\n",
-					filepath.Base(p.assetPaths[i]), ai.Identifier, p.assetInfos[0].Identifier)
+			if p.opts.Global.Verbosity >= 1 {
+				ui.Detail("Note", fmt.Sprintf("asset %s has identifier %q (primary: %q)",
+					filepath.Base(p.assetPaths[i]), ai.Identifier, p.assetInfos[0].Identifier))
 			}
 		}
 	}
@@ -485,7 +488,7 @@ func (p *Publisher) postParseValidation(ctx context.Context) error {
 		if len(p.assetInfos) == 1 {
 			p.printAssetSummary(p.assetInfos[0], p.assetPaths[0])
 		} else {
-			ui.PrintSectionHeader(fmt.Sprintf("Assets (%d)", len(p.assetInfos)))
+			ui.Status("Summary", fmt.Sprintf("Assets (%d)", len(p.assetInfos)))
 			for i, ai := range p.assetInfos {
 				p.printAssetSummaryCompact(ai, p.assetPaths[i], i+1)
 			}
@@ -499,20 +502,20 @@ func (p *Publisher) postParseValidation(ctx context.Context) error {
 // printAssetSummary prints a detailed summary for a single asset.
 func (p *Publisher) printAssetSummary(ai *artifact.AssetInfo, assetPath string) {
 	if ai.IsAPK() {
-		ui.PrintSectionHeader("APK Summary")
-		ui.PrintKeyValue("Name", ai.Name)
-		ui.PrintKeyValue("App ID", ai.Identifier)
-		ui.PrintKeyValue("Version", fmt.Sprintf("%s (%d)", ai.Version, ai.APK.VersionCode))
-		ui.PrintKeyValue("Certificate hash", ai.APK.CertFingerprint)
+		ui.Status("Summary", "APK")
+		ui.Status("Name", ai.Name)
+		ui.Status("App ID", ai.Identifier)
+		ui.Status("Version", fmt.Sprintf("%s (%d)", ai.Version, ai.APK.VersionCode))
+		ui.Status("Cert hash", ai.APK.CertFingerprint)
 	} else {
-		ui.PrintSectionHeader("Asset Summary")
-		ui.PrintKeyValue("File", filepath.Base(assetPath))
-		ui.PrintKeyValue("Identifier", ai.Identifier)
-		ui.PrintKeyValue("Version", ai.Version)
-		ui.PrintKeyValue("Type", ai.MIMEType)
-		ui.PrintKeyValue("Platform", strings.Join(ai.Platforms, ", "))
+		ui.Status("Summary", "Asset")
+		ui.Status("File", filepath.Base(assetPath))
+		ui.Status("Identifier", ai.Identifier)
+		ui.Status("Version", ai.Version)
+		ui.Status("Type", ai.MIMEType)
+		ui.Status("Platform", strings.Join(ai.Platforms, ", "))
 	}
-	ui.PrintKeyValue("Size", fmt.Sprintf("%.2f MB", float64(ai.FileSize)/(1024*1024)))
+	ui.Status("Size", fmt.Sprintf("%.2f MB", float64(ai.FileSize)/(1024*1024)))
 }
 
 // printAssetSummaryCompact prints a compact one-line summary for multi-asset mode.
@@ -522,7 +525,7 @@ func (p *Publisher) printAssetSummaryCompact(ai *artifact.AssetInfo, assetPath s
 		platform = "unknown"
 	}
 	sizeMB := float64(ai.FileSize) / (1024 * 1024)
-	fmt.Printf("  %d. %s  %s  %.1f MB\n", num, filepath.Base(assetPath), platform, sizeMB)
+	fmt.Fprintf(os.Stderr, "  %d. %s  %s  %.1f MB\n", num, filepath.Base(assetPath), platform, sizeMB)
 }
 
 // getAssetPathFor returns the local path to an asset, downloading if necessary.
@@ -530,7 +533,7 @@ func (p *Publisher) getAssetPathFor(ctx context.Context, asset *source.Asset) (s
 	if asset.LocalPath != "" {
 		// Only print per-file message for the non-LocalAssetFiles path (single-file mode)
 		if p.opts.Publish.ShouldShowSpinners() && len(p.cfg.LocalAssetFiles) == 0 {
-			ui.PrintSuccess(fmt.Sprintf("Using local file %s", asset.Name))
+			ui.Status("Using", fmt.Sprintf("local file %s", asset.Name))
 		}
 		return asset.LocalPath, nil
 	}
@@ -541,14 +544,14 @@ func (p *Publisher) getAssetPathFor(ctx context.Context, asset *source.Asset) (s
 	} else if cachedPath := source.GetCachedDownload(asset.URL, asset.Name); cachedPath != "" {
 		asset.LocalPath = cachedPath
 		if p.opts.Publish.ShouldShowSpinners() {
-			ui.PrintSuccess(fmt.Sprintf("Using cached %s", asset.Name))
+			ui.Status("Using", fmt.Sprintf("cached %s", asset.Name))
 		}
 		return cachedPath, nil
 	}
 
 	// Download
-	if p.opts.Global.Verbose {
-		fmt.Printf("  Download URL: %s\n", asset.URL)
+	if p.opts.Global.Verbosity >= 1 {
+		ui.Detail("URL", asset.URL)
 	}
 
 	var tracker *ui.DownloadTracker
@@ -582,17 +585,16 @@ func (p *Publisher) checkExistingAsset(ctx context.Context) error {
 
 	existingAsset, err := p.publisher.CheckExistingAsset(ctx, primary.Identifier, primary.Version)
 	if err != nil {
-		if p.opts.Global.Verbose {
-			fmt.Printf("  Could not check relays: %v\n", err)
+		if p.opts.Global.Verbosity >= 1 {
+			ui.Detail("Warning", fmt.Sprintf("Could not check relays: %v", err))
 		}
 		return nil
 	}
 
 	if existingAsset != nil {
 		if p.opts.Publish.ShouldShowSpinners() {
-			ui.PrintWarning(fmt.Sprintf("Asset %s@%s already exists on %s",
+			ui.WarningStatus("Warning", fmt.Sprintf("Asset %s@%s already exists on %s; use --overwrite-release to publish anyway.",
 				primary.Identifier, primary.Version, existingAsset.RelayURL))
-			fmt.Println("  Use --overwrite-release to publish anyway.")
 		}
 		return ErrNothingToDo
 	}
@@ -611,7 +613,7 @@ func (p *Publisher) gatherMetadata(ctx context.Context) error {
 			return err
 		}
 	} else if p.opts.Publish.ShouldShowSpinners() {
-		ui.PrintInfo("Skipping metadata fetch (--skip-metadata)")
+		ui.Status("Skipping", "metadata fetch (--skip-metadata)")
 	}
 
 	// Determine release notes
@@ -637,7 +639,7 @@ func (p *Publisher) fetchExternalMetadata(ctx context.Context) error {
 
 	if len(metadataSources) == 0 {
 		if p.opts.Publish.ShouldShowSpinners() {
-			ui.PrintInfo("No external metadata sources configured")
+			ui.Status("Info", "No external metadata sources configured")
 		}
 		return nil
 	}
@@ -655,13 +657,13 @@ func (p *Publisher) fetchExternalMetadata(ctx context.Context) error {
 		return fmt.Sprintf("Fetched metadata from %s", strings.Join(metadataSources, ", "))
 	})
 
-	if err != nil && p.opts.Global.Verbose {
-		fmt.Printf("    %v\n", err)
+	if err != nil && p.opts.Global.Verbosity >= 1 {
+		ui.Detail("Warning", fmt.Sprintf("%v", err))
 	}
 
-	if p.opts.Global.Verbose && err == nil {
-		fmt.Printf("    name=%q, description=%d chars, tags=%v\n",
-			p.cfg.Name, len(p.cfg.Description), p.cfg.Tags)
+	if p.opts.Global.Verbosity >= 1 && err == nil {
+		ui.Detail("Metadata", fmt.Sprintf("name=%q, description=%d chars, tags=%v",
+			p.cfg.Name, len(p.cfg.Description), p.cfg.Tags))
 	}
 
 	return nil // Metadata errors are non-fatal
@@ -687,7 +689,7 @@ func (p *Publisher) preDownloadImages(ctx context.Context) error {
 // handlePreview shows the browser preview if requested.
 func (p *Publisher) handlePreview(ctx context.Context) error {
 	// Skip preview if metadata fetch was skipped (may have incomplete data)
-	if p.opts.Publish.Quiet || p.opts.Publish.Yes || p.opts.Publish.SkipPreview || p.opts.Publish.SkipMetadata {
+	if p.opts.Publish.Quiet || p.opts.Global.Yes || p.opts.Publish.SkipPreview || p.opts.Publish.SkipMetadata {
 		return nil
 	}
 
@@ -701,7 +703,7 @@ func (p *Publisher) handlePreview(ctx context.Context) error {
 		defaultPort = p.opts.Publish.Port
 	}
 
-	fmt.Println()
+	fmt.Fprintln(os.Stderr)
 	confirmed, port, err := ui.ConfirmWithPort("Preview release in browser?", defaultPort)
 	if err != nil {
 		return fmt.Errorf("prompt failed: %w", err)
@@ -749,8 +751,8 @@ func (p *Publisher) showPreview(ctx context.Context) error {
 			imgPath := resolvePath(img, p.cfg.BaseDir)
 			data, err := os.ReadFile(imgPath)
 			if err != nil {
-				if p.opts.Global.Verbose {
-					fmt.Printf("  Warning: failed to read local screenshot %s: %v\n", imgPath, err)
+				if p.opts.Global.Verbosity >= 1 {
+					ui.Detail("Warning", fmt.Sprintf("failed to read local screenshot %s: %v", imgPath, err))
 				}
 				continue
 			}
@@ -767,8 +769,8 @@ func (p *Publisher) showPreview(ctx context.Context) error {
 		return fmt.Errorf("failed to start preview server: %w", err)
 	}
 
-	fmt.Printf("Preview server started at %s\n", url)
-	fmt.Println("Press Enter to continue, or Ctrl+C to cancel...")
+	ui.Status("Preview", fmt.Sprintf("server started at %s", url))
+	fmt.Fprintln(os.Stderr, "Press Enter to continue, or Ctrl+C to cancel...")
 
 	// Wait for Enter with context support
 	err = cli.WaitForEnterWithContext(ctx)
@@ -816,7 +818,7 @@ func (p *Publisher) createSigner(ctx context.Context) error {
 		if p.opts.Publish.Quiet || p.opts.Publish.Offline {
 			return fmt.Errorf("SIGN_WITH environment variable is required")
 		}
-		ui.PrintSectionHeader("Signing Setup")
+		ui.Status("Summary", "Signing Setup")
 		var err error
 		signWith, err = config.PromptSignWith()
 		if err != nil {
@@ -826,7 +828,7 @@ func (p *Publisher) createSigner(ctx context.Context) error {
 
 	// Determine port for browser signer
 	signerPort := p.browserPort
-	if signWith == "browser" && p.browserPort == 0 && p.opts.Publish.IsInteractive() {
+	if signWith == "browser" && p.browserPort == 0 && p.opts.IsPublishInteractive() {
 		port, err := ui.ConfirmWithPortYesOnly("Browser signing port?", nostr.DefaultNIP07Port)
 		if err != nil {
 			return fmt.Errorf("prompt failed: %w", err)
@@ -842,8 +844,8 @@ func (p *Publisher) createSigner(ctx context.Context) error {
 		return fmt.Errorf("failed to create signer: %w", err)
 	}
 
-	if p.opts.Global.Verbose {
-		fmt.Printf("Signer type: %v, pubkey: %s...\n", p.signer.Type(), p.signer.PublicKey()[:16])
+	if p.opts.Global.Verbosity >= 1 {
+		ui.Detail("Signer", fmt.Sprintf("type=%v, pubkey=%s...", p.signer.Type(), p.signer.PublicKey()[:16]))
 	}
 
 	return nil
@@ -1166,12 +1168,13 @@ func extractHashFromBlossomURL(url string) string {
 // outputNpubEvents outputs unsigned events for npub signer.
 func (p *Publisher) outputNpubEvents() error {
 	if p.opts.Publish.ShouldShowSpinners() {
-		fmt.Println()
-		ui.PrintInfo("npub mode - outputting unsigned events for external signing")
+		fmt.Fprintln(os.Stderr)
+		ui.Status("Info", "npub mode - outputting unsigned events for external signing")
 	}
 	OutputEvents(p.events)
 	if p.opts.Publish.ShouldShowSpinners() {
-		ui.PrintCompletionSummary(true, "Unsigned events generated - sign externally before publishing")
+		elapsed := time.Since(p.executeStart)
+		ui.Status("Finished", fmt.Sprintf("Unsigned events generated - sign externally before publishing (%.1fs)", elapsed.Seconds()))
 	}
 	return nil
 }
@@ -1179,13 +1182,13 @@ func (p *Publisher) outputNpubEvents() error {
 // publishToRelays publishes events to configured relays.
 func (p *Publisher) publishToRelays(ctx context.Context) error {
 	// Confirm before publishing
-	if !p.opts.Publish.Yes {
+	if !p.opts.Global.Yes {
 		confirmed, err := confirmPublish(p.events, p.publisher.RelayURLs())
 		if err != nil {
 			return fmt.Errorf("confirmation failed: %w", err)
 		}
 		if !confirmed {
-			fmt.Println("  Aborted. No events were published.")
+			fmt.Fprintln(os.Stderr, "  Aborted. No events were published.")
 			p.clearCache()
 			return nil
 		}
@@ -1194,14 +1197,14 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 	// Publish with spinner
 	var publishSpinner *ui.Spinner
 	if p.opts.Publish.ShouldShowSpinners() {
-		publishSpinner = ui.NewSpinner(fmt.Sprintf("Publishing to %d relays...", len(p.publisher.RelayURLs())))
+		publishSpinner = ui.NewStatusSpinner("Publishing", fmt.Sprintf("to %d relays...", len(p.publisher.RelayURLs())))
 		publishSpinner.Start()
 	}
 
 	results, err := p.publisher.PublishEventSet(ctx, p.events)
 	if err != nil {
 		if publishSpinner != nil {
-			publishSpinner.StopWithError("Failed to publish")
+			publishSpinner.Fail("Error", "Failed to publish")
 		}
 		return fmt.Errorf("failed to publish: %w", err)
 	}
@@ -1216,7 +1219,7 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 				if r.IsDuplicate {
 					hasDuplicates = true
 					messages = append(messages, fmt.Sprintf("    %s -> %s: already exists", eventType, r.RelayURL))
-				} else if p.opts.Global.Verbose {
+				} else if p.opts.Global.Verbosity >= 1 {
 					messages = append(messages, fmt.Sprintf("    %s -> %s: OK", eventType, r.RelayURL))
 				}
 			} else {
@@ -1229,17 +1232,17 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 	if publishSpinner != nil {
 		if allSuccess {
 			if hasDuplicates {
-				publishSpinner.StopWithSuccess("Published (some events already existed)")
+				publishSpinner.Done("Published", "some events already existed")
 			} else {
-				publishSpinner.StopWithSuccess("Published successfully")
+				publishSpinner.Done("Published", "successfully")
 			}
 		} else {
-			publishSpinner.StopWithWarning("Published with some failures")
+			publishSpinner.Warn("Warning", "Published with some failures")
 		}
 	}
 
 	for _, msg := range messages {
-		fmt.Println(msg)
+		fmt.Fprintln(os.Stderr, msg)
 	}
 
 	// Commit or clear cache
@@ -1248,8 +1251,8 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 		p.deleteCachedAPK()
 	} else {
 		p.clearCache()
-		if p.opts.Global.Verbose {
-			fmt.Println("  Cleared release cache for retry")
+		if p.opts.Global.Verbosity >= 1 {
+			fmt.Fprintln(os.Stderr, "  Cleared release cache for retry")
 		}
 	}
 
@@ -1261,10 +1264,15 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 			if len(p.assetInfos) > 1 {
 				assetCountStr = fmt.Sprintf(" (%d assets)", len(p.assetInfos))
 			}
-			ui.PrintCompletionSummary(true, fmt.Sprintf("Published %s v%s%s to %s",
-				primary.Identifier, primary.Version, assetCountStr, strings.Join(p.publisher.RelayURLs(), ", ")))
+			ver := primary.Version
+			if ver != "" && !strings.HasPrefix(ver, "v") {
+				ver = "v" + ver
+			}
+			elapsed := time.Since(p.executeStart)
+			ui.Status("Finished", fmt.Sprintf("Published %s %s%s to %s (%.1fs)",
+				primary.Identifier, ver, assetCountStr, strings.Join(p.publisher.RelayURLs(), ", "), elapsed.Seconds()))
 		} else {
-			ui.PrintCompletionSummary(false, "Published with some failures")
+			ui.WarningStatus("Warning", "Published with some failures")
 		}
 	}
 
@@ -1322,7 +1330,7 @@ func (p *Publisher) showZapstoreURL(results map[string][]nostr.PublishResult) {
 		return
 	}
 
-	fmt.Printf("  View your app: https://zapstore.dev/apps/%s\n\n", naddr)
+	ui.Status("View", fmt.Sprintf("https://zapstore.dev/apps/%s", naddr))
 }
 
 // clearCache clears the source cache.

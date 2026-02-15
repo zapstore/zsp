@@ -259,53 +259,32 @@ func PromptInt(message string, defaultValue int) (int, error) {
 	return value, nil
 }
 
-// PrintHeader prints a section header (legacy - use StepTracker for numbered steps).
+// PrintHeader prints a section header (legacy - use Status() for new code).
 func PrintHeader(message string) {
-	fmt.Println()
-	if NoColor {
-		fmt.Printf("=== %s ===\n", message)
-	} else {
-		fmt.Printf("  %s\n", InfoStyle.Render("─── "+message+" ───"))
-	}
+	Status("Summary", message)
 }
 
-// PrintSuccess prints a success message.
+// PrintSuccess prints a success message using the verb-prefix pattern.
 func PrintSuccess(message string) {
-	checkmark := "✓"
-	if NoColor {
-		checkmark = "[OK]"
-	}
-	fmt.Printf("%s %s\n", Success(checkmark), message)
+	Status("Done", message)
 }
 
-// PrintError prints an error message.
+// PrintError prints an error message using the verb-prefix pattern.
 func PrintError(message string) {
-	cross := "✗"
-	if NoColor {
-		cross = "[ERROR]"
-	}
-	fmt.Printf("%s %s\n", Error(cross), message)
+	ErrorStatus("Error", message)
 }
 
-// PrintWarning prints a warning message.
+// PrintWarning prints a warning message using the verb-prefix pattern.
 func PrintWarning(message string) {
-	warning := "⚠"
-	if NoColor {
-		warning = "[WARN]"
-	}
-	fmt.Printf("%s %s\n", Warning(warning), message)
+	WarningStatus("Warning", message)
 }
 
-// PrintInfo prints an info message.
+// PrintInfo prints an info message using the verb-prefix pattern.
 func PrintInfo(message string) {
-	info := "ℹ"
-	if NoColor {
-		info = "[INFO]"
-	}
-	fmt.Printf("%s %s\n", Info(info), message)
+	Status("Info", message)
 }
 
-// PrintKeyValue prints a key-value pair.
+// PrintKeyValue prints a key-value pair using the verb-prefix pattern.
 func PrintKeyValue(key, value string) {
-	fmt.Printf("  %s: %s\n", Bold(key), value)
+	Status(key, value)
 }

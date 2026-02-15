@@ -3,6 +3,7 @@ package apk
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -97,8 +98,12 @@ func TestParseAllTestAPKs(t *testing.T) {
 					t.Error("CertFingerprint is empty")
 				}
 
-				t.Logf("%s: %s v%s (%d) - archs: %v - label: %q",
-					entry.Name(), info.PackageID, info.VersionName, info.VersionCode, info.Architectures, info.Label)
+				ver := info.VersionName
+				if ver != "" && !strings.HasPrefix(ver, "v") {
+					ver = "v" + ver
+				}
+				t.Logf("%s: %s %s (%d) - archs: %v - label: %q",
+					entry.Name(), info.PackageID, ver, info.VersionCode, info.Architectures, info.Label)
 			})
 		}
 	}
