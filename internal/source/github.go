@@ -38,7 +38,8 @@ type GitHub struct {
 	token     string
 	client    *http.Client
 	cacheDir  string
-	SkipCache bool // Set to true to bypass ETag cache (--overwrite-release)
+	SkipCache          bool // Set to true to bypass ETag cache (--overwrite-release)
+	IncludePreReleases bool // Set to true to include pre-releases (--pre-release)
 
 	// pending holds cache data from the last fetch, not yet committed to disk.
 	// Call CommitCache() after successful publishing to persist it.
@@ -238,8 +239,8 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	var selectedRelease *githubRelease
 	for i := range releases {
 		ghRelease := &releases[i]
-		// Skip drafts and prereleases
-		if ghRelease.Draft {
+		// Skip drafts; skip prereleases unless explicitly included
+		if ghRelease.Draft || (ghRelease.Prerelease && !g.IncludePreReleases) {
 			continue
 		}
 

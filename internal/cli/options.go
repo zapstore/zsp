@@ -46,6 +46,7 @@ type PublishOptions struct {
 	Quiet               bool
 	SkipPreview         bool
 	OverwriteRelease    bool
+	IncludePreReleases  bool
 	SkipMetadata        bool
 	Legacy              bool
 	AppCreatedAtRelease bool // Use release timestamp for kind 32267 created_at
@@ -187,6 +188,7 @@ func parsePublishFlags(opts *Options, args []string) {
 	fs.BoolVar(&opts.Publish.SkipPreview, "skip-preview", false, "Skip the browser preview prompt")
 	fs.IntVar(&opts.Publish.Port, "port", 0, "Custom port for browser preview/signing")
 	fs.BoolVar(&opts.Publish.OverwriteRelease, "overwrite-release", false, "Bypass cache and re-publish even if release unchanged")
+	fs.BoolVar(&opts.Publish.IncludePreReleases, "pre-release", false, "Include pre-releases when fetching the latest release")
 	fs.BoolVar(&opts.Publish.SkipMetadata, "skip-metadata", false, "Skip fetching metadata from external sources")
 	fs.BoolVar(&opts.Publish.Wizard, "wizard", false, "Run interactive wizard (uses existing config as defaults)")
 	fs.BoolVar(&opts.Publish.Legacy, "legacy", true, "Use legacy event format for relay.zapstore.dev compatibility")

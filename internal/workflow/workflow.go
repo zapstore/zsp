@@ -47,8 +47,9 @@ type Publisher struct {
 func NewPublisher(opts *cli.Options, cfg *config.Config) (*Publisher, error) {
 	// Create source with base directory for relative paths
 	src, err := source.NewWithOptions(cfg, source.Options{
-		BaseDir:   cfg.BaseDir,
-		SkipCache: opts.Publish.OverwriteRelease,
+		BaseDir:            cfg.BaseDir,
+		SkipCache:          opts.Publish.OverwriteRelease,
+		IncludePreReleases: opts.Publish.IncludePreReleases,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create source: %w", err)

@@ -163,6 +163,9 @@ type Options struct {
 
 	// SkipCache bypasses ETag cache for GitHub sources (--overwrite-release).
 	SkipCache bool
+
+	// IncludePreReleases includes pre-releases when fetching the latest release (--pre-release).
+	IncludePreReleases bool
 }
 
 // New creates a new source based on the config.
@@ -187,11 +190,17 @@ func NewWithOptions(cfg *config.Config, opts Options) (Source, error) {
 			return nil, err
 		}
 		gh.SkipCache = opts.SkipCache
+		gh.IncludePreReleases = opts.IncludePreReleases
 		return gh, nil
 	case config.SourceGitLab:
 		return NewGitLab(cfg)
 	case config.SourceGitea:
-		return NewGitea(cfg)
+		gt, err := NewGitea(cfg)
+		if err != nil {
+			return nil, err
+		}
+		gt.IncludePreReleases = opts.IncludePreReleases
+		return gt, nil
 	case config.SourceFDroid:
 		return NewFDroid(cfg)
 	case config.SourceWeb:

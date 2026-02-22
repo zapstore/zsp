@@ -479,8 +479,9 @@ func checkAPK(ctx context.Context, opts *cli.Options) error {
 	}
 
 	src, err := source.NewWithOptions(cfg, source.Options{
-		BaseDir:   cfg.BaseDir,
-		SkipCache: true,
+		BaseDir:            cfg.BaseDir,
+		SkipCache:          true,
+		IncludePreReleases: opts.Publish.IncludePreReleases,
 	})
 	if err != nil {
 		return err

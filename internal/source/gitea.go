@@ -17,12 +17,13 @@ import (
 // Gitea implements Source for Gitea/Forgejo/Codeberg releases.
 // This covers any Gitea-compatible forge (Gitea, Forgejo, Codeberg, etc.)
 type Gitea struct {
-	cfg      *config.Config
-	baseURL  string // e.g., "https://codeberg.org"
-	owner    string
-	repo     string
-	token    string
-	client   *http.Client
+	cfg                *config.Config
+	baseURL            string // e.g., "https://codeberg.org"
+	owner              string
+	repo               string
+	token              string
+	client             *http.Client
+	IncludePreReleases bool // Set to true to include pre-releases (--pre-release)
 }
 
 // NewGitea creates a new Gitea source.
@@ -125,7 +126,8 @@ func (g *Gitea) fetchLatestFromList(ctx context.Context) (*Release, error) {
 
 	// Find the first non-draft release with valid APKs
 	for _, r := range releases {
-		if r.Draft {
+		// Skip drafts; skip prereleases unless explicitly included
+		if r.Draft || (r.Prerelease && !g.IncludePreReleases) {
 			continue
 		}
 		release := g.convertRelease(&r)
