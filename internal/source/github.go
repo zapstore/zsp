@@ -171,14 +171,14 @@ type githubAsset struct {
 }
 
 // FetchLatestRelease fetches the latest release from GitHub that contains valid APKs.
-// Iterates through up to 10 releases to find one with APK assets (for repos that
-// publish desktop and mobile releases separately).
-// Uses conditional requests (ETag/If-None-Match) to reduce rate limit usage.
-// Returns ErrNotModified if the releases haven't changed since the last check.
-// Set SkipCache field to true to bypass the ETag check and always fetch fresh data.
+// First tries /releases/latest (single request, fast path). If that release is a draft,
+// a pre-release (when not opted in), or carries no valid APKs, falls back to scanning
+// the most recent releases list to find one that qualifies.
+// Uses conditional requests (ETag/If-None-Match) on the fast path to reduce rate limit
+// usage. Returns ErrNotModified if the latest release hasn't changed since the last check.
+// Set SkipCache to true to bypass the ETag check and always fetch fresh data.
 func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
-	// Fetch multiple releases to find one with valid APKs
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases?per_page=%d", g.owner, g.repo, maxReleasesToCheck)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", g.owner, g.repo)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -200,27 +200,84 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 
 	resp, err := g.client.Do(req)
 	if err != nil {
+		return nil, fmt.Errorf("failed to fetch latest release: %w", err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusNotModified:
+		return nil, ErrNotModified
+	case http.StatusNotFound:
+		return nil, fmt.Errorf("no releases found for %s/%s", g.owner, g.repo)
+	case http.StatusForbidden:
+		if resp.Header.Get("X-RateLimit-Remaining") == "0" {
+			return nil, fmt.Errorf("GitHub API rate limit exceeded. Set GITHUB_TOKEN environment variable to increase limits")
+		}
+		return nil, fmt.Errorf("GitHub API access forbidden")
+	case http.StatusOK:
+		// handled below
+	default:
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("GitHub API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var ghRelease githubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&ghRelease); err != nil {
+		return nil, fmt.Errorf("failed to parse latest release: %w", err)
+	}
+
+	// Use the fast-path result if it qualifies: not a draft, not an unwanted pre-release,
+	// and actually contains a valid APK.
+	if !ghRelease.Draft && !(ghRelease.Prerelease && !g.IncludePreReleases) {
+		release := g.convertRelease(&ghRelease)
+		if HasValidAPKs(release.Assets) {
+			// Store ETag and release for later commit (after successful publish).
+			if etag := resp.Header.Get("ETag"); etag != "" {
+				g.pending = &pendingCache{ETag: etag, Release: &ghRelease}
+			}
+			return release, nil
+		}
+	}
+
+	// Fast path didn't yield a valid APK — fall back to scanning the release list.
+	return g.fetchLatestFromList(ctx)
+}
+
+// fetchLatestFromList scans up to maxReleasesToCheck releases and returns the first one
+// that is not a draft, passes the pre-release filter, and contains valid APKs.
+// Used as a fallback when /releases/latest does not itself contain a valid APK
+// (e.g. repos that publish separate desktop and mobile releases).
+// ETag is intentionally not cached here: the cached ETag is bound to /releases/latest,
+// and mixing endpoints would cause the conditional-request optimisation to stop working.
+func (g *GitHub) fetchLatestFromList(ctx context.Context) (*Release, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases?per_page=%d", g.owner, g.repo, maxReleasesToCheck)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if g.token != "" {
+		req.Header.Set("Authorization", "Bearer "+g.token)
+	}
+
+	resp, err := g.client.Do(req)
+	if err != nil {
 		return nil, fmt.Errorf("failed to fetch releases: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Handle 304 Not Modified - no new releases since last check
-	if resp.StatusCode == http.StatusNotModified {
-		return nil, ErrNotModified
-	}
-
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("no releases found for %s/%s", g.owner, g.repo)
 	}
-
 	if resp.StatusCode == http.StatusForbidden {
-		// Check for rate limiting
 		if resp.Header.Get("X-RateLimit-Remaining") == "0" {
 			return nil, fmt.Errorf("GitHub API rate limit exceeded. Set GITHUB_TOKEN environment variable to increase limits")
 		}
 		return nil, fmt.Errorf("GitHub API access forbidden")
 	}
-
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("GitHub API error (status %d): %s", resp.StatusCode, string(body))
@@ -235,36 +292,18 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		return nil, fmt.Errorf("no releases found for %s/%s", g.owner, g.repo)
 	}
 
-	// Find the first release with valid APKs
-	var selectedRelease *githubRelease
 	for i := range releases {
 		ghRelease := &releases[i]
-		// Skip drafts; skip prereleases unless explicitly included
 		if ghRelease.Draft || (ghRelease.Prerelease && !g.IncludePreReleases) {
 			continue
 		}
-
 		release := g.convertRelease(ghRelease)
 		if HasValidAPKs(release.Assets) {
-			selectedRelease = ghRelease
-			break
+			return release, nil
 		}
 	}
 
-	if selectedRelease == nil {
-		return nil, fmt.Errorf("no releases with valid APKs found in the last %d releases for %s/%s", maxReleasesToCheck, g.owner, g.repo)
-	}
-
-	// Store ETag and release data for later commit (after successful publish).
-	// Don't save to disk yet - call CommitCache() after successful publishing.
-	if etag := resp.Header.Get("ETag"); etag != "" {
-		g.pending = &pendingCache{
-			ETag:    etag,
-			Release: selectedRelease,
-		}
-	}
-
-	return g.convertRelease(selectedRelease), nil
+	return nil, fmt.Errorf("no releases with valid APKs found in the last %d releases for %s/%s", maxReleasesToCheck, g.owner, g.repo)
 }
 
 // convertRelease converts a GitHub release to our Release type.
