@@ -323,8 +323,10 @@ func (p *Publisher) getAPKPath(ctx context.Context) (string, error) {
 		return p.selectedAsset.LocalPath, nil
 	}
 
-	// Check download cache
-	if cachedPath := source.GetCachedDownload(p.selectedAsset.URL, p.selectedAsset.Name); cachedPath != "" {
+	// Check download cache (evict if --overwrite-release so a replaced remote file is re-downloaded)
+	if p.opts.Publish.OverwriteRelease && p.selectedAsset.URL != "" {
+		_ = source.DeleteCachedDownload(p.selectedAsset.URL, p.selectedAsset.Name)
+	} else if cachedPath := source.GetCachedDownload(p.selectedAsset.URL, p.selectedAsset.Name); cachedPath != "" {
 		p.selectedAsset.LocalPath = cachedPath
 		if p.opts.Publish.ShouldShowSpinners() {
 			ui.PrintSuccess("Using cached APK")
