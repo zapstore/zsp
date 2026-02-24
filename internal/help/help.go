@@ -158,7 +158,7 @@ func PublishHelp() string {
 	b.WriteString(renderPurpleBold("OTHER FLAGS") + "\n")
 	writeFlag(&b, "--check", "Verify config fetches arm64-v8a APK (exit 0=success)")
 	b.WriteString("                            " + renderGreyDark("Useful for CI/CD validation") + "\n")
-	writeFlag(&b, "--legacy", "Use legacy event format (default: true)")
+	writeFlag(&b, "--legacy", "Use legacy event format (default: false)")
 	writeFlag(&b, "--verbose", "Debug output")
 	writeFlag(&b, "--no-color", "Disable colored output")
 	writeFlag(&b, "-h, --help", "Show this help")
