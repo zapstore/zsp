@@ -421,6 +421,10 @@ type BuildEventSetParams struct {
 	// UseReleaseTimestampForApp sets kind 32267 created_at to ReleaseTimestamp.
 	// When false, app metadata keeps current-time created_at.
 	UseReleaseTimestampForApp bool
+	// MinReleaseTimestamp ensures Release.CreatedAt is strictly greater than this value.
+	// Used with --overwrite-release to guarantee NIP-33 replacement when the relay
+	// has an existing event with the same or newer timestamp.
+	MinReleaseTimestamp time.Time
 }
 
 // BuildEventSet creates all events for an APK release.
@@ -547,6 +551,19 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		}
 		if params.UseReleaseTimestampForApp {
 			eventSet.AppMetadata.CreatedAt = ts
+		}
+	}
+
+	// When overwriting a release, ensure created_at is strictly greater than the
+	// existing event's timestamp so the relay's NIP-33 replacement guard fires.
+	if !params.MinReleaseTimestamp.IsZero() {
+		minTS := nostr.Timestamp(params.MinReleaseTimestamp.Unix())
+		if eventSet.Release.CreatedAt <= minTS {
+			bumpTS := minTS + 1
+			eventSet.Release.CreatedAt = bumpTS
+			for _, asset := range eventSet.SoftwareAssets {
+				asset.CreatedAt = bumpTS
+			}
 		}
 	}
 

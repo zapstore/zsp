@@ -56,6 +56,7 @@ type UploadParams struct {
 	Opts                *cli.Options
 	Legacy              bool
 	AppCreatedAtRelease bool
+	MinReleaseTimestamp time.Time // Bump Release.CreatedAt above this (--overwrite-release)
 }
 
 // uploadItem represents a file to upload with its auth event.
@@ -311,6 +312,7 @@ func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.Ev
 		LegacyFormat:              params.Legacy,
 		ReleaseTimestamp:          releaseTimestamp,
 		UseReleaseTimestampForApp: params.AppCreatedAtRelease,
+		MinReleaseTimestamp:       params.MinReleaseTimestamp,
 	})
 
 	// Pre-compute asset event IDs

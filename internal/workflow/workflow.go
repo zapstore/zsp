@@ -30,17 +30,18 @@ type Publisher struct {
 	signer    nostr.Signer
 
 	// Computed during workflow
-	release       *source.Release
-	selectedAsset *source.Asset
-	apkPath       string
-	apkInfo       *apk.APKInfo
-	iconURL       string
-	imageURLs     []string
-	releaseNotes  string
-	preDownloaded *PreDownloadedImages
-	events        *nostr.EventSet
-	blossomURL    string
-	browserPort   int
+	release                 *source.Release
+	selectedAsset           *source.Asset
+	apkPath                 string
+	apkInfo                 *apk.APKInfo
+	iconURL                 string
+	imageURLs               []string
+	releaseNotes            string
+	preDownloaded           *PreDownloadedImages
+	events                  *nostr.EventSet
+	blossomURL              string
+	browserPort             int
+	existingReleaseTimestamp time.Time // created_at of existing 30063 on relay (for --overwrite-release)
 }
 
 // NewPublisher creates a new publish workflow.
@@ -566,6 +567,17 @@ func (p *Publisher) signAndUpload(ctx context.Context) error {
 		return err
 	}
 
+	// When overwriting a release, fetch the existing 30063's created_at so the new
+	// event gets a strictly higher timestamp and the relay's NIP-33 guard fires.
+	if p.opts.Publish.OverwriteRelease && !p.isOffline() {
+		ts, err := p.publisher.CheckExistingRelease(ctx, p.signer.PublicKey(), p.apkInfo.PackageID, p.apkInfo.VersionName)
+		if err == nil {
+			p.existingReleaseTimestamp = ts
+		} else if p.opts.Global.Verbose {
+			fmt.Printf("  Could not fetch existing release timestamp: %v\n", err)
+		}
+	}
+
 	// Determine URLs and build events
 	if p.isOffline() || p.signer.Type() == nostr.SignerNpub {
 		return p.buildEventsWithoutUpload(ctx)
@@ -643,6 +655,7 @@ func (p *Publisher) buildEventsWithoutUpload(ctx context.Context) error {
 		LegacyFormat:              p.opts.Publish.Legacy,
 		ReleaseTimestamp:          p.getReleaseTimestamp(),
 		UseReleaseTimestampForApp: p.opts.Publish.AppCreatedAtRelease,
+		MinReleaseTimestamp:       p.existingReleaseTimestamp,
 	})
 
 	relayHint := p.getRelayHint()
@@ -677,6 +690,7 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 			Opts:                p.opts,
 			Legacy:              p.opts.Publish.Legacy,
 			AppCreatedAtRelease: p.opts.Publish.AppCreatedAtRelease,
+			MinReleaseTimestamp: p.existingReleaseTimestamp,
 		})
 		return err
 	}
@@ -712,6 +726,7 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 		LegacyFormat:              p.opts.Publish.Legacy,
 		ReleaseTimestamp:          p.getReleaseTimestamp(),
 		UseReleaseTimestampForApp: p.opts.Publish.AppCreatedAtRelease,
+		MinReleaseTimestamp:       p.existingReleaseTimestamp,
 	})
 
 	return nostr.SignEventSet(ctx, p.signer, p.events, relayHint)

@@ -137,6 +137,37 @@ func (p *Publisher) RelayURLs() []string {
 	return p.relayURLs
 }
 
+// CheckExistingRelease queries all relays for the latest Software Release event (kind 30063).
+// It searches by pubkey and d tag (identifier@version).
+// Returns the CreatedAt of the most recent existing release, or zero time if none exists.
+func (p *Publisher) CheckExistingRelease(ctx context.Context, pubkey, identifier, version string) (time.Time, error) {
+	dTag := identifier + "@" + version
+	filter := nostr.Filter{
+		Kinds:   []int{KindRelease},
+		Authors: []string{pubkey},
+		Tags: nostr.TagMap{
+			"d": []string{dTag},
+		},
+		Limit: 1,
+	}
+
+	var latest nostr.Timestamp
+	for _, url := range p.relayURLs {
+		event, err := p.queryRelay(ctx, url, filter)
+		if err != nil {
+			continue
+		}
+		if event != nil && event.CreatedAt > latest {
+			latest = event.CreatedAt
+		}
+	}
+
+	if latest == 0 {
+		return time.Time{}, nil
+	}
+	return latest.Time(), nil
+}
+
 // ExistingAsset contains information about an existing software asset on relays.
 type ExistingAsset struct {
 	Event    *nostr.Event
