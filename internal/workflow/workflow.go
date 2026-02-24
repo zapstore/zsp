@@ -795,10 +795,10 @@ func (p *Publisher) signAndUpload(ctx context.Context) error {
 	// When overwriting a release, fetch the existing 30063's created_at so the new
 	// event gets a strictly higher timestamp and the relay's NIP-33 guard fires.
 	if p.opts.Publish.OverwriteRelease && !p.isOffline() {
-		ts, err := p.publisher.CheckExistingRelease(ctx, p.signer.PublicKey(), p.apkInfo.PackageID, p.apkInfo.VersionName)
+		ts, err := p.publisher.CheckExistingRelease(ctx, p.signer.PublicKey(), p.primaryAssetInfo().Identifier, p.primaryAssetInfo().Version)
 		if err == nil {
 			p.existingReleaseTimestamp = ts
-		} else if p.opts.Global.Verbose {
+		} else if p.opts.Global.Verbosity > 0 {
 			fmt.Printf("  Could not fetch existing release timestamp: %v\n", err)
 		}
 	}
