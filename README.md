@@ -129,7 +129,7 @@ zsp can fetch app metadata from external sources to enrich your publication.
 |--------|----------------|
 | `github` | Name, description, topics, license, website, README |
 | `gitlab` | Name, description, topics, license |
-| `fdroid` | Name, summary, description, categories, icon, screenshots |
+| `fdroid` | Name, description, summary, categories, icon, screenshots |
 | `playstore` | Name, description, icon, screenshots |
 
 ### Priority
