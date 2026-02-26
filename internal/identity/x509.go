@@ -36,7 +36,7 @@ var ErrJKSFormat = errors.New("java keystore (JKS) format detected")
 
 // IdentityProof contains the NIP-C1 cryptographic identity components.
 type IdentityProof struct {
-	SPKIFP    string // SHA-256 fingerprint of SPKI (Subject Public Key Info), lowercase hex
+	CertHash  string // SHA-256 hash of DER-encoded certificate, lowercase hex
 	Signature string // Base64 signature
 	CreatedAt int64  // Unix timestamp when proof was created (must match event's created_at)
 	Expiry    int64  // Unix timestamp when proof expires
@@ -48,9 +48,9 @@ type IdentityProofOptions struct {
 }
 
 // GenerateIdentityProof creates a NIP-C1 cryptographic identity proof.
+// certHash is the SHA-256 hash of the DER-encoded certificate (lowercase hex).
 // The pubkeyHex must be the 64-character lowercase hex Nostr public key.
-func GenerateIdentityProof(privateKey crypto.PrivateKey, pubkeyHex string, opts *IdentityProofOptions) (*IdentityProof, error) {
-	// Set defaults
+func GenerateIdentityProof(privateKey crypto.PrivateKey, certHash, pubkeyHex string, opts *IdentityProofOptions) (*IdentityProof, error) {
 	if opts == nil {
 		opts = &IdentityProofOptions{}
 	}
@@ -58,45 +58,21 @@ func GenerateIdentityProof(privateKey crypto.PrivateKey, pubkeyHex string, opts 
 		opts.Expiry = DefaultExpiry
 	}
 
-	// Calculate timestamps (created_at is now, expiry is now + duration)
 	createdAt := time.Now().Unix()
 	expiry := createdAt + int64(opts.Expiry.Seconds())
 
-	// 1. Extract public key from private key
-	var pubKey crypto.PublicKey
-	switch key := privateKey.(type) {
-	case *ecdsa.PrivateKey:
-		pubKey = key.Public()
-	case *rsa.PrivateKey:
-		pubKey = key.Public()
-	case ed25519.PrivateKey:
-		pubKey = key.Public()
-	default:
-		return nil, fmt.Errorf("unsupported key type: %T", privateKey)
-	}
-
-	// 2. Compute SPKIFP (SHA-256 of DER-encoded SPKI)
-	pubKeyDER, err := x509.MarshalPKIXPublicKey(pubKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal public key: %w", err)
-	}
-	spkifpBytes := sha256.Sum256(pubKeyDER)
-	spkifp := hex.EncodeToString(spkifpBytes[:])
-
-	// 3. Sign the verification message (NIP-C1 format per C1.md)
 	message := fmt.Sprintf("Verifying at %d until %d that I control the following Nostr public key: %s", createdAt, expiry, pubkeyHex)
 
 	var signature []byte
+	var err error
 	switch key := privateKey.(type) {
 	case *ecdsa.PrivateKey:
 		messageHash := sha256.Sum256([]byte(message))
 		signature, err = ecdsa.SignASN1(rand.Reader, key, messageHash[:])
 	case *rsa.PrivateKey:
 		messageHash := sha256.Sum256([]byte(message))
-		// Try PKCS#1 v1.5 first (more common for code signing)
 		signature, err = rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, messageHash[:])
 	case ed25519.PrivateKey:
-		// Ed25519 signs raw message bytes (no pre-hash)
 		signature = ed25519.Sign(key, []byte(message))
 	default:
 		return nil, fmt.Errorf("unsupported key type: %T", privateKey)
@@ -106,7 +82,7 @@ func GenerateIdentityProof(privateKey crypto.PrivateKey, pubkeyHex string, opts 
 	}
 
 	return &IdentityProof{
-		SPKIFP:    spkifp,
+		CertHash:  certHash,
 		Signature: base64.StdEncoding.EncodeToString(signature),
 		CreatedAt: createdAt,
 		Expiry:    expiry,
@@ -116,7 +92,7 @@ func GenerateIdentityProof(privateKey crypto.PrivateKey, pubkeyHex string, opts 
 // ToEventTags returns the NIP-C1 tags for a kind 30509 event.
 func (p *IdentityProof) ToEventTags() nostr.Tags {
 	return nostr.Tags{
-		{"d", p.SPKIFP},
+		{"d", p.CertHash},
 		{"signature", p.Signature},
 		{"expiry", strconv.FormatInt(p.Expiry, 10)},
 	}
@@ -139,14 +115,14 @@ func (p *IdentityProof) IsExpired() bool {
 
 // VerificationResult contains the result of verifying an identity proof.
 type VerificationResult struct {
-	Valid       bool      // Whether the signature is valid
-	Expired     bool      // Whether the proof has expired
-	Revoked     bool      // Whether the proof has been revoked
-	RevokeReason string   // Revocation reason if revoked
-	SPKIFPMatch bool      // Whether SPKIFP matches certificate (only set with cert verification)
-	SPKIFP      string    // SPKIFP from proof
-	ExpiryTime  time.Time // When the proof expires
-	Error       error     // Any error encountered
+	Valid        bool      // Whether the signature is valid
+	Expired      bool      // Whether the proof has expired
+	Revoked      bool      // Whether the proof has been revoked
+	RevokeReason string    // Revocation reason if revoked
+	CertHashMatch bool     // Whether cert hash matches certificate (only set with cert verification)
+	CertHash     string    // Certificate hash from proof
+	ExpiryTime   time.Time // When the proof expires
+	Error        error     // Any error encountered
 }
 
 // ParseIdentityProofFromEvent parses a kind 30509 event into an IdentityProof.
@@ -155,20 +131,17 @@ func ParseIdentityProofFromEvent(event *nostr.Event) (*IdentityProof, error) {
 		return nil, fmt.Errorf("invalid event kind: expected 30509, got %d", event.Kind)
 	}
 
-	// Extract d tag (SPKIFP)
-	spkifp := event.Tags.GetD()
-	if spkifp == "" {
-		return nil, fmt.Errorf("missing d tag (SPKIFP)")
+	certHash := event.Tags.GetD()
+	if certHash == "" {
+		return nil, fmt.Errorf("missing d tag (cert hash)")
 	}
 
-	// Extract signature tag
 	signatureTag := event.Tags.GetFirst([]string{"signature"})
 	if signatureTag == nil || len(*signatureTag) < 2 {
 		return nil, fmt.Errorf("missing signature tag")
 	}
 	signature := (*signatureTag)[1]
 
-	// Extract expiry tag
 	expiryTag := event.Tags.GetFirst([]string{"expiry"})
 	if expiryTag == nil || len(*expiryTag) < 2 {
 		return nil, fmt.Errorf("missing expiry tag")
@@ -179,7 +152,7 @@ func ParseIdentityProofFromEvent(event *nostr.Event) (*IdentityProof, error) {
 	}
 
 	return &IdentityProof{
-		SPKIFP:    spkifp,
+		CertHash:  certHash,
 		Signature: signature,
 		CreatedAt: int64(event.CreatedAt),
 		Expiry:    expiry,
@@ -206,7 +179,7 @@ func VerifyIdentityProof(proof *IdentityProof, event *nostr.Event, pubkeyHex str
 }
 
 // VerifyIdentityProofWithCert verifies an identity proof against a pubkey and certificate.
-// This performs full verification: SPKIFP match and signature.
+// This performs full verification: cert hash match and signature.
 func VerifyIdentityProofWithCert(proof *IdentityProof, event *nostr.Event, pubkeyHex string, cert *x509.Certificate) *VerificationResult {
 	return verifyProofSignature(proof, event, pubkeyHex, cert)
 }
@@ -214,12 +187,11 @@ func VerifyIdentityProofWithCert(proof *IdentityProof, event *nostr.Event, pubke
 // verifyProofSignature performs the actual verification.
 func verifyProofSignature(proof *IdentityProof, event *nostr.Event, pubkeyHex string, cert *x509.Certificate) *VerificationResult {
 	result := &VerificationResult{
-		SPKIFP:     proof.SPKIFP,
+		CertHash:   proof.CertHash,
 		ExpiryTime: proof.ExpiryTime(),
 		Expired:    proof.IsExpired(),
 	}
 
-	// Check for revocation
 	if event != nil {
 		revoked, reason := IsRevoked(event)
 		if revoked {
@@ -227,47 +199,33 @@ func verifyProofSignature(proof *IdentityProof, event *nostr.Event, pubkeyHex st
 			result.RevokeReason = reason
 		}
 
-		// Verify expiry > created_at per NIP-C1 spec
 		if proof.Expiry <= int64(event.CreatedAt) {
 			result.Error = fmt.Errorf("expiry must be greater than created_at")
 			return result
 		}
 	}
 
-	// If certificate provided, compute and verify SPKIFP match
-	var pubKeyDER []byte
 	if cert != nil {
-		var err error
-		pubKeyDER, err = x509.MarshalPKIXPublicKey(cert.PublicKey)
-		if err == nil {
-			certSPKIFP := sha256.Sum256(pubKeyDER)
-			certSPKIFPHex := hex.EncodeToString(certSPKIFP[:])
-			result.SPKIFPMatch = (certSPKIFPHex == proof.SPKIFP)
-		}
+		certHash := ComputeCertHash(cert)
+		result.CertHashMatch = (certHash == proof.CertHash)
 	}
 
-	// 1. Decode the signature from base64
 	signature, err := base64.StdEncoding.DecodeString(proof.Signature)
 	if err != nil {
 		result.Error = fmt.Errorf("failed to decode signature: %w", err)
 		return result
 	}
 
-	// 2. Get public key - either from certificate or we need it provided
 	var pubKeyInterface crypto.PublicKey
 	if cert != nil {
 		pubKeyInterface = cert.PublicKey
 	} else {
-		// Without a certificate, we can't verify the signature
-		// (we'd need the SPKI to be stored somewhere or fetched)
 		result.Error = fmt.Errorf("certificate required for signature verification")
 		return result
 	}
 
-	// 3. Reconstruct the signed message (NIP-C1 format per C1.md)
 	message := fmt.Sprintf("Verifying at %d until %d that I control the following Nostr public key: %s", proof.CreatedAt, proof.Expiry, pubkeyHex)
 
-	// 4. Verify the signature based on key type
 	switch pubKey := pubKeyInterface.(type) {
 	case *ecdsa.PublicKey:
 		messageHash := sha256.Sum256([]byte(message))
@@ -278,10 +236,8 @@ func verifyProofSignature(proof *IdentityProof, event *nostr.Event, pubkeyHex st
 		}
 	case *rsa.PublicKey:
 		messageHash := sha256.Sum256([]byte(message))
-		// Try PKCS#1 v1.5 first
 		err := rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, messageHash[:], signature)
 		if err != nil {
-			// Try PSS as fallback per NIP-C1 spec
 			pssOpts := &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash}
 			err = rsa.VerifyPSS(pubKey, crypto.SHA256, messageHash[:], signature, pssOpts)
 		}
@@ -291,7 +247,6 @@ func verifyProofSignature(proof *IdentityProof, event *nostr.Event, pubkeyHex st
 			result.Valid = true
 		}
 	case ed25519.PublicKey:
-		// Ed25519 verifies raw message bytes (no pre-hash)
 		if ed25519.Verify(pubKey, []byte(message), signature) {
 			result.Valid = true
 		} else {
@@ -304,36 +259,10 @@ func verifyProofSignature(proof *IdentityProof, event *nostr.Event, pubkeyHex st
 	return result
 }
 
-// ComputeSPKIFP computes the SPKIFP (Subject Public Key Info Fingerprint) from a certificate.
-func ComputeSPKIFP(cert *x509.Certificate) (string, error) {
-	pubKeyDER, err := x509.MarshalPKIXPublicKey(cert.PublicKey)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal public key: %w", err)
-	}
-	spkifpBytes := sha256.Sum256(pubKeyDER)
-	return hex.EncodeToString(spkifpBytes[:]), nil
-}
-
-// ComputeSPKIFPFromPrivateKey computes the SPKIFP from a private key.
-func ComputeSPKIFPFromPrivateKey(privateKey crypto.PrivateKey) (string, error) {
-	var pubKey crypto.PublicKey
-	switch key := privateKey.(type) {
-	case *ecdsa.PrivateKey:
-		pubKey = key.Public()
-	case *rsa.PrivateKey:
-		pubKey = key.Public()
-	case ed25519.PrivateKey:
-		pubKey = key.Public()
-	default:
-		return "", fmt.Errorf("unsupported key type: %T", privateKey)
-	}
-
-	pubKeyDER, err := x509.MarshalPKIXPublicKey(pubKey)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal public key: %w", err)
-	}
-	spkifpBytes := sha256.Sum256(pubKeyDER)
-	return hex.EncodeToString(spkifpBytes[:]), nil
+// ComputeCertHash computes the SHA-256 hash of the DER-encoded certificate.
+func ComputeCertHash(cert *x509.Certificate) string {
+	h := sha256.Sum256(cert.Raw)
+	return hex.EncodeToString(h[:])
 }
 
 // detectJKS checks if data starts with JKS magic bytes.

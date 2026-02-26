@@ -576,16 +576,11 @@ func runLinkKey(ctx context.Context, opts *cli.Options) error {
 		return err
 	}
 
-	// Compute SPKIFP from cert
-	certSPKIFP, err := identity.ComputeSPKIFP(cert)
-	if err != nil {
-		return fmt.Errorf("failed to compute SPKIFP: %w", err)
-	}
+	certHash := identity.ComputeCertHash(cert)
 
-	// Show certificate summary (skip in offline mode for clean output)
 	if !opts.Identity.Offline {
 		ui.PrintSectionHeader("Certificate Summary")
-		ui.PrintKeyValue("SPKIFP", certSPKIFP)
+		ui.PrintKeyValue("Cert hash", certHash)
 		ui.PrintKeyValue("Validity", fmt.Sprintf("%d year(s)", int(expiry.Hours()/24/365)))
 	}
 
@@ -616,13 +611,13 @@ func runLinkKey(ctx context.Context, opts *cli.Options) error {
 	if !opts.Identity.Offline && canCheckBeforeSigner {
 		checkSpinner := ui.NewSpinner("Checking existing identity proofs...")
 		checkSpinner.Start()
-		existingProof, err := publisher.FetchIdentityProof(ctx, pubkeyHex, certSPKIFP)
+		existingProof, err := publisher.FetchIdentityProof(ctx, pubkeyHex, certHash)
 		if err != nil {
 			checkSpinner.StopWithWarning("Could not check existing proofs")
 		} else if existingProof != nil {
 			checkSpinner.StopWithSuccess("Found existing proof (will be replaced)")
 		} else {
-			checkSpinner.StopWithSuccess("No existing proof for this SPKIFP")
+			checkSpinner.StopWithSuccess("No existing proof for this cert hash")
 		}
 	}
 
@@ -637,23 +632,22 @@ func runLinkKey(ctx context.Context, opts *cli.Options) error {
 	if !canCheckBeforeSigner {
 		pubkeyHex = signer.PublicKey()
 
-		// Check for existing proofs (skip in offline mode)
 		if !opts.Identity.Offline {
 			checkSpinner := ui.NewSpinner("Checking existing identity proofs...")
 			checkSpinner.Start()
-			existingProof, err := publisher.FetchIdentityProof(ctx, pubkeyHex, certSPKIFP)
+			existingProof, err := publisher.FetchIdentityProof(ctx, pubkeyHex, certHash)
 			if err != nil {
 				checkSpinner.StopWithWarning("Could not check existing proofs")
 			} else if existingProof != nil {
 				checkSpinner.StopWithSuccess("Found existing proof (will be replaced)")
 			} else {
-				checkSpinner.StopWithSuccess("No existing proof for this SPKIFP")
+				checkSpinner.StopWithSuccess("No existing proof for this cert hash")
 			}
 		}
 	}
 
 	// 6. Generate identity proof
-	proof, err := identity.GenerateIdentityProof(privateKey, pubkeyHex, &identity.IdentityProofOptions{
+	proof, err := identity.GenerateIdentityProof(privateKey, certHash, pubkeyHex, &identity.IdentityProofOptions{
 		Expiry: expiry,
 	})
 	if err != nil {
@@ -698,7 +692,7 @@ func runLinkKey(ctx context.Context, opts *cli.Options) error {
 
 	// 10. Interactive menu for preview/publish
 	ui.PrintSectionHeader("Ready to Publish")
-	fmt.Printf("  SPKIFP: %s\n", proof.SPKIFP)
+	fmt.Printf("  Cert hash: %s\n", proof.CertHash)
 	fmt.Printf("  Nostr pubkey: %s\n", npub)
 	fmt.Printf("  Created: %s\n", proof.CreatedAtTime().Format("2006-01-02 15:04:05 UTC"))
 	fmt.Printf("  Expires: %s\n", proof.ExpiryTime().Format("2006-01-02 15:04:05 UTC"))
@@ -832,12 +826,8 @@ func runVerifyIdentity(ctx context.Context, opts *cli.Options) error {
 		cert.NotBefore.Format("2006-01-02"),
 		cert.NotAfter.Format("2006-01-02"))
 
-	// Compute SPKIFP from certificate
-	certSPKIFP, err := identity.ComputeSPKIFP(cert)
-	if err != nil {
-		return fmt.Errorf("failed to compute SPKIFP: %w", err)
-	}
-	fmt.Printf("  SPKIFP: %s\n", certSPKIFP)
+	certHash := identity.ComputeCertHash(cert)
+	fmt.Printf("  Cert hash: %s\n", certHash)
 
 	// 2. Get pubkey to verify - for APKs, prompt for npub directly
 	var pubkeyHex string
@@ -893,14 +883,13 @@ func runVerifyIdentity(ctx context.Context, opts *cli.Options) error {
 	fmt.Printf("  Nostr pubkey: %s\n", npub)
 	fmt.Printf("  Relays: %v\n", opts.Identity.Relays)
 
-	// 5. Fetch identity proof for this SPKIFP from relays
 	publisher := nostrpkg.NewPublisher(opts.Identity.Relays)
-	identityEvent, err := publisher.FetchIdentityProof(ctx, pubkeyHex, certSPKIFP)
+	identityEvent, err := publisher.FetchIdentityProof(ctx, pubkeyHex, certHash)
 	if err != nil {
 		return fmt.Errorf("failed to fetch identity proof: %w", err)
 	}
 	if identityEvent == nil {
-		return fmt.Errorf("no identity proof found for SPKIFP %s", certSPKIFP)
+		return fmt.Errorf("no identity proof found for cert hash %s", certHash)
 	}
 
 	fmt.Printf("  Found identity proof (created: %s)\n", identityEvent.CreatedAt.Time().Format("2006-01-02 15:04:05 UTC"))
@@ -921,14 +910,13 @@ func runVerifyIdentity(ctx context.Context, opts *cli.Options) error {
 	ui.PrintSectionHeader("Verification Results")
 	result := identity.VerifyIdentityProofWithCert(proof, identityEvent, pubkeyHex, cert)
 
-	fmt.Printf("  SPKIFP: %s\n", result.SPKIFP)
+	fmt.Printf("  Cert hash: %s\n", result.CertHash)
 	fmt.Printf("  Expiry: %s\n", result.ExpiryTime.Format("2006-01-02 15:04:05 UTC"))
 
-	// Show individual check results
-	if result.SPKIFPMatch {
-		fmt.Printf("  SPKIFP match: %s\n", ui.Success("YES"))
+	if result.CertHashMatch {
+		fmt.Printf("  Cert hash match: %s\n", ui.Success("YES"))
 	} else {
-		fmt.Printf("  SPKIFP match: %s\n", ui.Error("NO"))
+		fmt.Printf("  Cert hash match: %s\n", ui.Error("NO"))
 	}
 
 	if result.Revoked {
@@ -951,11 +939,11 @@ func runVerifyIdentity(ctx context.Context, opts *cli.Options) error {
 	}
 
 	fmt.Println()
-	if result.Valid && result.SPKIFPMatch && !result.Expired && !result.Revoked {
+	if result.Valid && result.CertHashMatch && !result.Expired && !result.Revoked {
 		fmt.Println(ui.Success("✓ Cryptographic identity proof is fully verified"))
-	} else if result.Valid && result.SPKIFPMatch && result.Expired {
+	} else if result.Valid && result.CertHashMatch && result.Expired {
 		fmt.Println(ui.Warning("⚠ Cryptographic identity proof is valid but EXPIRED"))
-	} else if result.Valid && result.SPKIFPMatch && result.Revoked {
+	} else if result.Valid && result.CertHashMatch && result.Revoked {
 		fmt.Println(ui.Error("✗ Cryptographic identity proof has been REVOKED"))
 		return fmt.Errorf("identity proof revoked")
 	} else {

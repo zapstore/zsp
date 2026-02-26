@@ -302,7 +302,7 @@ func IdentityHelp() string {
 
 	// How it works
 	b.WriteString(renderPurpleBold("HOW IT WORKS") + "\n")
-	b.WriteString(renderWhite("  1. Extracts SPKIFP (fingerprint) from your signing certificate") + "\n")
+	b.WriteString(renderWhite("  1. Computes certificate hash from your signing certificate") + "\n")
 	b.WriteString(renderWhite("  2. Signs a message with your certificate's private key") + "\n")
 	b.WriteString(renderWhite("  3. Creates a kind 30509 Nostr event with the proof") + "\n")
 	b.WriteString(renderWhite("  4. Signs the event with your Nostr key") + "\n")

@@ -275,19 +275,18 @@ func (p *Publisher) CheckExistingApp(ctx context.Context, identifier string) (*E
 }
 
 // FetchIdentityProof queries relays for a kind 30509 identity proof event.
-// If spkifp is provided, looks for that specific identity; otherwise returns any identity proof.
+// If certHash is provided, looks for that specific identity; otherwise returns any identity proof.
 // Returns nil if no matching event is found.
-func (p *Publisher) FetchIdentityProof(ctx context.Context, pubkey, spkifp string) (*nostr.Event, error) {
+func (p *Publisher) FetchIdentityProof(ctx context.Context, pubkey, certHash string) (*nostr.Event, error) {
 	filter := nostr.Filter{
 		Kinds:   []int{KindIdentityProof},
 		Authors: []string{pubkey},
 		Limit:   1,
 	}
 
-	// If specific SPKIFP provided, filter by d tag
-	if spkifp != "" {
+	if certHash != "" {
 		filter.Tags = nostr.TagMap{
-			"d": []string{spkifp},
+			"d": []string{certHash},
 		}
 	}
 
