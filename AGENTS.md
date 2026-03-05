@@ -1,21 +1,42 @@
 # zsp — Agent Instructions
 
-CLI for publishing Android apps to Nostr relays. Used by [Zapstore](https://zapstore.dev).
+CLI for publishing Android apps to Nostr relays.
 
-## Project Structure
+All behavioral authority lives in `spec/guidelines/`. If this file conflicts, guidelines win.
 
-- `main.go` — Entry point, subcommand dispatch (publish, identity, apk)
-- `internal/source/` — APK acquisition (GitHub, GitLab, F-Droid, web, local)
-- `internal/apk/` — APK parsing and metadata extraction
-- `internal/nostr/` — Signing (NIP-07, NIP-46, nsec), relay publishing, NIP-82 events
-- `internal/workflow/` — Publish flow orchestration
-- `internal/config/` — YAML config and wizard
-- `internal/ui/` — Prompts, spinners, selection
-- `internal/picker/` — APK selection/ranking
-- `internal/identity/` — X.509 and NIP-C1 identity proofs
+## Quick Reference
 
-## Conventions
+| What | Where |
+|------|-------|
+| Architecture & patterns | `spec/guidelines/ARCHITECTURE.md` |
+| Non-negotiable rules | `spec/guidelines/INVARIANTS.md` |
+| Quality standards | `spec/guidelines/QUALITY_BAR.md` |
+| Product vision | `spec/guidelines/VISION.md` |
+| Feature specs | `spec/features/` |
+| Active work | `spec/work/` |
+| Decisions & learnings | `spec/knowledge/` |
 
-- Go 1.24+, standard library style. Use `internal/` for private packages.
-- Config: `zapstore.yaml` (see `testdata/configs/` for examples).
-- Reference existing patterns when adding sources or features (e.g. `internal/source/github.go`).
+Guidelines are symlinked into `.cursor/rules/` and auto-load.
+
+## File Ownership
+
+| Path | Owner | AI May Modify |
+|------|-------|---------------|
+| `spec/guidelines/*` | Human | No |
+| `spec/features/*` | Human | No (unless asked) |
+| `spec/work/*.md` | AI | Yes |
+| `spec/knowledge/*.md` | AI | Yes |
+| `internal/**`, `main.go` | Shared | Yes |
+
+## Key Commands
+
+```bash
+go build -o zsp .     # Build
+go test ./...         # Tests
+go vet ./...          # Lint
+go mod tidy           # After dependency changes
+```
+
+## Project Rules
+
+- Reference `internal/source/github.go` when adding new sources.
