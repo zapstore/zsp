@@ -17,7 +17,7 @@ const (
 	CommandNone     Command = ""
 	CommandPublish  Command = "publish"
 	CommandIdentity Command = "identity"
-	CommandAPK      Command = "apk"
+	CommandUtils    Command = "utils"
 )
 
 // GlobalOptions holds flags available at root level and shared across subcommands.
@@ -48,13 +48,18 @@ type PublishOptions struct {
 	OverwriteRelease    bool
 	IncludePreReleases  bool
 	SkipMetadata        bool
-	Legacy              bool
 	AppCreatedAtRelease bool // Use release timestamp for kind 32267 created_at
+	SkipAppEvent        bool // Publish only release events (kind 30063/3063), skip kind 32267
 	Wizard              bool
 	Check               bool // Verify config fetches arm64-v8a APK (exit 0=success)
 
 	// Server options
 	Port int
+}
+
+// UtilsOptions holds flags specific to the utils subcommand.
+type UtilsOptions struct {
+	Operation string // "extract-apk" or "check-releases"
 }
 
 // IdentityOptions holds flags specific to the identity subcommand.
@@ -66,11 +71,6 @@ type IdentityOptions struct {
 	Offline       bool     // Output event JSON to stdout instead of publishing
 }
 
-// APKOptions holds flags specific to the apk subcommand.
-type APKOptions struct {
-	Extract bool // Extract APK metadata as JSON
-}
-
 // Options holds all CLI configuration options.
 type Options struct {
 	Command Command
@@ -79,7 +79,7 @@ type Options struct {
 	Global   GlobalOptions
 	Publish  PublishOptions
 	Identity IdentityOptions
-	APK      APKOptions
+	Utils    UtilsOptions
 }
 
 // stringSliceFlag implements flag.Value to accumulate multiple flag values.
@@ -154,9 +154,9 @@ func ParseCommand() *Options {
 	case "identity":
 		opts.Command = CommandIdentity
 		parseIdentityFlags(opts, args[1:])
-	case "apk":
-		opts.Command = CommandAPK
-		parseAPKFlags(opts, args[1:])
+	case "utils":
+		opts.Command = CommandUtils
+		parseUtilsArgs(opts, args[1:])
 	default:
 		// Unknown subcommand - show help
 		opts.Global.Help = true
@@ -191,8 +191,8 @@ func parsePublishFlags(opts *Options, args []string) {
 	fs.BoolVar(&opts.Publish.IncludePreReleases, "pre-release", false, "Include pre-releases when fetching the latest release")
 	fs.BoolVar(&opts.Publish.SkipMetadata, "skip-metadata", false, "Skip fetching metadata from external sources")
 	fs.BoolVar(&opts.Publish.Wizard, "wizard", false, "Run interactive wizard (uses existing config as defaults)")
-	fs.BoolVar(&opts.Publish.Legacy, "legacy", false, "Use legacy event format for relay.zapstore.dev compatibility")
 	fs.BoolVar(&opts.Publish.AppCreatedAtRelease, "app-created-at-release", false, "Use release date for kind 32267 created_at (indexer compatibility)")
+	fs.BoolVar(&opts.Publish.SkipAppEvent, "skip-app-event", false, "Publish only release events, skip app metadata (kind 32267)")
 	fs.BoolVar(&opts.Publish.Check, "check", false, "Verify config fetches arm64-v8a APK (exit 0=success)")
 
 	// Help flag
@@ -269,31 +269,24 @@ func parseIdentityFlags(opts *Options, args []string) {
 	opts.Args = fs.Args()
 }
 
-// parseAPKFlags parses flags for the apk subcommand.
-func parseAPKFlags(opts *Options, args []string) {
-	fs := flag.NewFlagSet("apk", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
+// parseUtilsArgs parses positional args for the utils subcommand.
+// The first positional arg is the operation: "extract-apk" or "check-releases".
+func parseUtilsArgs(opts *Options, args []string) {
+	// Check for help
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "-help" {
+			opts.Global.Help = true
+			return
+		}
+	}
 
-	fs.BoolVar(&opts.APK.Extract, "extract", false, "Extract APK metadata as JSON")
-	fs.BoolVar(&opts.Global.Verbose, "verbose", false, "Debug output")
-	fs.BoolVar(&opts.Global.NoColor, "no-color", false, "Disable colored output")
-
-	// Help flag
-	var showHelp bool
-	fs.BoolVar(&showHelp, "h", false, "Show help")
-	fs.BoolVar(&showHelp, "help", false, "Show help")
-
-	if err := fs.Parse(args); err != nil {
+	if len(args) == 0 {
 		opts.Global.Help = true
 		return
 	}
 
-	if showHelp {
-		opts.Global.Help = true
-		return
-	}
-
-	opts.Args = fs.Args()
+	opts.Utils.Operation = args[0]
+	opts.Args = args[1:]
 }
 
 // reorderArgsForFlagSet moves flags before positional arguments.

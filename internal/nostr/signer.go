@@ -149,8 +149,9 @@ func (s *NsecSigner) Close() error {
 	return nil
 }
 
-// NpubSigner is a "signer" that outputs unsigned events.
-// Used for external signing workflows.
+// NpubSigner is a "signer" that sets the pubkey and computes event IDs without signing.
+// Used for deferred-signing workflows: events are built with the correct pubkey so e tag
+// references are valid, then output for signing by an external tool.
 type NpubSigner struct {
 	publicKey string // hex
 }
@@ -164,31 +165,19 @@ func NewNpubSigner(npub string) (*NpubSigner, error) {
 	if prefix != "npub" {
 		return nil, fmt.Errorf("expected npub, got %s", prefix)
 	}
-
-	return &NpubSigner{
-		publicKey: data.(string),
-	}, nil
+	return &NpubSigner{publicKey: data.(string)}, nil
 }
 
-func (s *NpubSigner) Type() SignerType {
-	return SignerNpub
-}
+func (s *NpubSigner) Type() SignerType { return SignerNpub }
+func (s *NpubSigner) PublicKey() string { return s.publicKey }
 
-func (s *NpubSigner) PublicKey() string {
-	return s.publicKey
-}
-
-func (s *NpubSigner) Sign(ctx context.Context, event *nostr.Event) error {
-	// Don't actually sign - just set the pubkey and ID
+func (s *NpubSigner) Sign(_ context.Context, event *nostr.Event) error {
 	event.PubKey = s.publicKey
 	event.ID = event.GetID()
-	// Signature remains empty - event will be output for external signing
 	return nil
 }
 
-func (s *NpubSigner) Close() error {
-	return nil
-}
+func (s *NpubSigner) Close() error { return nil }
 
 // BunkerSigner signs events via NIP-46 remote signer.
 type BunkerSigner struct {
@@ -364,9 +353,18 @@ func SignEventSet(ctx context.Context, signer Signer, events *EventSet, relayHin
 		return fmt.Errorf("failed to sign Software Release event: %w", err)
 	}
 
-	// 4. Sign the Software Application event
-	if err := signer.Sign(ctx, events.AppMetadata); err != nil {
-		return fmt.Errorf("failed to sign Software Application event: %w", err)
+	// 4. Sign the Software Application event (nil when --skip-app-event is used)
+	if events.AppMetadata != nil {
+		if err := signer.Sign(ctx, events.AppMetadata); err != nil {
+			return fmt.Errorf("failed to sign Software Application event: %w", err)
+		}
+	}
+
+	// 5. Sign the IdentityProof event if present
+	if events.IdentityProof != nil {
+		if err := signer.Sign(ctx, events.IdentityProof); err != nil {
+			return fmt.Errorf("failed to sign IdentityProof event: %w", err)
+		}
 	}
 
 	return nil
@@ -387,8 +385,12 @@ func signEventSetBatch(ctx context.Context, batchSigner BatchSigner, events *Eve
 		events.AddAssetReference(assetID, relayHint)
 	}
 
-	// Now batch sign all events
-	allEvents := []*nostr.Event{events.AppMetadata, events.Release}
+	// Now batch sign all events (AppMetadata may be nil when --skip-app-event is used)
+	var allEvents []*nostr.Event
+	if events.AppMetadata != nil {
+		allEvents = append(allEvents, events.AppMetadata)
+	}
+	allEvents = append(allEvents, events.Release)
 	allEvents = append(allEvents, events.SoftwareAssets...)
 	if err := batchSigner.SignBatch(ctx, allEvents); err != nil {
 		return fmt.Errorf("failed to batch sign events: %w", err)
@@ -401,8 +403,11 @@ func signEventSetBatch(ctx context.Context, batchSigner BatchSigner, events *Eve
 func EventsToJSON(events *EventSet) ([]byte, error) {
 	var result []byte
 
-	// Add app metadata and release
+	// Add app metadata (nil when --skip-app-event is used) and release
 	for _, event := range []*nostr.Event{events.AppMetadata, events.Release} {
+		if event == nil {
+			continue
+		}
 		data, err := json.Marshal(event)
 		if err != nil {
 			return nil, err

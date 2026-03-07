@@ -69,6 +69,14 @@ type Config struct {
 	// If not set, defaults are inferred from release_source or repository.
 	MetadataSources []string `yaml:"metadata_sources,omitempty"`
 
+	// Pubkey is the npub of the developer who publishes this app.
+	// Used by the relay for auto-whitelisting via repo verification.
+	Pubkey string `yaml:"pubkey,omitempty"`
+
+	// Community is the h-tag value for kind 32267 events.
+	// Defaults to "zapstore" if not set.
+	Community string `yaml:"community,omitempty"`
+
 	// BaseDir is the directory containing the config file (for relative paths).
 	// Not parsed from YAML, set by Load().
 	BaseDir string `yaml:"-"`
@@ -233,6 +241,8 @@ func ParseSourceType(s string) SourceType {
 }
 
 // Load reads and parses a config file.
+// If the config contains a pubkey field, it is checked against the current SIGN_WITH signer.
+// A mismatch is a hard error to prevent accidental publishing under the wrong identity.
 func Load(path string) (*Config, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -249,6 +259,20 @@ func Load(path string) (*Config, error) {
 	absPath, err := filepath.Abs(path)
 	if err == nil {
 		cfg.BaseDir = filepath.Dir(absPath)
+	}
+
+	// Pubkey mismatch check: if zapstore.yaml has a pubkey, it must match the signer.
+	if cfg.Pubkey != "" {
+		if signWith := GetSignWith(); signWith != "" {
+			signerNpub := ResolvePubkeyFromSignWith(signWith)
+			if signerNpub != "" && signerNpub != cfg.Pubkey {
+				return nil, fmt.Errorf(
+					"pubkey mismatch: zapstore.yaml has pubkey %s but SIGN_WITH resolves to %s.\n"+
+						"Either update zapstore.yaml or set the correct SIGN_WITH.",
+					cfg.Pubkey, signerNpub,
+				)
+			}
+		}
 	}
 
 	return cfg, nil
@@ -798,4 +822,37 @@ func GetGitLabRepoWithBase(rawURL string) (baseURL, repoPath string) {
 // Checks both process environment and .env file.
 func GetRelayURLs() string {
 	return GetEnv("RELAY_URLS")
+}
+
+// ResolvePubkeyFromSignWith derives the npub from a SIGN_WITH value.
+// Supports nsec1... and npub1... synchronously.
+// Returns empty string for bunker/browser (requires async resolution).
+func ResolvePubkeyFromSignWith(signWith string) string {
+	signWith = strings.TrimSpace(signWith)
+
+	if strings.HasPrefix(signWith, "npub1") {
+		return signWith
+	}
+
+	if strings.HasPrefix(signWith, "nsec1") {
+		_, data, err := nip19.Decode(signWith)
+		if err != nil {
+			return ""
+		}
+		privkey, ok := data.(string)
+		if !ok {
+			return ""
+		}
+		pubkeyHex, err := nostr.GetPublicKey(privkey)
+		if err != nil {
+			return ""
+		}
+		npub, err := nip19.EncodePublicKey(pubkeyHex)
+		if err != nil {
+			return ""
+		}
+		return npub
+	}
+
+	return ""
 }

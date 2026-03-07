@@ -1,4 +1,4 @@
-// Package help provides colorful CLI help output.
+// Package help provides CLI help output.
 package help
 
 import (
@@ -11,51 +11,54 @@ import (
 	"github.com/zapstore/zsp/internal/ui"
 )
 
-// Color palette: green, dark purple, greyscale
+// Greyscale palette only.
 var (
-	// Green tones
-	green = lipgloss.Color("35") // Green
-
-	// Purple tones
-	purple = lipgloss.Color("54") // Dark purple
-
-	// Greyscale
-	grey     = lipgloss.Color("245")
-	greyDark = lipgloss.Color("242")
-	white    = lipgloss.Color("252")
+	grey      = lipgloss.Color("245")
+	greyDark  = lipgloss.Color("242")
+	white     = lipgloss.Color("252")
+	greyBright = lipgloss.Color("250")
 )
 
-// Render functions that don't add extra whitespace
-func renderGreen(s string) string {
-	return lipgloss.NewStyle().Foreground(green).Render(s)
+func renderBold(s string) string {
+	if ui.NoColor {
+		return lipgloss.NewStyle().Bold(true).Render(s)
+	}
+	return lipgloss.NewStyle().Foreground(greyBright).Bold(true).Render(s)
 }
 
-func renderPurple(s string) string {
-	return lipgloss.NewStyle().Foreground(purple).Render(s)
-}
-
-func renderPurpleBold(s string) string {
-	return lipgloss.NewStyle().Foreground(purple).Bold(true).Render(s)
-}
-
-func renderGreenBold(s string) string {
-	return lipgloss.NewStyle().Foreground(green).Bold(true).Render(s)
+func renderAccent(s string) string {
+	if ui.NoColor {
+		return s
+	}
+	return lipgloss.NewStyle().Foreground(white).Render(s)
 }
 
 func renderWhite(s string) string {
+	if ui.NoColor {
+		return s
+	}
 	return lipgloss.NewStyle().Foreground(white).Render(s)
 }
 
 func renderGrey(s string) string {
+	if ui.NoColor {
+		return s
+	}
 	return lipgloss.NewStyle().Foreground(grey).Render(s)
 }
 
 func renderGreyDark(s string) string {
+	if ui.NoColor {
+		return s
+	}
 	return lipgloss.NewStyle().Foreground(greyDark).Render(s)
 }
 
 func renderURL(s string) string {
-	return lipgloss.NewStyle().Foreground(green).Underline(true).Render(s)
+	if ui.NoColor {
+		return s
+	}
+	return lipgloss.NewStyle().Foreground(grey).Underline(true).Render(s)
 }
 
 // RootHelp returns the top-level --help output.
@@ -65,15 +68,15 @@ func RootHelp() string {
 	b.WriteString(ui.RenderLogo())
 	b.WriteString(renderWhite("Publish Android apps to Nostr relays used by Zapstore") + "\n")
 
-	b.WriteString(renderPurpleBold("USAGE") + "\n")
-	b.WriteString("  " + renderGreen("zsp") + " <command> [options]\n\n")
+	b.WriteString(renderBold("USAGE") + "\n")
+	b.WriteString("  " + renderAccent("zsp") + " <command> [options]\n\n")
 
-	b.WriteString(renderPurpleBold("COMMANDS") + "\n")
-	b.WriteString("  " + renderGreen("publish") + "     " + renderWhite("Publish APK releases to Nostr relays") + "\n")
-	b.WriteString("  " + renderGreen("identity") + "    " + renderWhite("Manage cryptographic identity proofs (NIP-C1)") + "\n")
-	b.WriteString("  " + renderGreen("apk") + "         " + renderWhite("APK utility commands (extract metadata)") + "\n\n")
+	b.WriteString(renderBold("COMMANDS") + "\n")
+	b.WriteString("  " + renderAccent("publish") + "     " + renderWhite("Publish APK releases to Nostr relays") + "\n")
+	b.WriteString("  " + renderAccent("identity") + "    " + renderWhite("Manage cryptographic identity proofs (NIP-C1)") + "\n")
+	b.WriteString("  " + renderAccent("utils") + "       " + renderWhite("Operational utilities (extract-apk, check-releases)") + "\n\n")
 
-	b.WriteString(renderPurpleBold("EXAMPLES") + "\n")
+	b.WriteString(renderBold("EXAMPLES") + "\n")
 	writeExample(&b, "zsp publish --wizard", "Interactive wizard (recommended for first-time setup)")
 	writeExample(&b, "zsp publish config.yaml", "Publish from config file")
 	writeExample(&b, "zsp publish app.apk", "Publish local APK")
@@ -82,22 +85,22 @@ func RootHelp() string {
 	writeExample(&b, "zsp identity --link-key key.p12", "Link signing key to Nostr identity")
 	b.WriteString("\n")
 
-	b.WriteString(renderPurpleBold("ENVIRONMENT") + "\n")
-	b.WriteString("  " + renderPurple("SIGN_WITH") + "       " + renderWhite("Signing method (nsec1..., npub1..., bunker://..., browser)") + "\n")
-	b.WriteString("  " + renderPurple("GITHUB_TOKEN") + "    " + renderWhite("GitHub API token (optional, avoids rate limits)") + "\n")
-	b.WriteString("  " + renderPurple("RELAY_URLS") + "      " + renderWhite("Custom relay URLs (default: wss://relay.zapstore.dev)") + "\n")
-	b.WriteString("  " + renderPurple("BLOSSOM_URL") + "     " + renderWhite("Custom CDN server (default: https://cdn.zapstore.dev)") + "\n\n")
+	b.WriteString(renderBold("ENVIRONMENT") + "\n")
+	b.WriteString("  " + renderAccent("SIGN_WITH") + "       " + renderWhite("Signing method (nsec1..., npub1..., bunker://..., browser)") + "\n")
+	b.WriteString("  " + renderAccent("GITHUB_TOKEN") + "    " + renderWhite("GitHub API token (optional, avoids rate limits)") + "\n")
+	b.WriteString("  " + renderAccent("RELAY_URLS") + "      " + renderWhite("Custom relay URLs (default: wss://relay.zapstore.dev)") + "\n")
+	b.WriteString("  " + renderAccent("BLOSSOM_URL") + "     " + renderWhite("Custom CDN server (default: https://cdn.zapstore.dev)") + "\n\n")
 
-	b.WriteString(renderPurpleBold("GLOBAL FLAGS") + "\n")
-	b.WriteString("  " + renderGreen("-h, --help") + "      " + renderWhite("Show help") + "\n")
-	b.WriteString("  " + renderGreen("-v, --version") + "   " + renderWhite("Show version") + "\n")
-	b.WriteString("  " + renderGreen("--verbose") + "       " + renderWhite("Debug output") + "\n")
-	b.WriteString("  " + renderGreen("--no-color") + "      " + renderWhite("Disable colored output") + "\n\n")
+	b.WriteString(renderBold("GLOBAL FLAGS") + "\n")
+	b.WriteString("  " + renderAccent("-h, --help") + "      " + renderWhite("Show help") + "\n")
+	b.WriteString("  " + renderAccent("-v, --version") + "   " + renderWhite("Show version") + "\n")
+	b.WriteString("  " + renderAccent("--verbose") + "       " + renderWhite("Debug output") + "\n")
+	b.WriteString("  " + renderAccent("--no-color") + "      " + renderWhite("Disable colored output") + "\n\n")
 
-	b.WriteString(renderPurpleBold("MORE INFO") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish --wizard") + "  " + renderWhite("Interactive wizard to determine best options") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish --help") + "    " + renderWhite("Detailed publish help") + "\n")
-	b.WriteString("  " + renderGreen("zsp identity --help") + "   " + renderWhite("Detailed identity help") + "\n")
+	b.WriteString(renderBold("MORE INFO") + "\n")
+	b.WriteString("  " + renderAccent("zsp publish --wizard") + "  " + renderWhite("Interactive wizard to determine best options") + "\n")
+	b.WriteString("  " + renderAccent("zsp publish --help") + "    " + renderWhite("Detailed publish help") + "\n")
+	b.WriteString("  " + renderAccent("zsp identity --help") + "   " + renderWhite("Detailed identity help") + "\n")
 	b.WriteString("  " + renderURL("https://github.com/zapstore/zsp") + "\n")
 
 	return b.String()
@@ -108,18 +111,18 @@ func PublishHelp() string {
 	var b strings.Builder
 
 	b.WriteString(ui.RenderLogo())
-	b.WriteString(renderGreenBold("zsp publish") + " " + renderWhite("- Publish APK releases to Nostr relays") + "\n")
+	b.WriteString(renderBold("zsp publish") + " " + renderWhite("- Publish APK releases to Nostr relays") + "\n")
 	b.WriteString("\n")
 
-	b.WriteString(renderPurpleBold("USAGE") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish") + " [options] [config.yaml | app.apk]\n\n")
+	b.WriteString(renderBold("USAGE") + "\n")
+	b.WriteString("  " + renderAccent("zsp publish") + " [options] [config.yaml | app.apk]\n\n")
 
 	b.WriteString(renderGreyDark("  With no arguments, runs the interactive wizard (unless zapstore.yaml exists).") + "\n")
 	b.WriteString(renderGreyDark("  With a config file, publishes according to that configuration.") + "\n")
 	b.WriteString(renderGreyDark("  With an APK file, publishes that APK directly.") + "\n\n")
 
 	// Source flags
-	b.WriteString(renderPurpleBold("SOURCE FLAGS") + "\n")
+	b.WriteString(renderBold("SOURCE FLAGS") + "\n")
 	writeFlag(&b, "-r <url>", "Source code repository URL (GitHub/GitLab/Codeberg/Gitea)")
 	b.WriteString("                            " + renderGreyDark("Also fetches releases from here unless -s is specified") + "\n")
 	writeFlag(&b, "-s <url>", "Release/download source URL (F-Droid, web page, etc)")
@@ -130,13 +133,13 @@ func PublishHelp() string {
 	b.WriteString("\n")
 
 	// Release-specific flags (CLI only)
-	b.WriteString(renderPurpleBold("RELEASE FLAGS") + "\n")
+	b.WriteString(renderBold("RELEASE FLAGS") + "\n")
 	writeFlag(&b, "--commit <hash>", "Git commit hash for reproducible builds")
 	writeFlag(&b, "--channel <name>", "Release channel: main, beta, nightly, dev (default: main)")
 	b.WriteString("\n")
 
 	// Behavior flags
-	b.WriteString(renderPurpleBold("BEHAVIOR FLAGS") + "\n")
+	b.WriteString(renderBold("BEHAVIOR FLAGS") + "\n")
 	writeFlag(&b, "-y", "Skip confirmations (auto-yes)")
 	writeFlag(&b, "--offline", "Sign events without uploading/publishing (outputs JSON)")
 	b.WriteString("                            " + renderGreyDark("Events go to stdout, upload manifest to stderr") + "\n")
@@ -145,75 +148,76 @@ func PublishHelp() string {
 	writeFlag(&b, "--skip-preview", "Skip the browser preview prompt")
 	writeFlag(&b, "--port <port>", "Custom port for browser preview/signing")
 	writeFlag(&b, "--app-created-at-release", "Use release date for kind 32267 created_at")
+	writeFlag(&b, "--skip-app-event", "Publish only release events, skip kind 32267 app metadata")
+	b.WriteString("                            " + renderGreyDark("Used by indexer after copying developer's 32267") + "\n")
 	b.WriteString("\n")
 
 	// Cache flags
-	b.WriteString(renderPurpleBold("CACHE FLAGS") + "\n")
+	b.WriteString(renderBold("CACHE FLAGS") + "\n")
 	writeFlag(&b, "--overwrite-release", "Bypass cache and re-publish even if release unchanged")
 	writeFlag(&b, "--skip-metadata", "Skip fetching metadata from external sources")
 	b.WriteString("                            " + renderGreyDark("Useful for apps with frequent releases") + "\n")
 	b.WriteString("\n")
 
 	// Other flags
-	b.WriteString(renderPurpleBold("OTHER FLAGS") + "\n")
+	b.WriteString(renderBold("OTHER FLAGS") + "\n")
 	writeFlag(&b, "--check", "Verify config fetches arm64-v8a APK (exit 0=success)")
 	b.WriteString("                            " + renderGreyDark("Useful for CI/CD validation") + "\n")
-	writeFlag(&b, "--legacy", "Use legacy event format (default: false)")
 	writeFlag(&b, "--verbose", "Debug output")
 	writeFlag(&b, "--no-color", "Disable colored output")
 	writeFlag(&b, "-h, --help", "Show this help")
 	b.WriteString("\n")
 
 	// Examples section - comprehensive
-	b.WriteString(renderPurpleBold("EXAMPLES") + "\n\n")
+	b.WriteString(renderBold("EXAMPLES") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Interactive wizard - helps determine best options") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish --wizard") + "\n\n")
+	b.WriteString("  " + renderAccent("zsp publish --wizard") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Publish from config file") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish zapstore.yaml") + "\n\n")
+	b.WriteString("  " + renderAccent("zsp publish zapstore.yaml") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Publish local APK with repository metadata") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish app-release.apk -r github.com/user/app") + "\n\n")
+	b.WriteString("  " + renderAccent("zsp publish app-release.apk -r github.com/user/app") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Fetch latest release from GitHub and publish") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish -r github.com/AeonBTC/mempal") + "\n\n")
+	b.WriteString("  " + renderAccent("zsp publish -r github.com/AeonBTC/mempal") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Closed-source app (releases on GitHub, but no source code)") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish -s github.com/user/app -m playstore") + "\n\n")
+	b.WriteString("  " + renderAccent("zsp publish -s github.com/user/app -m playstore") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Open source: GitHub repo + F-Droid builds") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish -r github.com/user/app -s f-droid.org/packages/com.example") + "\n\n")
+	b.WriteString("  " + renderAccent("zsp publish -r github.com/user/app -s f-droid.org/packages/com.example") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Offline mode - sign events, output to stdout, defer upload/publish") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish zapstore.yaml --offline > events.json") + "\n\n")
+	b.WriteString("  " + renderAccent("zsp publish zapstore.yaml --offline > events.json") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Pipe signed events directly to nak for publishing (use -q for clean output)") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish -q zapstore.yaml --offline | nak event wss://relay.zapstore.dev") + "\n\n")
+	b.WriteString("  " + renderAccent("zsp publish -q zapstore.yaml --offline | nak event wss://relay.zapstore.dev") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # CI/CD mode - no prompts, auto-confirm") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish -y zapstore.yaml") + "\n\n")
+	b.WriteString("  " + renderAccent("zsp publish -y zapstore.yaml") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Force re-publish even if unchanged") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish zapstore.yaml --overwrite-release") + "\n\n")
+	b.WriteString("  " + renderAccent("zsp publish zapstore.yaml --overwrite-release") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Validate config fetches correct APK (CI/CD)") + "\n")
-	b.WriteString("  " + renderGreen("zsp publish --check zapstore.yaml") + "\n\n")
+	b.WriteString("  " + renderAccent("zsp publish --check zapstore.yaml") + "\n\n")
 
 	// Config section
-	b.WriteString(renderPurpleBold("CONFIGURATION") + "\n")
+	b.WriteString(renderBold("CONFIGURATION") + "\n")
 	b.WriteString(renderGreyDark("  Config files are YAML. Minimal example:") + "\n\n")
-	b.WriteString("  " + renderGreen("repository:") + " " + renderWhite("https://github.com/user/app") + "\n\n")
+	b.WriteString("  " + renderAccent("repository:") + " " + renderWhite("https://github.com/user/app") + "\n\n")
 	b.WriteString(renderGreyDark("  Full example with all options:") + "\n\n")
-	b.WriteString("  " + renderGreen("repository:") + "      " + renderWhite("https://github.com/user/app") + "\n")
-	b.WriteString("  " + renderGreen("name:") + "            " + renderWhite("My App") + "\n")
-	b.WriteString("  " + renderGreen("summary:") + "         " + renderWhite("A short description") + "\n")
-	b.WriteString("  " + renderGreen("icon:") + "            " + renderWhite("./assets/icon.png") + "\n")
-	b.WriteString("  " + renderGreen("images:") + "\n")
-	b.WriteString("    " + renderGreen("-") + " " + renderWhite("./screenshots/1.png") + "\n")
-	b.WriteString("  " + renderGreen("tags:") + "            " + renderWhite("[productivity, nostr]") + "\n")
-	b.WriteString("  " + renderGreen("match:") + "           " + renderWhite("'.*arm64.*\\.apk$'") + "\n")
-	b.WriteString("  " + renderGreen("release_notes:") + "   " + renderWhite("./CHANGELOG.md") + "\n\n")
+	b.WriteString("  " + renderAccent("repository:") + "      " + renderWhite("https://github.com/user/app") + "\n")
+	b.WriteString("  " + renderAccent("name:") + "            " + renderWhite("My App") + "\n")
+	b.WriteString("  " + renderAccent("summary:") + "         " + renderWhite("A short description") + "\n")
+	b.WriteString("  " + renderAccent("icon:") + "            " + renderWhite("./assets/icon.png") + "\n")
+	b.WriteString("  " + renderAccent("images:") + "\n")
+	b.WriteString("    " + renderAccent("-") + " " + renderWhite("./screenshots/1.png") + "\n")
+	b.WriteString("  " + renderAccent("tags:") + "            " + renderWhite("[productivity, nostr]") + "\n")
+	b.WriteString("  " + renderAccent("match:") + "           " + renderWhite("'.*arm64.*\\.apk$'") + "\n")
+	b.WriteString("  " + renderAccent("release_notes:") + "   " + renderWhite("./CHANGELOG.md") + "\n\n")
 
 	b.WriteString(renderGreyDark("  Default config file: ") + renderWhite("./zapstore.yaml") + "\n")
 
@@ -225,19 +229,19 @@ func IdentityHelp() string {
 	var b strings.Builder
 
 	b.WriteString(ui.RenderLogo())
-	b.WriteString(renderGreenBold("zsp identity") + " " + renderWhite("- Manage cryptographic identity proofs (NIP-C1)") + "\n")
+	b.WriteString(renderBold("zsp identity") + " " + renderWhite("- Manage cryptographic identity proofs (NIP-C1)") + "\n")
 
-	b.WriteString(renderPurpleBold("WHAT IS THIS?") + "\n")
+	b.WriteString(renderBold("WHAT IS THIS?") + "\n")
 	b.WriteString(renderWhite("  Links your Android signing key to your Nostr identity.") + "\n")
 	b.WriteString(renderWhite("  This proves you control both the signing key and the Nostr pubkey.") + "\n")
 	b.WriteString(renderWhite("  Users can verify that apps signed with your key are published by you.") + "\n\n")
 
-	b.WriteString(renderPurpleBold("USAGE") + "\n")
-	b.WriteString("  " + renderGreen("zsp identity --link-key") + " <certificate>\n")
-	b.WriteString("  " + renderGreen("zsp identity --verify") + " <certificate|apk>\n\n")
+	b.WriteString(renderBold("USAGE") + "\n")
+	b.WriteString("  " + renderAccent("zsp identity --link-key") + " <certificate>\n")
+	b.WriteString("  " + renderAccent("zsp identity --verify") + " <certificate|apk>\n\n")
 
 	// Commands
-	b.WriteString(renderPurpleBold("COMMANDS") + "\n")
+	b.WriteString(renderBold("COMMANDS") + "\n")
 	writeFlag(&b, "--link-key <file>", "Publish cryptographic identity proof (kind 30509)")
 	b.WriteString("                            " + renderGreyDark("Supported: .p12, .pfx (PKCS12), .pem, .crt (PEM)") + "\n")
 	writeFlag(&b, "--verify <file>", "Verify identity proof against certificate or APK")
@@ -245,7 +249,7 @@ func IdentityHelp() string {
 	b.WriteString("\n")
 
 	// Options
-	b.WriteString(renderPurpleBold("OPTIONS") + "\n")
+	b.WriteString(renderBold("OPTIONS") + "\n")
 	writeFlag(&b, "--link-key-expiry <duration>", "Validity period (default: 1y)")
 	b.WriteString("                            " + renderGreyDark("Examples: 1y, 6mo, 30d, 720h") + "\n")
 	writeFlag(&b, "--relays <url>", "Relays for identity proofs (repeatable)")
@@ -253,7 +257,7 @@ func IdentityHelp() string {
 	b.WriteString("\n")
 
 	// Other flags
-	b.WriteString(renderPurpleBold("OTHER FLAGS") + "\n")
+	b.WriteString(renderBold("OTHER FLAGS") + "\n")
 	writeFlag(&b, "--offline", "Output event JSON to stdout instead of publishing")
 	b.WriteString("                            " + renderGreyDark("Event is signed unless SIGN_WITH is npub (unsigned)") + "\n")
 	writeFlag(&b, "--verbose", "Debug output")
@@ -262,46 +266,46 @@ func IdentityHelp() string {
 	b.WriteString("\n")
 
 	// Examples section - comprehensive
-	b.WriteString(renderPurpleBold("EXAMPLES") + "\n\n")
+	b.WriteString(renderBold("EXAMPLES") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Link your Android signing key to your Nostr identity") + "\n")
-	b.WriteString("  " + renderGreen("zsp identity --link-key release-key.p12") + "\n\n")
+	b.WriteString("  " + renderAccent("zsp identity --link-key release-key.p12") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Link with 2-year expiry") + "\n")
-	b.WriteString("  " + renderGreen("zsp identity --link-key release-key.p12 --link-key-expiry 2y") + "\n\n")
+	b.WriteString("  " + renderAccent("zsp identity --link-key release-key.p12 --link-key-expiry 2y") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Output signed event for external publishing (e.g., with nak)") + "\n")
-	b.WriteString("  " + renderGreen("KEYSTORE_PASSWORD=... SIGN_WITH=nsec1... zsp identity --link-key key.p12 --offline | nak event") + "\n\n")
+	b.WriteString("  " + renderAccent("KEYSTORE_PASSWORD=... SIGN_WITH=nsec1... zsp identity --link-key key.p12 --offline | nak event") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Output unsigned event (when SIGN_WITH is npub)") + "\n")
-	b.WriteString("  " + renderGreen("KEYSTORE_PASSWORD=... SIGN_WITH=npub1... zsp identity --link-key key.p12 --offline") + "\n\n")
+	b.WriteString("  " + renderAccent("KEYSTORE_PASSWORD=... SIGN_WITH=npub1... zsp identity --link-key key.p12 --offline") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Use custom relays") + "\n")
-	b.WriteString("  " + renderGreen("zsp identity --link-key key.p12 --relays wss://my-relay.com") + "\n\n")
+	b.WriteString("  " + renderAccent("zsp identity --link-key key.p12 --relays wss://my-relay.com") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Verify that an APK's signing key is linked to a Nostr identity") + "\n")
-	b.WriteString("  " + renderGreen("zsp identity --verify downloaded-app.apk") + "\n\n")
+	b.WriteString("  " + renderAccent("zsp identity --verify downloaded-app.apk") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Verify using your certificate file") + "\n")
-	b.WriteString("  " + renderGreen("zsp identity --verify release-key.p12") + "\n\n")
+	b.WriteString("  " + renderAccent("zsp identity --verify release-key.p12") + "\n\n")
 
 	// Certificate formats
-	b.WriteString(renderPurpleBold("CERTIFICATE FORMATS") + "\n")
-	b.WriteString("  " + renderGreen("PKCS12 (.p12, .pfx)") + "   " + renderWhite("Android keystore format (requires password)") + "\n")
-	b.WriteString("  " + renderGreen("PEM (.pem, .crt)") + "      " + renderWhite("Certificate + separate key file") + "\n\n")
+	b.WriteString(renderBold("CERTIFICATE FORMATS") + "\n")
+	b.WriteString("  " + renderAccent("PKCS12 (.p12, .pfx)") + "   " + renderWhite("Android keystore format (requires password)") + "\n")
+	b.WriteString("  " + renderAccent("PEM (.pem, .crt)") + "      " + renderWhite("Certificate + separate key file") + "\n\n")
 
 	// Environment variables
-	b.WriteString(renderPurpleBold("ENVIRONMENT") + "\n")
+	b.WriteString(renderBold("ENVIRONMENT") + "\n")
 	b.WriteString(renderGreyDark("  Variables can be set in environment or .env file") + "\n\n")
-	b.WriteString("  " + renderPurple("SIGN_WITH") + "           " + renderWhite("Signing method (nsec1..., npub1..., bunker://..., browser)") + "\n")
-	b.WriteString("  " + renderPurple("KEYSTORE_PASSWORD") + "   " + renderWhite("PKCS12 keystore password (avoids prompt, required for piping)") + "\n\n")
+	b.WriteString("  " + renderAccent("SIGN_WITH") + "           " + renderWhite("Signing method (nsec1..., npub1..., bunker://..., browser)") + "\n")
+	b.WriteString("  " + renderAccent("KEYSTORE_PASSWORD") + "   " + renderWhite("PKCS12 keystore password (avoids prompt, required for piping)") + "\n\n")
 
 	b.WriteString(renderGreyDark("  Note: JKS format is not directly supported. Convert with:") + "\n")
-	b.WriteString("  " + renderGreen("keytool -importkeystore -srckeystore key.jks -destkeystore key.p12 \\") + "\n")
-	b.WriteString("    " + renderGreen("-srcstoretype JKS -deststoretype PKCS12") + "\n\n")
+	b.WriteString("  " + renderAccent("keytool -importkeystore -srckeystore key.jks -destkeystore key.p12 \\") + "\n")
+	b.WriteString("    " + renderAccent("-srcstoretype JKS -deststoretype PKCS12") + "\n\n")
 
 	// How it works
-	b.WriteString(renderPurpleBold("HOW IT WORKS") + "\n")
+	b.WriteString(renderBold("HOW IT WORKS") + "\n")
 	b.WriteString(renderWhite("  1. Computes certificate hash from your signing certificate") + "\n")
 	b.WriteString(renderWhite("  2. Signs a message with your certificate's private key") + "\n")
 	b.WriteString(renderWhite("  3. Creates a kind 30509 Nostr event with the proof") + "\n")
@@ -311,49 +315,38 @@ func IdentityHelp() string {
 	return b.String()
 }
 
-// APKHelp returns colorful help for the apk subcommand.
-func APKHelp() string {
+// UtilsHelp returns help for the utils subcommand.
+func UtilsHelp() string {
 	var b strings.Builder
 
 	b.WriteString(ui.RenderLogo())
-	b.WriteString(renderGreenBold("zsp apk") + " " + renderWhite("- APK utility commands") + "\n")
+	b.WriteString(renderBold("zsp utils") + " " + renderWhite("- Operational utilities") + "\n\n")
 
-	b.WriteString(renderPurpleBold("USAGE") + "\n")
-	b.WriteString("  " + renderGreen("zsp apk --extract") + " <file.apk>\n\n")
+	b.WriteString(renderBold("USAGE") + "\n")
+	b.WriteString("  " + renderAccent("zsp utils") + " <operation> [args]\n\n")
 
-	// Commands
-	b.WriteString(renderPurpleBold("COMMANDS") + "\n")
-	writeFlag(&b, "--extract <file.apk>", "Extract APK metadata as JSON")
+	b.WriteString(renderBold("OPERATIONS") + "\n")
+	writeFlag(&b, "extract-apk <file.apk>", "Extract APK metadata as JSON (stdout)")
 	b.WriteString("                            " + renderGreyDark("Also extracts the app icon to <name>_icon.png") + "\n")
+	writeFlag(&b, "check-releases <config>", "Check for new upstream release without publishing")
+	b.WriteString("                            " + renderGreyDark("Outputs: NEW <version> or UP_TO_DATE") + "\n")
 	b.WriteString("\n")
 
-	// Options
-	b.WriteString(renderPurpleBold("OPTIONS") + "\n")
-	writeFlag(&b, "--verbose", "Debug output")
-	writeFlag(&b, "--no-color", "Disable colored output")
-	writeFlag(&b, "-h, --help", "Show this help")
-	b.WriteString("\n")
-
-	// Examples
-	b.WriteString(renderPurpleBold("EXAMPLES") + "\n\n")
+	b.WriteString(renderBold("EXAMPLES") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Extract metadata from an APK") + "\n")
-	b.WriteString("  " + renderGreen("zsp apk --extract myapp.apk") + "\n\n")
+	b.WriteString("  " + renderAccent("zsp utils extract-apk myapp.apk") + "\n\n")
 
-	// Output
-	b.WriteString(renderPurpleBold("OUTPUT (--extract)") + "\n")
-	b.WriteString(renderGreyDark("  {") + "\n")
-	b.WriteString(renderGreyDark("    \"package_id\": \"com.example.app\",") + "\n")
-	b.WriteString(renderGreyDark("    \"version_name\": \"1.2.3\",") + "\n")
-	b.WriteString(renderGreyDark("    \"version_code\": 123,") + "\n")
-	b.WriteString(renderGreyDark("    \"min_sdk\": 21,") + "\n")
-	b.WriteString(renderGreyDark("    \"target_sdk\": 34,") + "\n")
-	b.WriteString(renderGreyDark("    \"label\": \"My App\",") + "\n")
-	b.WriteString(renderGreyDark("    \"architectures\": [\"arm64-v8a\", \"armeabi-v7a\"],") + "\n")
-	b.WriteString(renderGreyDark("    \"cert_fingerprint\": \"AB:CD:EF:...\",") + "\n")
-	b.WriteString(renderGreyDark("    \"sha256\": \"abc123...\",") + "\n")
-	b.WriteString(renderGreyDark("    \"icon\": \"myapp_icon.png\"") + "\n")
-	b.WriteString(renderGreyDark("  }") + "\n")
+	b.WriteString(renderGreyDark("  # Check if a new release is available (no download, no publish)") + "\n")
+	b.WriteString("  " + renderAccent("zsp utils check-releases zapstore.yaml") + "\n\n")
+
+	b.WriteString(renderGreyDark("  # Use in scripts to detect new versions") + "\n")
+	b.WriteString("  " + renderAccent("result=$(zsp utils check-releases app.yaml)") + "\n")
+	b.WriteString("  " + renderAccent("if [[ $result == NEW* ]]; then version=${result#NEW }; fi") + "\n\n")
+
+	b.WriteString(renderBold("EXIT CODES") + "\n")
+	b.WriteString("  " + renderAccent("0") + "   Success (NEW or UP_TO_DATE for check-releases)\n")
+	b.WriteString("  " + renderAccent("1") + "   Error (source unreachable, no releases, invalid config)\n")
 
 	return b.String()
 }
@@ -366,8 +359,8 @@ func HandleHelp(cmd cli.Command, args []string) {
 		fmt.Fprint(os.Stdout, PublishHelp())
 	case cli.CommandIdentity:
 		fmt.Fprint(os.Stdout, IdentityHelp())
-	case cli.CommandAPK:
-		fmt.Fprint(os.Stdout, APKHelp())
+	case cli.CommandUtils:
+		fmt.Fprint(os.Stdout, UtilsHelp())
 	default:
 		fmt.Fprint(os.Stdout, RootHelp())
 	}
@@ -375,7 +368,7 @@ func HandleHelp(cmd cli.Command, args []string) {
 
 // Helper to write a flag line
 func writeFlag(b *strings.Builder, flag, desc string) {
-	b.WriteString("  " + renderGreen(flag))
+	b.WriteString("  " + renderAccent(flag))
 	// Pad to align descriptions (min 1 space)
 	padding := 26 - len(flag)
 	if padding < 1 {
@@ -387,7 +380,7 @@ func writeFlag(b *strings.Builder, flag, desc string) {
 
 // Helper to write an example line
 func writeExample(b *strings.Builder, cmd, desc string) {
-	b.WriteString("  " + renderGreen(cmd))
+	b.WriteString("  " + renderAccent(cmd))
 	// Pad to align descriptions
 	padding := 38 - len(cmd)
 	if padding > 0 {

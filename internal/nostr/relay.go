@@ -111,11 +111,14 @@ func (p *Publisher) publishToRelay(ctx context.Context, url string, event *nostr
 }
 
 // PublishEventSet publishes all events in an event set.
+// AppMetadata may be nil when --skip-app-event is used.
 func (p *Publisher) PublishEventSet(ctx context.Context, events *EventSet) (map[string][]PublishResult, error) {
 	results := make(map[string][]PublishResult)
 
-	// Publish Software Application
-	results["software_application"] = p.Publish(ctx, events.AppMetadata)
+	// Publish Software Application (skipped when --skip-app-event is used)
+	if events.AppMetadata != nil {
+		results["software_application"] = p.Publish(ctx, events.AppMetadata)
+	}
 
 	// Publish Software Release
 	results["software_release"] = p.Publish(ctx, events.Release)
@@ -130,6 +133,11 @@ func (p *Publisher) PublishEventSet(ctx context.Context, events *EventSet) (map[
 	}
 
 	return results, nil
+}
+
+// PublishIdentityProof publishes a single kind 30509 event to all relays.
+func (p *Publisher) PublishIdentityProof(ctx context.Context, event *nostr.Event) ([]PublishResult, error) {
+	return p.Publish(ctx, event), nil
 }
 
 // RelayURLs returns the configured relay URLs.

@@ -54,7 +54,6 @@ type UploadParams struct {
 	Commit              string
 	Channel             string
 	Opts                *cli.Options
-	Legacy              bool
 	AppCreatedAtRelease bool
 	MinReleaseTimestamp time.Time // Bump Release.CreatedAt above this (--overwrite-release)
 }
@@ -289,10 +288,8 @@ func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.Ev
 		}
 	}
 
-	var releaseURL string
 	var releaseTimestamp time.Time
 	if params.Release != nil {
-		releaseURL = params.Release.URL
 		releaseTimestamp = params.Release.CreatedAt
 	}
 
@@ -308,8 +305,6 @@ func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.Ev
 		Variant:                   params.Variant,
 		Commit:                    params.Commit,
 		Channel:                   params.Channel,
-		ReleaseURL:                releaseURL,
-		LegacyFormat:              params.Legacy,
 		ReleaseTimestamp:          releaseTimestamp,
 		UseReleaseTimestampForApp: params.AppCreatedAtRelease,
 		MinReleaseTimestamp:       params.MinReleaseTimestamp,

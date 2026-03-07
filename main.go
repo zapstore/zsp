@@ -93,8 +93,8 @@ func run(sigHandler *cli.SignalHandler) int {
 		return runPublishCommand(ctx, opts)
 	case cli.CommandIdentity:
 		return runIdentityCommand(ctx, opts)
-	case cli.CommandAPK:
-		return runAPKCommand(ctx, opts)
+	case cli.CommandUtils:
+		return runUtilsCommand(ctx, opts)
 	default:
 		// No subcommand - show help
 		help.HandleHelp(cli.CommandNone, nil)
@@ -208,17 +208,17 @@ func runIdentityCommand(ctx context.Context, opts *cli.Options) int {
 	return 0
 }
 
-// runAPKCommand handles the apk subcommand.
-func runAPKCommand(ctx context.Context, opts *cli.Options) int {
-	// Handle no-color for subcommand
+// runUtilsCommand handles the utils subcommand.
+func runUtilsCommand(ctx context.Context, opts *cli.Options) int {
 	if opts.Global.NoColor {
 		ui.SetNoColor(true)
 	}
 
-	if opts.APK.Extract {
+	switch opts.Utils.Operation {
+	case "extract-apk":
 		if len(opts.Args) == 0 || !strings.HasSuffix(strings.ToLower(opts.Args[0]), ".apk") {
-			fmt.Fprintln(os.Stderr, "Error: --extract requires a local APK file as argument")
-			fmt.Fprintln(os.Stderr, "Usage: zsp apk --extract <file.apk>")
+			fmt.Fprintln(os.Stderr, "Error: extract-apk requires a local APK file as argument")
+			fmt.Fprintln(os.Stderr, "Usage: zsp utils extract-apk <file.apk>")
 			return 1
 		}
 		if err := extractAPKMetadata(opts.Args[0]); err != nil {
@@ -226,11 +226,115 @@ func runAPKCommand(ctx context.Context, opts *cli.Options) int {
 			return 1
 		}
 		return 0
+
+	case "check-releases":
+		if len(opts.Args) == 0 {
+			fmt.Fprintln(os.Stderr, "Error: check-releases requires a config file as argument")
+			fmt.Fprintln(os.Stderr, "Usage: zsp utils check-releases <config.yaml>")
+			return 1
+		}
+		if err := checkReleases(ctx, opts.Args[0], opts); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
+			return 1
+		}
+		return 0
+
+	default:
+		help.HandleHelp(cli.CommandUtils, nil)
+		return 0
+	}
+}
+
+// checkReleases checks for a new upstream release without downloading or publishing.
+// Outputs "NEW <version>" or "UP_TO_DATE" to stdout; exits 1 on source errors.
+func checkReleases(ctx context.Context, configPath string, opts *cli.Options) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	// No operation specified - show help
-	help.HandleHelp(cli.CommandAPK, nil)
-	return 0
+	src, err := source.NewWithOptions(cfg, source.Options{
+		BaseDir:            cfg.BaseDir,
+		IncludePreReleases: opts.Publish.IncludePreReleases,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create source: %w", err)
+	}
+
+	release, err := src.FetchLatestRelease(ctx)
+	if err == source.ErrNotModified {
+		// ETag 304 — nothing changed since last check
+		if cacheCommitter, ok := src.(source.CacheCommitter); ok {
+			_ = cacheCommitter.CommitCache()
+		}
+		fmt.Println("UP_TO_DATE")
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to fetch release: %w", err)
+	}
+
+	// Commit ETag cache after successful fetch
+	defer func() {
+		if cacheCommitter, ok := src.(source.CacheCommitter); ok {
+			_ = cacheCommitter.CommitCache()
+		}
+	}()
+
+	// Select best APK (metadata only — no download)
+	apkAssets := picker.FilterAPKs(release.Assets)
+	if len(apkAssets) == 0 {
+		return fmt.Errorf("no APK files found in release")
+	}
+	if cfg.Match != "" {
+		apkAssets, err = picker.FilterByMatch(apkAssets, cfg.Match)
+		if err != nil {
+			return err
+		}
+		if len(apkAssets) == 0 {
+			return fmt.Errorf("no APK files match pattern: %s", cfg.Match)
+		}
+	}
+
+	version := release.Version
+	if version == "" {
+		return fmt.Errorf("could not determine version from release (no version tag)")
+	}
+
+	// Attempt relay check if we can derive a package ID from the config.
+	// The package ID (Android package name) is only definitively known after APK parsing,
+	// but we can try to extract it from the F-Droid release source URL.
+	// If the relay check is impossible, we conservatively report NEW.
+	packageID := extractPackageIDFromConfig(cfg)
+	if packageID != "" {
+		relaysEnv := config.GetEnv("RELAY_URLS")
+		publisher := nostrpkg.NewPublisherFromEnv(relaysEnv)
+		existingAsset, relayErr := publisher.CheckExistingAsset(ctx, packageID, version)
+		if relayErr == nil && existingAsset != nil {
+			fmt.Println("UP_TO_DATE")
+			return nil
+		}
+		// On relay error or no existing asset: fall through to report NEW
+	}
+
+	fmt.Printf("NEW %s\n", version)
+	return nil
+}
+
+// extractPackageIDFromConfig attempts to derive the Android package ID from config.
+// Returns empty string if it cannot be determined without downloading the APK.
+func extractPackageIDFromConfig(cfg *config.Config) string {
+	// Try F-Droid release source URL (contains package ID)
+	if cfg.ReleaseSource != nil && cfg.ReleaseSource.URL != "" {
+		if id := config.GetFDroidPackageID(cfg.ReleaseSource.URL); id != "" {
+			return id
+		}
+	}
+	// Cannot determine package ID without APK parsing — relay check will be skipped
+	return ""
 }
 
 // runPublish executes the publish workflow.

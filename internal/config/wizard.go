@@ -339,8 +339,8 @@ repoLoop:
 		fmt.Println()
 	}
 
-	// Step 4: Build command (shown at the end)
-	command := buildCommand(cfg, releaseSourceURL, "", selectedMetadataSources)
+	// Step 4: Build command (kept for reference but config is always written)
+	_ = buildCommand(cfg, releaseSourceURL, "", selectedMetadataSources)
 
 	// Step 5: Ask about metadata overrides
 	var metadataPrompt string
@@ -449,57 +449,51 @@ repoLoop:
 		fmt.Println()
 	}
 
-	// Step 6: Save config if settings require it
-	// Config is needed for: metadata overrides or release source URL
-	// Metadata sources alone don't need config - they're on the command line
-	needsConfig := wantMetadataOverrides || releaseSourceURL != ""
-
 	// Check if interrupted before saving
 	if ui.IsInterrupted() {
 		return nil, ui.ErrInterrupted
 	}
 
-	if needsConfig {
-		// Store release source in config (both the struct and raw YAML node for marshaling)
-		if releaseSourceURL != "" {
-			cfg.ReleaseSource = &ReleaseSource{URL: releaseSourceURL}
-			// Set ReleaseSourceRaw for YAML serialization (ReleaseSource has yaml:"-")
-			cfg.ReleaseSourceRaw = yaml.Node{
-				Kind:  yaml.ScalarNode,
-				Tag:   "!!str",
-				Value: releaseSourceURL,
-			}
+	// Store release source in config (both the struct and raw YAML node for marshaling)
+	if releaseSourceURL != "" {
+		cfg.ReleaseSource = &ReleaseSource{URL: releaseSourceURL}
+		// Set ReleaseSourceRaw for YAML serialization (ReleaseSource has yaml:"-")
+		cfg.ReleaseSourceRaw = yaml.Node{
+			Kind:  yaml.ScalarNode,
+			Tag:   "!!str",
+			Value: releaseSourceURL,
 		}
-
-		// Store metadata sources in config if we're saving one anyway
-		if len(selectedMetadataSources) > 0 {
-			cfg.MetadataSources = selectedMetadataSources
-		}
-
-		// Generate and save config
-		yamlBytes, err := yaml.Marshal(cfg)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate YAML: %w", err)
-		}
-
-		if err := os.WriteFile("zapstore.yaml", yamlBytes, 0644); err != nil {
-			return nil, fmt.Errorf("failed to save config: %w", err)
-		}
-		ui.PrintSuccess("Saved to zapstore.yaml")
-		fmt.Println()
-
-		// Show simplified command since config was saved
-		fmt.Println(ui.Bold("🎉 Your command is ready! Run this to publish:"))
-		fmt.Println()
-		fmt.Printf("  %s\n", ui.Success("zsp publish"))
-		fmt.Println()
-	} else {
-		// No config needed, just show the command
-		fmt.Println(ui.Bold("🎉 Your command is ready! Run this to publish:"))
-		fmt.Println()
-		fmt.Printf("  %s\n", ui.Success(command))
-		fmt.Println()
 	}
+
+	// Store metadata sources in config if we're saving one anyway
+	if len(selectedMetadataSources) > 0 {
+		cfg.MetadataSources = selectedMetadataSources
+	}
+
+	// Derive pubkey from SIGN_WITH and store in config for relay auto-whitelisting
+	if signWith := GetSignWith(); signWith != "" {
+		if npub := ResolvePubkeyFromSignWith(signWith); npub != "" {
+			cfg.Pubkey = npub
+		}
+	}
+
+	// Always write zapstore.yaml so the relay can verify pubkey ownership
+	yamlBytes, err := yaml.Marshal(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate YAML: %w", err)
+	}
+
+	if err := os.WriteFile("zapstore.yaml", yamlBytes, 0644); err != nil {
+		return nil, fmt.Errorf("failed to save config: %w", err)
+	}
+	ui.PrintSuccess("Saved to zapstore.yaml")
+	fmt.Println()
+
+	// Show simplified command since config was saved
+	fmt.Println(ui.Bold("🎉 Your command is ready! Run this to publish:"))
+	fmt.Println()
+	fmt.Printf("  %s\n", ui.Success("zsp publish"))
+	fmt.Println()
 
 	// Return sentinel error so caller knows not to auto-run
 	return nil, ErrWizardComplete

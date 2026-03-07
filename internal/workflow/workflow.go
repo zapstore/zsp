@@ -10,11 +10,13 @@ import (
 	"strings"
 	"time"
 
+	gonostr "github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
 	"github.com/zapstore/zsp/internal/apk"
 	"github.com/zapstore/zsp/internal/blossom"
 	"github.com/zapstore/zsp/internal/cli"
 	"github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/internal/identity"
 	"github.com/zapstore/zsp/internal/nostr"
 	"github.com/zapstore/zsp/internal/picker"
 	"github.com/zapstore/zsp/internal/source"
@@ -122,7 +124,7 @@ func (p *Publisher) Execute(ctx context.Context) error {
 		return p.outputOffline()
 	}
 
-	// Handle npub signer
+	// Handle npub signer: events are built with correct pubkey but unsigned, output for external signing
 	if p.signer != nil && p.signer.Type() == nostr.SignerNpub {
 		return p.outputNpubEvents()
 	}
@@ -130,7 +132,7 @@ func (p *Publisher) Execute(ctx context.Context) error {
 	// Hash confirmation
 	if !p.opts.Publish.Yes {
 		isClosedSource := p.cfg.Repository == ""
-		confirmed, err := confirmHash(p.apkInfo.SHA256, isClosedSource, p.opts.Publish.Legacy)
+		confirmed, err := confirmHash(p.apkInfo.SHA256, isClosedSource)
 		if err != nil {
 			return fmt.Errorf("hash confirmation failed: %w", err)
 		}
@@ -569,6 +571,13 @@ func (p *Publisher) signAndUpload(ctx context.Context) error {
 		return err
 	}
 
+	// C1 certificate linking check (skip in offline/npub mode)
+	if !p.isOffline() && p.signer.Type() != nostr.SignerNpub {
+		if err := p.checkAndLinkCertificate(ctx); err != nil {
+			return err
+		}
+	}
+
 	// When overwriting a release, fetch the existing 30063's created_at so the new
 	// event gets a strictly higher timestamp and the relay's NIP-33 guard fires.
 	if p.opts.Publish.OverwriteRelease && !p.isOffline() {
@@ -622,9 +631,118 @@ func (p *Publisher) createSigner(ctx context.Context) error {
 	}
 
 	if p.opts.Global.Verbose {
-		fmt.Printf("Signer type: %v, pubkey: %s...\n", p.signer.Type(), p.signer.PublicKey()[:16])
+		pubkey := p.signer.PublicKey()
+		if len(pubkey) >= 16 {
+			pubkey = pubkey[:16] + "..."
+		} else if pubkey == "" {
+			pubkey = "(none)"
+		}
+		fmt.Printf("Signer type: %v, pubkey: %s\n", p.signer.Type(), pubkey)
 	}
 
+	return nil
+}
+
+// checkAndLinkCertificate checks for a valid NIP-C1 identity proof on the relay.
+// In interactive mode, if no valid proof exists, the user is prompted to provide
+// their signing keystore to create and publish one. In quiet mode, a warning is printed.
+func (p *Publisher) checkAndLinkCertificate(ctx context.Context) error {
+	certHash := p.apkInfo.CertFingerprint
+	pubkey := p.signer.PublicKey()
+
+	// Query relay for existing valid proof
+	event, err := p.publisher.FetchIdentityProof(ctx, pubkey, certHash)
+	if err != nil {
+		if p.opts.Publish.ShouldShowSpinners() {
+			ui.PrintWarning(fmt.Sprintf("Could not check certificate link: %v", err))
+		}
+		return nil
+	}
+
+	if event != nil {
+		proof, parseErr := identity.ParseIdentityProofFromEvent(event)
+		if parseErr == nil && !proof.IsExpired() {
+			if p.opts.Publish.ShouldShowSpinners() {
+				ui.PrintSuccess("Certificate linked ✓")
+			}
+			return nil
+		}
+	}
+
+	// No valid proof found
+	if p.opts.Publish.Quiet {
+		fmt.Fprintf(os.Stderr, "WARNING: Certificate not linked. Run: zsp identity --link-key <keystore>\n")
+		return nil
+	}
+
+	// Interactive mode: mandatory linking flow
+	if p.opts.Publish.ShouldShowSpinners() {
+		fmt.Println()
+		ui.PrintSectionHeader("Certificate Linking (NIP-C1)")
+		fmt.Println(ui.Dim("Linking your APK signing certificate to your Nostr identity improves trust."))
+		fmt.Println(ui.Dim("This is required for interactive publishing. Press Ctrl+C to abort."))
+		fmt.Println()
+	}
+
+	keystorePath, err := ui.Prompt("Provide path to your signing keystore (.jks/.p12/.pem): ")
+	if err != nil {
+		return fmt.Errorf("keystore prompt failed: %w", err)
+	}
+	keystorePath = strings.TrimSpace(keystorePath)
+
+	password, err := ui.PromptSecret("Keystore password")
+	if err != nil {
+		return fmt.Errorf("password prompt failed: %w", err)
+	}
+
+	privateKey, cert, loadErr := identity.LoadPKCS12File(keystorePath, password)
+	if loadErr != nil {
+		if loadErr == identity.ErrJKSFormat {
+			fmt.Println(identity.JKSConversionHelp(keystorePath))
+			return fmt.Errorf("JKS format not supported directly")
+		}
+		return fmt.Errorf("failed to load keystore: %w", loadErr)
+	}
+
+	_ = cert // certificate loaded for key extraction; hash comes from APK parsing
+
+	proof, genErr := identity.GenerateIdentityProof(privateKey, certHash, pubkey, nil)
+	if genErr != nil {
+		return fmt.Errorf("failed to generate identity proof: %w", genErr)
+	}
+
+	// Build and publish the kind 30509 event
+	proofEvent := &gonostr.Event{
+		Kind:      nostr.KindIdentityProof,
+		PubKey:    pubkey,
+		CreatedAt: gonostr.Timestamp(proof.CreatedAt),
+		Tags:      proof.ToEventTags(),
+	}
+
+	relayHint := p.getRelayHint()
+	if err := nostr.SignEventSet(ctx, p.signer, &nostr.EventSet{IdentityProof: proofEvent}, relayHint); err != nil {
+		return fmt.Errorf("failed to sign identity proof: %w", err)
+	}
+
+	results, pubErr := p.publisher.PublishIdentityProof(ctx, proofEvent)
+	if pubErr != nil {
+		return fmt.Errorf("failed to publish identity proof: %w", pubErr)
+	}
+
+	success := false
+	for _, r := range results {
+		if r.Success {
+			success = true
+			break
+		}
+	}
+	if !success {
+		return fmt.Errorf("identity proof was not accepted by any relay")
+	}
+
+	if p.opts.Publish.ShouldShowSpinners() {
+		ui.PrintSuccess("Certificate linked ✓")
+	}
 	return nil
 }
 
@@ -653,12 +771,13 @@ func (p *Publisher) buildEventsWithoutUpload(ctx context.Context) error {
 		Variant:                   p.matchVariant(),
 		Commit:                    p.opts.Publish.Commit,
 		Channel:                   p.opts.Publish.Channel,
-		ReleaseURL:                p.getReleaseURL(),
-		LegacyFormat:              p.opts.Publish.Legacy,
 		ReleaseTimestamp:          p.getReleaseTimestamp(),
 		UseReleaseTimestampForApp: p.opts.Publish.AppCreatedAtRelease,
 		MinReleaseTimestamp:       p.existingReleaseTimestamp,
 	})
+	if p.opts.Publish.SkipAppEvent {
+		p.events.AppMetadata = nil
+	}
 
 	relayHint := p.getRelayHint()
 	return nostr.SignEventSet(ctx, p.signer, p.events, relayHint)
@@ -687,11 +806,10 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 			RelayHint:           relayHint,
 			PreDownloaded:       p.preDownloaded,
 			Variant:             p.matchVariant(),
-			Commit:              p.opts.Publish.Commit,
-			Channel:             p.opts.Publish.Channel,
-			Opts:                p.opts,
-			Legacy:              p.opts.Publish.Legacy,
-			AppCreatedAtRelease: p.opts.Publish.AppCreatedAtRelease,
+		Commit:              p.opts.Publish.Commit,
+		Channel:             p.opts.Publish.Channel,
+		Opts:                p.opts,
+		AppCreatedAtRelease: p.opts.Publish.AppCreatedAtRelease,
 			MinReleaseTimestamp: p.existingReleaseTimestamp,
 		})
 		return err
@@ -724,12 +842,13 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 		Variant:                   p.matchVariant(),
 		Commit:                    p.opts.Publish.Commit,
 		Channel:                   p.opts.Publish.Channel,
-		ReleaseURL:                p.getReleaseURL(),
-		LegacyFormat:              p.opts.Publish.Legacy,
 		ReleaseTimestamp:          p.getReleaseTimestamp(),
 		UseReleaseTimestampForApp: p.opts.Publish.AppCreatedAtRelease,
 		MinReleaseTimestamp:       p.existingReleaseTimestamp,
 	})
+	if p.opts.Publish.SkipAppEvent {
+		p.events.AppMetadata = nil
+	}
 
 	return nostr.SignEventSet(ctx, p.signer, p.events, relayHint)
 }
@@ -744,14 +863,6 @@ func (p *Publisher) getRelayHint() string {
 		}
 	}
 	return relayHint
-}
-
-// getReleaseURL returns the release page URL (for legacy format).
-func (p *Publisher) getReleaseURL() string {
-	if p.release != nil {
-		return p.release.URL
-	}
-	return ""
 }
 
 // getReleaseTimestamp returns the release creation/publish timestamp.
@@ -1026,6 +1137,10 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 
 // showZapstoreURL prints the zapstore.dev app URL if the app was published to relay.zapstore.dev.
 func (p *Publisher) showZapstoreURL(results map[string][]nostr.PublishResult) {
+	if p.events.AppMetadata == nil {
+		return
+	}
+
 	// Check if relay.zapstore.dev accepted the software_application event
 	const zapstoreRelayHost = "relay.zapstore.dev"
 	accepted := false
