@@ -490,17 +490,33 @@ zsp publish --check zapstore.yaml
 
 ### Offline Mode
 
-Sign events without uploading to Blossom or publishing to relays. Events are output to stdout (pipeable to `nak`), and an upload manifest is printed to stderr:
+`--offline` makes no network calls. It signs events locally and outputs them to stdout (pipeable to `nak`), with an upload manifest on stderr. **A local APK path is required** — remote sources (GitHub, F-Droid, etc.) are rejected.
+
+A config file works in offline mode as long as `release_source` points to a local path. This is also the only way to supply local icons and screenshots.
 
 ```bash
 # Save signed events for later
-zsp publish -q --offline zapstore.yaml > events.json
+zsp publish -q --offline app.apk > events.json
 
 # Pipe directly to nak for publishing (use -q for clean output)
-zsp publish -q --offline zapstore.yaml | nak event wss://relay.zapstore.dev
+zsp publish -q --offline app.apk | nak event wss://relay.zapstore.dev
 
 # With npub (outputs unsigned events)
-SIGN_WITH=npub1... zsp publish -q --offline zapstore.yaml > unsigned-events.json
+SIGN_WITH=npub1... zsp publish -q --offline app.apk > unsigned-events.json
+
+# Config file with local APK, icon, and screenshots
+zsp publish -q --offline zapstore.yaml > events.json
+```
+
+Example `zapstore.yaml` for offline use:
+
+```yaml
+release_source: ./build/app-release.apk
+repository: https://github.com/user/app
+icon: ./assets/icon.png
+images:
+  - ./screenshots/screen1.png
+  - ./screenshots/screen2.png
 ```
 
 The manifest (on stderr) shows which files must be uploaded to Blossom before the events become valid:
@@ -517,20 +533,6 @@ Icon:
   Path:   /tmp/zsp_icon_a1b2c3d4e5f67890
   SHA256: a1b2c3d4e5f6789012345678901234567890123456789012345678901234abcd
   URL:    https://cdn.zapstore.dev/a1b2c3d4e5f6789012345678901234567890123456789012345678901234abcd
-```
-
-For extra security, block all network access:
-
-```bash
-# Linux (built-in)
-unshare --net --map-root-user zsp publish app.apk --offline > events.json
-
-# Linux (firejail)
-firejail --net=none zsp publish app.apk --offline > events.json
-
-# macOS (sandbox-exec, or use LuLu/Little Snitch firewalls)
-echo '(version 1)(allow default)(deny network*)' > /tmp/no-net.sb
-sandbox-exec -f /tmp/no-net.sb zsp publish app.apk --offline > events.json
 ```
 
 ---

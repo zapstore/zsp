@@ -3,6 +3,8 @@ package workflow
 
 import (
 	"context"
+	"crypto"
+	"crypto/x509"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	gonostr "github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
 	"github.com/zapstore/zsp/internal/apk"
 	"github.com/zapstore/zsp/internal/blossom"
@@ -176,6 +177,10 @@ func (p *Publisher) fetchAssets(ctx context.Context) error {
 
 // fetchRelease fetches the latest release with spinner feedback.
 func (p *Publisher) fetchRelease(ctx context.Context) (*source.Release, error) {
+	if p.opts.Publish.Offline && p.src.Type() != config.SourceLocal {
+		return nil, fmt.Errorf("--offline requires a local APK path; remote sources (%s) make network calls", p.src.Type())
+	}
+
 	release, err := WithSpinner(p.opts, "Fetching release info...", func() (*source.Release, error) {
 		return p.src.FetchLatestRelease(ctx)
 	})
@@ -386,28 +391,43 @@ func (p *Publisher) checkExistingAsset(ctx context.Context) error {
 }
 
 // gatherMetadata fetches metadata from external sources.
+// In offline mode, network fetches (external metadata, remote images) are skipped,
+// but local data (release notes from a local file, local icon/screenshots) is still processed.
 func (p *Publisher) gatherMetadata(ctx context.Context) error {
-	// Fetch metadata from external sources (default for new releases)
-	// Use --skip-metadata to opt out (useful for apps with frequent releases)
-	if !p.opts.Publish.SkipMetadata {
-		if err := p.fetchExternalMetadata(ctx); err != nil {
-			return err
+	if !p.isOffline() {
+		// Fetch metadata from external sources (default for new releases)
+		// Use --skip-metadata to opt out (useful for apps with frequent releases)
+		if !p.opts.Publish.SkipMetadata {
+			if err := p.fetchExternalMetadata(ctx); err != nil {
+				return err
+			}
+		} else if p.opts.Publish.ShouldShowSpinners() {
+			ui.PrintInfo("Skipping metadata fetch (--skip-metadata)")
 		}
 	} else if p.opts.Publish.ShouldShowSpinners() {
-		ui.PrintInfo("Skipping metadata fetch (--skip-metadata)")
+		ui.PrintInfo("Skipping external metadata fetch (--offline)")
 	}
 
-	// Determine release notes
+	// Determine release notes (local file paths work in offline mode too)
 	p.releaseNotes = p.release.Changelog
 	if p.cfg.ReleaseNotes != "" {
-		var err error
-		p.releaseNotes, err = source.FetchReleaseNotes(ctx, p.cfg.ReleaseNotes, p.apkInfo.VersionName, p.cfg.BaseDir)
-		if err != nil {
-			return fmt.Errorf("failed to fetch release notes: %w", err)
+		if p.isOffline() && isRemoteURL(p.cfg.ReleaseNotes) {
+			if p.opts.Publish.ShouldShowSpinners() {
+				ui.PrintInfo("Skipping remote release notes (--offline)")
+			}
+		} else {
+			var err error
+			p.releaseNotes, err = source.FetchReleaseNotes(ctx, p.cfg.ReleaseNotes, p.apkInfo.VersionName, p.cfg.BaseDir)
+			if err != nil {
+				return fmt.Errorf("failed to fetch release notes: %w", err)
+			}
 		}
 	}
 
-	// Pre-download remote images
+	// Pre-download remote images (skipped in offline mode; local images are used directly)
+	if p.isOffline() {
+		return nil
+	}
 	return p.preDownloadImages(ctx)
 }
 
@@ -571,8 +591,8 @@ func (p *Publisher) signAndUpload(ctx context.Context) error {
 		return err
 	}
 
-	// C1 certificate linking check (skip in offline/npub mode)
-	if !p.isOffline() && p.signer.Type() != nostr.SignerNpub {
+	// C1 certificate linking check (skip in offline mode only)
+	if !p.isOffline() {
 		if err := p.checkAndLinkCertificate(ctx); err != nil {
 			return err
 		}
@@ -644,58 +664,62 @@ func (p *Publisher) createSigner(ctx context.Context) error {
 }
 
 // checkAndLinkCertificate checks for a valid NIP-C1 identity proof on the relay.
-// In interactive mode, if no valid proof exists, the user is prompted to provide
-// their signing keystore to create and publish one. In quiet mode, a warning is printed.
+//
+// Online signers (nsec/bunker/browser): if no valid proof exists, prompts the user
+// for their keystore, generates the proof, signs it, and publishes it inline.
+//
+// Npub signer: same flow, but the generated 30509 event is attached to p.events.IdentityProof
+// so it is output unsigned alongside the other events for external signing.
+//
+// Quiet mode: non-blocking warning only.
 func (p *Publisher) checkAndLinkCertificate(ctx context.Context) error {
 	certHash := p.apkInfo.CertFingerprint
 	pubkey := p.signer.PublicKey()
+	isNpub := p.signer.Type() == nostr.SignerNpub
 
-	// Query relay for existing valid proof
-	event, err := p.publisher.FetchIdentityProof(ctx, pubkey, certHash)
-	if err != nil {
-		if p.opts.Publish.ShouldShowSpinners() {
-			ui.PrintWarning(fmt.Sprintf("Could not check certificate link: %v", err))
-		}
-		return nil
-	}
-
-	if event != nil {
-		proof, parseErr := identity.ParseIdentityProofFromEvent(event)
-		if parseErr == nil && !proof.IsExpired() {
+	// For online signers, query relay for existing valid proof.
+	// Npub signers have no relay to check against, so skip the check.
+	if !isNpub {
+		event, err := p.publisher.FetchIdentityProof(ctx, pubkey, certHash)
+		if err != nil {
 			if p.opts.Publish.ShouldShowSpinners() {
-				ui.PrintSuccess("Certificate linked ✓")
+				ui.PrintWarning(fmt.Sprintf("Could not check certificate link: %v", err))
 			}
 			return nil
 		}
+
+		if event != nil {
+			proof, parseErr := identity.ParseIdentityProofFromEvent(event)
+			if parseErr == nil && !proof.IsExpired() {
+				if p.opts.Publish.ShouldShowSpinners() {
+					ui.PrintSuccess("Certificate linked ✓")
+				}
+				return nil
+			}
+		}
 	}
 
-	// No valid proof found
+	// No valid proof found (or npub signer).
 	if p.opts.Publish.Quiet {
 		fmt.Fprintf(os.Stderr, "WARNING: Certificate not linked. Run: zsp identity --link-key <keystore>\n")
 		return nil
 	}
 
-	// Interactive mode: mandatory linking flow
-	if p.opts.Publish.ShouldShowSpinners() {
-		fmt.Println()
-		ui.PrintSectionHeader("Certificate Linking (NIP-C1)")
-		fmt.Println(ui.Dim("Linking your APK signing certificate to your Nostr identity improves trust."))
-		fmt.Println(ui.Dim("This is required for interactive publishing. Press Ctrl+C to abort."))
-		fmt.Println()
+	fmt.Println()
+	ui.PrintSectionHeader("Certificate Linking (NIP-C1)")
+	fmt.Println(ui.Dim("Linking your APK signing certificate to your Nostr identity improves trust."))
+	if isNpub {
+		fmt.Println(ui.Dim("The proof event will be included in the output for external signing."))
 	}
+	fmt.Println()
 
-	keystorePath, err := ui.Prompt("Provide path to your signing keystore (.jks/.p12/.pem): ")
+	keystorePath, err := ui.Prompt("Path to your signing keystore (.p12/.pem): ")
 	if err != nil {
 		return fmt.Errorf("keystore prompt failed: %w", err)
 	}
 	keystorePath = strings.TrimSpace(keystorePath)
 
-	password, err := ui.PromptSecret("Keystore password")
-	if err != nil {
-		return fmt.Errorf("password prompt failed: %w", err)
-	}
-
-	privateKey, cert, loadErr := identity.LoadPKCS12File(keystorePath, password)
+	privateKey, cert, loadErr := p.loadKeystoreFile(keystorePath)
 	if loadErr != nil {
 		if loadErr == identity.ErrJKSFormat {
 			fmt.Println(identity.JKSConversionHelp(keystorePath))
@@ -703,22 +727,25 @@ func (p *Publisher) checkAndLinkCertificate(ctx context.Context) error {
 		}
 		return fmt.Errorf("failed to load keystore: %w", loadErr)
 	}
-
-	_ = cert // certificate loaded for key extraction; hash comes from APK parsing
+	_ = cert
 
 	proof, genErr := identity.GenerateIdentityProof(privateKey, certHash, pubkey, nil)
 	if genErr != nil {
 		return fmt.Errorf("failed to generate identity proof: %w", genErr)
 	}
 
-	// Build and publish the kind 30509 event
-	proofEvent := &gonostr.Event{
-		Kind:      nostr.KindIdentityProof,
-		PubKey:    pubkey,
-		CreatedAt: gonostr.Timestamp(proof.CreatedAt),
-		Tags:      proof.ToEventTags(),
+	proofEvent := nostr.BuildIdentityProofEvent(proof.ToEventTags(), pubkey, proof.CreatedAt)
+
+	if isNpub {
+		// Attach unsigned to the event set; SignEventSet will fill in pubkey+ID via NpubSigner.
+		p.events.IdentityProof = proofEvent
+		if p.opts.Publish.ShouldShowSpinners() {
+			ui.PrintSuccess("Identity proof event added to output (sign externally)")
+		}
+		return nil
 	}
 
+	// Online: sign and publish immediately.
 	relayHint := p.getRelayHint()
 	if err := nostr.SignEventSet(ctx, p.signer, &nostr.EventSet{IdentityProof: proofEvent}, relayHint); err != nil {
 		return fmt.Errorf("failed to sign identity proof: %w", err)
@@ -744,6 +771,42 @@ func (p *Publisher) checkAndLinkCertificate(ctx context.Context) error {
 		ui.PrintSuccess("Certificate linked ✓")
 	}
 	return nil
+}
+
+// loadKeystoreFile loads an x509 private key and certificate from a keystore file.
+// Supports .p12/.pfx (PKCS12) and .pem/.crt/.cer (PEM). Returns ErrJKSFormat for .jks.
+func (p *Publisher) loadKeystoreFile(filePath string) (crypto.PrivateKey, *x509.Certificate, error) {
+	lower := strings.ToLower(filePath)
+
+	if strings.HasSuffix(lower, ".jks") || strings.HasSuffix(lower, ".keystore") {
+		return nil, nil, identity.ErrJKSFormat
+	}
+
+	if strings.HasSuffix(lower, ".p12") || strings.HasSuffix(lower, ".pfx") {
+		password := config.GetKeystorePassword()
+		if password == "" {
+			var err error
+			password, err = ui.PromptPassword("Keystore password")
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to read password: %w", err)
+			}
+		}
+		return identity.LoadPKCS12File(filePath, password)
+	}
+
+	if strings.HasSuffix(lower, ".pem") || strings.HasSuffix(lower, ".crt") || strings.HasSuffix(lower, ".cer") {
+		keyPath, err := ui.PromptDefault("Private key file", strings.TrimSuffix(filePath, filepath.Ext(filePath))+"-key.pem")
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to read input: %w", err)
+		}
+		keyPath = strings.TrimSpace(keyPath)
+		if keyPath == "" {
+			return nil, nil, fmt.Errorf("private key file is required")
+		}
+		return identity.LoadPEM(keyPath, filePath)
+	}
+
+	return nil, nil, fmt.Errorf("unsupported file type: %s (use .p12, .pfx, .pem, or .crt)", filePath)
 }
 
 // isOffline returns true if running in offline mode.

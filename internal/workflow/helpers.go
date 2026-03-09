@@ -212,6 +212,9 @@ func OutputEventsToStdout(events *nostr.EventSet) {
 	for _, asset := range events.SoftwareAssets {
 		outputEventLine(asset)
 	}
+	if events.IdentityProof != nil {
+		outputEventLine(events.IdentityProof)
+	}
 }
 
 // outputEventLine outputs a single event as JSON on one line to stdout.
