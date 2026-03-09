@@ -655,7 +655,7 @@ func checkAPK(ctx context.Context, opts *cli.Options) error {
 	return nil
 }
 
-// runLinkKey handles the --link-key flag for cryptographic identity proofs (NIP-C1).
+// runLinkKey handles the --link-key flag for linking a signing certificate to a Nostr identity.
 func runLinkKey(ctx context.Context, opts *cli.Options) error {
 	filePath := opts.Identity.LinkKey
 

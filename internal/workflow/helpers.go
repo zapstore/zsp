@@ -118,7 +118,11 @@ func confirmPublish(events *nostr.EventSet, relayURLs []string) (bool, error) {
 
 	ui.PrintSectionHeader("Ready to Publish")
 	fmt.Printf("  App: %s v%s\n", packageID, version)
-	fmt.Printf("  Events: Kind 32267 (App) + Kind 30063 (Release) + Kind 3063 (Asset)\n")
+	if events.AppMetadata != nil {
+		fmt.Printf("  Events: Kind 32267 (App) + Kind 30063 (Release) + Kind 3063 (Asset)\n")
+	} else {
+		fmt.Printf("  Events: Kind 30063 (Release) + Kind 3063 (Asset)\n")
+	}
 	fmt.Printf("  Target: %s\n", strings.Join(relayURLs, ", "))
 	fmt.Println()
 
@@ -150,9 +154,11 @@ func previewEventsJSON(events *nostr.EventSet) {
 	ui.PrintSectionHeader("Signed Events (JSON)")
 	fmt.Println()
 
-	fmt.Printf("  %s\n", ui.Bold("Kind 32267 (Software Application):"))
-	printColorizedJSON(events.AppMetadata)
-	fmt.Println()
+	if events.AppMetadata != nil {
+		fmt.Printf("  %s\n", ui.Bold("Kind 32267 (Software Application):"))
+		printColorizedJSON(events.AppMetadata)
+		fmt.Println()
+	}
 
 	fmt.Printf("  %s\n", ui.Bold("Kind 30063 (Software Release):"))
 	printColorizedJSON(events.Release)
@@ -178,9 +184,12 @@ func previewEventsJSON(events *nostr.EventSet) {
 // OutputEvents prints events as formatted, colorized JSON.
 func OutputEvents(events *nostr.EventSet) {
 	fmt.Println()
-	fmt.Printf("%s\n", ui.Bold("Kind 32267 (Software Application):"))
-	printColorizedJSON(events.AppMetadata)
-	fmt.Println()
+
+	if events.AppMetadata != nil {
+		fmt.Printf("%s\n", ui.Bold("Kind 32267 (Software Application):"))
+		printColorizedJSON(events.AppMetadata)
+		fmt.Println()
+	}
 
 	fmt.Printf("%s\n", ui.Bold("Kind 30063 (Software Release):"))
 	printColorizedJSON(events.Release)

@@ -231,7 +231,7 @@ func parseIdentityFlags(opts *Options, args []string) {
 
 	var relaysFlag stringSliceFlag
 
-	fs.StringVar(&opts.Identity.LinkKey, "link-key", "", "Publish cryptographic identity proof (NIP-C1 kind 30509)")
+	fs.StringVar(&opts.Identity.LinkKey, "link-key", "", "Link signing certificate to your Nostr identity")
 	fs.StringVar(&opts.Identity.LinkKeyExpiry, "link-key-expiry", "1y", "Validity period for identity proof (e.g., 1y, 6mo, 30d)")
 	fs.StringVar(&opts.Identity.Verify, "verify", "", "Verify identity proof against certificate or APK")
 	fs.Var(&relaysFlag, "relays", "Relays for identity proofs (repeatable, overrides defaults)")

@@ -388,15 +388,13 @@ func JKSConversionHelp(jksPath string) string {
 	p12Name := strings.TrimSuffix(strings.TrimSuffix(base, ".jks"), ".keystore") + ".p12"
 	p12Path := filepath.Join(dir, p12Name)
 
-	return fmt.Sprintf(`Error: Java KeyStore (JKS) format detected
-
-JKS files must be converted to PKCS12 format first.
-Run the following command:
+	return fmt.Sprintf(`Java KeyStore (JKS) format is not supported directly.
+Convert to PKCS12 first with keytool:
 
   keytool -importkeystore -srckeystore %s -destkeystore %s -deststoretype PKCS12
 
-Then use the .p12 file:
+Then run:
 
-  zsp --link-identity %s
+  zsp identity --link-key %s
 `, jksPath, p12Path, p12Path)
 }

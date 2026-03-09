@@ -229,7 +229,7 @@ func IdentityHelp() string {
 	var b strings.Builder
 
 	b.WriteString(ui.RenderLogo())
-	b.WriteString(renderBold("zsp identity") + " " + renderWhite("- Manage cryptographic identity proofs (NIP-C1)") + "\n")
+	b.WriteString(renderBold("zsp identity") + " " + renderWhite("- Link your APK signing certificate to your Nostr identity") + "\n")
 
 	b.WriteString(renderBold("WHAT IS THIS?") + "\n")
 	b.WriteString(renderWhite("  Links your Android signing key to your Nostr identity.") + "\n")
@@ -242,8 +242,8 @@ func IdentityHelp() string {
 
 	// Commands
 	b.WriteString(renderBold("COMMANDS") + "\n")
-	writeFlag(&b, "--link-key <file>", "Publish cryptographic identity proof (kind 30509)")
-	b.WriteString("                            " + renderGreyDark("Supported: .p12, .pfx (PKCS12), .pem, .crt (PEM)") + "\n")
+	writeFlag(&b, "--link-key <file>", "Link signing certificate to your Nostr identity")
+	b.WriteString("                            " + renderGreyDark("Supported: .p12, .pfx, .jks, .keystore (Android), .pem, .crt") + "\n")
 	writeFlag(&b, "--verify <file>", "Verify identity proof against certificate or APK")
 	b.WriteString("                            " + renderGreyDark("For APKs, extracts the signing certificate automatically") + "\n")
 	b.WriteString("\n")
@@ -292,6 +292,7 @@ func IdentityHelp() string {
 	// Certificate formats
 	b.WriteString(renderBold("CERTIFICATE FORMATS") + "\n")
 	b.WriteString("  " + renderAccent("PKCS12 (.p12, .pfx)") + "   " + renderWhite("Android keystore format (requires password)") + "\n")
+	b.WriteString("  " + renderAccent("JKS (.jks, .keystore)") + " " + renderWhite("Java KeyStore — will show keytool conversion command") + "\n")
 	b.WriteString("  " + renderAccent("PEM (.pem, .crt)") + "      " + renderWhite("Certificate + separate key file") + "\n\n")
 
 	// Environment variables

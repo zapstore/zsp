@@ -4,9 +4,12 @@ package workflow
 import (
 	"context"
 	"crypto"
+	"crypto/rand"
 	"crypto/x509"
+	"encoding/hex"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -33,17 +36,17 @@ type Publisher struct {
 	signer    nostr.Signer
 
 	// Computed during workflow
-	release                 *source.Release
-	selectedAsset           *source.Asset
-	apkPath                 string
-	apkInfo                 *apk.APKInfo
-	iconURL                 string
-	imageURLs               []string
-	releaseNotes            string
-	preDownloaded           *PreDownloadedImages
-	events                  *nostr.EventSet
-	blossomURL              string
-	browserPort             int
+	release                  *source.Release
+	selectedAsset            *source.Asset
+	apkPath                  string
+	apkInfo                  *apk.APKInfo
+	iconURL                  string
+	imageURLs                []string
+	releaseNotes             string
+	preDownloaded            *PreDownloadedImages
+	events                   *nostr.EventSet
+	blossomURL               string
+	browserPort              int
 	existingReleaseTimestamp time.Time // created_at of existing 30063 on relay (for --overwrite-release)
 }
 
@@ -663,7 +666,7 @@ func (p *Publisher) createSigner(ctx context.Context) error {
 	return nil
 }
 
-// checkAndLinkCertificate checks for a valid NIP-C1 identity proof on the relay.
+// checkAndLinkCertificate checks for a valid identity proof on the relay.
 //
 // Online signers (nsec/bunker/browser): if no valid proof exists, prompts the user
 // for their keystore, generates the proof, signs it, and publishes it inline.
@@ -692,7 +695,7 @@ func (p *Publisher) checkAndLinkCertificate(ctx context.Context) error {
 			proof, parseErr := identity.ParseIdentityProofFromEvent(event)
 			if parseErr == nil && !proof.IsExpired() {
 				if p.opts.Publish.ShouldShowSpinners() {
-					ui.PrintSuccess("Certificate linked ✓")
+					ui.PrintSuccess(fmt.Sprintf("APK signing certificate linked to your Nostr identity ✓ (valid until %s)", proof.ExpiryTime().Format("2 Jan 2006")))
 				}
 				return nil
 			}
@@ -706,26 +709,21 @@ func (p *Publisher) checkAndLinkCertificate(ctx context.Context) error {
 	}
 
 	fmt.Println()
-	ui.PrintSectionHeader("Certificate Linking (NIP-C1)")
-	fmt.Println(ui.Dim("Linking your APK signing certificate to your Nostr identity improves trust."))
+	fmt.Println(ui.Dim("Link your APK signing certificate to your Nostr identity to prove ownership."))
+	fmt.Println(ui.Dim("For more options or to run later: zsp identity --link-key <key>"))
+	fmt.Println(ui.Dim("Press Ctrl+C to skip."))
 	if isNpub {
 		fmt.Println(ui.Dim("The proof event will be included in the output for external signing."))
 	}
 	fmt.Println()
 
-	keystorePath, err := ui.Prompt("Path to your signing keystore (.p12/.pem): ")
-	if err != nil {
-		return fmt.Errorf("keystore prompt failed: %w", err)
-	}
-	keystorePath = strings.TrimSpace(keystorePath)
-
-	privateKey, cert, loadErr := p.loadKeystoreFile(keystorePath)
+	privateKey, cert, loadErr := p.loadFromJKS()
 	if loadErr != nil {
-		if loadErr == identity.ErrJKSFormat {
-			fmt.Println(identity.JKSConversionHelp(keystorePath))
-			return fmt.Errorf("JKS format not supported directly")
-		}
 		return fmt.Errorf("failed to load keystore: %w", loadErr)
+	}
+	if privateKey == nil {
+		// User skipped or keytool unavailable — non-fatal, publish continues.
+		return nil
 	}
 	_ = cert
 
@@ -746,8 +744,7 @@ func (p *Publisher) checkAndLinkCertificate(ctx context.Context) error {
 	}
 
 	// Online: sign and publish immediately.
-	relayHint := p.getRelayHint()
-	if err := nostr.SignEventSet(ctx, p.signer, &nostr.EventSet{IdentityProof: proofEvent}, relayHint); err != nil {
+	if err := p.signer.Sign(ctx, proofEvent); err != nil {
 		return fmt.Errorf("failed to sign identity proof: %w", err)
 	}
 
@@ -768,45 +765,83 @@ func (p *Publisher) checkAndLinkCertificate(ctx context.Context) error {
 	}
 
 	if p.opts.Publish.ShouldShowSpinners() {
-		ui.PrintSuccess("Certificate linked ✓")
+		ui.PrintSuccess("Certificate linked to identity")
 	}
 	return nil
 }
 
-// loadKeystoreFile loads an x509 private key and certificate from a keystore file.
-// Supports .p12/.pfx (PKCS12) and .pem/.crt/.cer (PEM). Returns ErrJKSFormat for .jks.
-func (p *Publisher) loadKeystoreFile(filePath string) (crypto.PrivateKey, *x509.Certificate, error) {
-	lower := strings.ToLower(filePath)
-
-	if strings.HasSuffix(lower, ".jks") || strings.HasSuffix(lower, ".keystore") {
-		return nil, nil, identity.ErrJKSFormat
+// loadFromJKS handles the Android Keystore (.jks / .keystore) path.
+// Detects keytool in PATH; if absent, prints the manual command and returns nil (non-fatal).
+// On success, converts to a short-lived PKCS12 with a random password and loads it.
+func (p *Publisher) loadFromJKS() (crypto.PrivateKey, *x509.Certificate, error) {
+	keytoolPath, err := exec.LookPath("keytool")
+	if err != nil {
+		// keytool not available — print manual command and skip non-fatally.
+		fmt.Println()
+		fmt.Println(ui.Dim("keytool not found in PATH. Convert manually, then run:"))
+		fmt.Println()
+		fmt.Println("  keytool -importkeystore -srckeystore <your.jks> \\")
+		fmt.Println("    -destkeystore <your.p12> -deststoretype PKCS12")
+		fmt.Println()
+		fmt.Println("  zsp identity --link-key <your.p12>")
+		fmt.Println()
+		return nil, nil, nil
 	}
 
-	if strings.HasSuffix(lower, ".p12") || strings.HasSuffix(lower, ".pfx") {
-		password := config.GetKeystorePassword()
-		if password == "" {
-			var err error
-			password, err = ui.PromptPassword("Keystore password")
-			if err != nil {
-				return nil, nil, fmt.Errorf("failed to read password: %w", err)
-			}
-		}
-		return identity.LoadPKCS12File(filePath, password)
+	jksPath, err := ui.Prompt("Path to your keystore (.jks / .keystore): ")
+	if err != nil {
+		return nil, nil, nil // Ctrl+C
 	}
+	jksPath = strings.TrimSpace(jksPath)
 
-	if strings.HasSuffix(lower, ".pem") || strings.HasSuffix(lower, ".crt") || strings.HasSuffix(lower, ".cer") {
-		keyPath, err := ui.PromptDefault("Private key file", strings.TrimSuffix(filePath, filepath.Ext(filePath))+"-key.pem")
+	alias, err := ui.PromptDefault("Key alias (leave blank to use first alias)", "")
+	if err != nil {
+		return nil, nil, nil // Ctrl+C
+	}
+	alias = strings.TrimSpace(alias)
+
+	srcPassword := config.GetKeystorePassword()
+	if srcPassword == "" {
+		srcPassword, err = ui.PromptPassword("Keystore password")
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read input: %w", err)
+			return nil, nil, nil // Ctrl+C — skip non-fatally
 		}
-		keyPath = strings.TrimSpace(keyPath)
-		if keyPath == "" {
-			return nil, nil, fmt.Errorf("private key file is required")
-		}
-		return identity.LoadPEM(keyPath, filePath)
 	}
 
-	return nil, nil, fmt.Errorf("unsupported file type: %s (use .p12, .pfx, .pem, or .crt)", filePath)
+	// Generate a random password for the short-lived temp PKCS12.
+	randBytes := make([]byte, 16)
+	if _, err := rand.Read(randBytes); err != nil {
+		return nil, nil, fmt.Errorf("failed to generate temp password: %w", err)
+	}
+	tempPassword := hex.EncodeToString(randBytes)
+
+	tmpDir, err := os.MkdirTemp("", "zsp-keystore-*")
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	tmpP12 := filepath.Join(tmpDir, "signing.p12")
+
+	args := []string{
+		"-importkeystore",
+		"-srckeystore", jksPath,
+		"-destkeystore", tmpP12,
+		"-deststoretype", "PKCS12",
+		"-srcstorepass", srcPassword,
+		"-deststorepass", tempPassword,
+		"-noprompt",
+	}
+	if alias != "" {
+		args = append(args, "-srcalias", alias, "-destalias", alias)
+	}
+
+	cmd := exec.Command(keytoolPath, args...)
+	if out, runErr := cmd.CombinedOutput(); runErr != nil {
+		return nil, nil, fmt.Errorf("keytool conversion failed: %w\n%s", runErr, strings.TrimSpace(string(out)))
+	}
+
+	return identity.LoadPKCS12File(tmpP12, tempPassword)
 }
 
 // isOffline returns true if running in offline mode.
@@ -869,10 +904,10 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 			RelayHint:           relayHint,
 			PreDownloaded:       p.preDownloaded,
 			Variant:             p.matchVariant(),
-		Commit:              p.opts.Publish.Commit,
-		Channel:             p.opts.Publish.Channel,
-		Opts:                p.opts,
-		AppCreatedAtRelease: p.opts.Publish.AppCreatedAtRelease,
+			Commit:              p.opts.Publish.Commit,
+			Channel:             p.opts.Publish.Channel,
+			Opts:                p.opts,
+			AppCreatedAtRelease: p.opts.Publish.AppCreatedAtRelease,
 			MinReleaseTimestamp: p.existingReleaseTimestamp,
 		})
 		return err
