@@ -328,8 +328,8 @@ func UtilsHelp() string {
 	b.WriteString(renderBold("OPERATIONS") + "\n")
 	writeFlag(&b, "extract-apk <file.apk>", "Extract APK metadata as JSON (stdout)")
 	b.WriteString("                            " + renderGreyDark("Also extracts the app icon to <name>_icon.png") + "\n")
-	writeFlag(&b, "check-releases <config>", "Check for new upstream release without publishing")
-	b.WriteString("                            " + renderGreyDark("Outputs: NEW <version> or UP_TO_DATE") + "\n")
+	writeFlag(&b, "check-releases <repo-url|config>", "Check for new upstream release without publishing")
+	b.WriteString("                                    " + renderGreyDark("Outputs: NEW <version> or UP_TO_DATE") + "\n")
 	b.WriteString("\n")
 
 	b.WriteString(renderBold("EXAMPLES") + "\n\n")
@@ -337,11 +337,14 @@ func UtilsHelp() string {
 	b.WriteString(renderGreyDark("  # Extract metadata from an APK") + "\n")
 	b.WriteString("  " + renderAccent("zsp utils extract-apk myapp.apk") + "\n\n")
 
-	b.WriteString(renderGreyDark("  # Check if a new release is available (no download, no publish)") + "\n")
+	b.WriteString(renderGreyDark("  # Check if a new release is available") + "\n")
+	b.WriteString("  " + renderAccent("zsp utils check-releases https://github.com/owner/repo") + "\n\n")
+
+	b.WriteString(renderGreyDark("  # Or use a config file") + "\n")
 	b.WriteString("  " + renderAccent("zsp utils check-releases zapstore.yaml") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Use in scripts to detect new versions") + "\n")
-	b.WriteString("  " + renderAccent("result=$(zsp utils check-releases app.yaml)") + "\n")
+	b.WriteString("  " + renderAccent("result=$(zsp utils check-releases https://github.com/owner/repo)") + "\n")
 	b.WriteString("  " + renderAccent("if [[ $result == NEW* ]]; then version=${result#NEW }; fi") + "\n\n")
 
 	b.WriteString(renderBold("EXIT CODES") + "\n")

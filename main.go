@@ -229,8 +229,8 @@ func runUtilsCommand(ctx context.Context, opts *cli.Options) int {
 
 	case "check-releases":
 		if len(opts.Args) == 0 {
-			fmt.Fprintln(os.Stderr, "Error: check-releases requires a config file as argument")
-			fmt.Fprintln(os.Stderr, "Usage: zsp utils check-releases <config.yaml>")
+			fmt.Fprintln(os.Stderr, "Error: check-releases requires a repository URL as argument")
+			fmt.Fprintln(os.Stderr, "Usage: zsp utils check-releases <repo-url>")
 			return 1
 		}
 		if err := checkReleases(ctx, opts.Args[0], opts); err != nil {
@@ -245,16 +245,15 @@ func runUtilsCommand(ctx context.Context, opts *cli.Options) int {
 	}
 }
 
-// checkReleases checks for a new upstream release without downloading or publishing.
+// checkReleases checks for a new upstream release by downloading and parsing the APK.
+// Accepts a repository URL (e.g. https://github.com/owner/repo).
 // Outputs "NEW <version>" or "UP_TO_DATE" to stdout; exits 1 on source errors.
-func checkReleases(ctx context.Context, configPath string, opts *cli.Options) error {
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+func checkReleases(ctx context.Context, repoURL string, opts *cli.Options) error {
+	repoURL = normalizeRepoURL(repoURL)
+	if err := config.ValidateURL(repoURL); err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
 	}
-	if err := cfg.Validate(); err != nil {
-		return fmt.Errorf("invalid configuration: %w", err)
-	}
+	cfg := &config.Config{Repository: repoURL}
 
 	src, err := source.NewWithOptions(cfg, source.Options{
 		BaseDir:            cfg.BaseDir,
@@ -284,58 +283,55 @@ func checkReleases(ctx context.Context, configPath string, opts *cli.Options) er
 		}
 	}()
 
-	// Select best APK (metadata only — no download)
-	apkAssets := picker.FilterAPKs(release.Assets)
-	if len(apkAssets) == 0 {
-		return fmt.Errorf("no APK files found in release")
-	}
-	if cfg.Match != "" {
-		apkAssets, err = picker.FilterByMatch(apkAssets, cfg.Match)
-		if err != nil {
-			return err
-		}
-		if len(apkAssets) == 0 {
-			return fmt.Errorf("no APK files match pattern: %s", cfg.Match)
-		}
-	}
-
 	version := release.Version
 	if version == "" {
 		return fmt.Errorf("could not determine version from release (no version tag)")
 	}
 
-	// Attempt relay check if we can derive a package ID from the config.
-	// The package ID (Android package name) is only definitively known after APK parsing,
-	// but we can try to extract it from the F-Droid release source URL.
-	// If the relay check is impossible, we conservatively report NEW.
-	packageID := extractPackageIDFromConfig(cfg)
-	if packageID != "" {
-		relaysEnv := config.GetEnv("RELAY_URLS")
-		publisher := nostrpkg.NewPublisherFromEnv(relaysEnv)
-		existingAsset, relayErr := publisher.CheckExistingAsset(ctx, packageID, version)
-		if relayErr == nil && existingAsset != nil {
-			fmt.Println("UP_TO_DATE")
-			return nil
-		}
-		// On relay error or no existing asset: fall through to report NEW
+	// Select best APK asset
+	apkAssets := picker.FilterAPKs(release.Assets)
+	if len(apkAssets) == 0 {
+		return fmt.Errorf("no APK files found in release")
 	}
+
+	var selectedAsset *source.Asset
+	if len(apkAssets) == 1 {
+		selectedAsset = apkAssets[0]
+	} else {
+		ranked := picker.DefaultModel.RankAssets(apkAssets)
+		selectedAsset = ranked[0].Asset
+	}
+
+	// Download the APK (uses the shared download cache) and parse it for the real package ID.
+	apkPath, err := src.Download(ctx, selectedAsset, "", nil)
+	if err != nil {
+		return fmt.Errorf("failed to download APK: %w", err)
+	}
+
+	apkInfo, err := apk.Parse(apkPath)
+	if err != nil {
+		return fmt.Errorf("failed to parse APK: %w", err)
+	}
+
+	// Use the version from the APK if the release didn't carry one.
+	if version == "" {
+		version = apkInfo.VersionName
+	}
+
+	// Check relay for an existing asset with this package ID + version.
+	relaysEnv := config.GetEnv("RELAY_URLS")
+	publisher := nostrpkg.NewPublisherFromEnv(relaysEnv)
+	existingAsset, relayErr := publisher.CheckExistingAsset(ctx, apkInfo.PackageID, version)
+	if relayErr == nil && existingAsset != nil {
+		fmt.Println("UP_TO_DATE")
+		return nil
+	}
+	// On relay error or no existing asset: report NEW.
 
 	fmt.Printf("NEW %s\n", version)
 	return nil
 }
 
-// extractPackageIDFromConfig attempts to derive the Android package ID from config.
-// Returns empty string if it cannot be determined without downloading the APK.
-func extractPackageIDFromConfig(cfg *config.Config) string {
-	// Try F-Droid release source URL (contains package ID)
-	if cfg.ReleaseSource != nil && cfg.ReleaseSource.URL != "" {
-		if id := config.GetFDroidPackageID(cfg.ReleaseSource.URL); id != "" {
-			return id
-		}
-	}
-	// Cannot determine package ID without APK parsing — relay check will be skipped
-	return ""
-}
 
 // runPublish executes the publish workflow.
 func runPublish(ctx context.Context, opts *cli.Options, cfg *config.Config) error {
