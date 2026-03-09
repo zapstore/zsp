@@ -778,7 +778,7 @@ func (p *Publisher) loadFromJKS() (crypto.PrivateKey, *x509.Certificate, error) 
 	if err != nil {
 		// keytool not available — print manual command and skip non-fatally.
 		fmt.Println()
-		fmt.Println(ui.Dim("keytool not found in PATH. Convert manually, then run:"))
+		fmt.Println(ui.Dim("keytool not found in PATH. Install it, then link manually:"))
 		fmt.Println()
 		fmt.Println("  keytool -importkeystore -srckeystore <your.jks> \\")
 		fmt.Println("    -destkeystore <your.p12> -deststoretype PKCS12")
