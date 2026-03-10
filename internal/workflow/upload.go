@@ -495,6 +495,11 @@ func uploadLocalIcon(ctx context.Context, client *blossom.Client, signer nostr.S
 		return "", fmt.Errorf("failed to read icon file %s: %w", fullPath, err)
 	}
 
+	if len(iconData) == 0 {
+		ui.PrintWarning(fmt.Sprintf("Icon file %s is empty (0 bytes), skipping upload", fullPath))
+		return "", nil
+	}
+
 	hash := sha256.Sum256(iconData)
 	hashStr := hex.EncodeToString(hash[:])
 	mimeType := detectImageMimeType(fullPath)
@@ -526,6 +531,11 @@ func uploadLocalIcon(ctx context.Context, client *blossom.Client, signer nostr.S
 
 // uploadAPKIcon uploads the icon extracted from the APK.
 func uploadAPKIcon(ctx context.Context, client *blossom.Client, signer nostr.Signer, iconData []byte, opts *cli.Options) (string, error) {
+	if len(iconData) == 0 {
+		ui.PrintWarning("APK icon is empty (0 bytes), skipping upload")
+		return "", nil
+	}
+
 	hash := sha256.Sum256(iconData)
 	hashStr := hex.EncodeToString(hash[:])
 
@@ -671,6 +681,11 @@ func uploadLocalImage(ctx context.Context, client *blossom.Client, signer nostr.
 	imgData, err := os.ReadFile(fullPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read image file %s: %w", fullPath, err)
+	}
+
+	if len(imgData) == 0 {
+		ui.PrintWarning(fmt.Sprintf("Image file %s is empty (0 bytes), skipping upload", fullPath))
+		return "", nil
 	}
 
 	hash := sha256.Sum256(imgData)
@@ -1064,6 +1079,10 @@ func downloadRemoteImage(ctx context.Context, url string) (data []byte, hashStr 
 	// Check if we hit the limit (read more than allowed)
 	if len(data) > maxImageDownloadSize {
 		return nil, "", "", fmt.Errorf("image too large: exceeds %d bytes", maxImageDownloadSize)
+	}
+
+	if len(data) == 0 {
+		return nil, "", "", fmt.Errorf("downloaded image is empty (0 bytes): %s", url)
 	}
 
 	hash := sha256.Sum256(data)
