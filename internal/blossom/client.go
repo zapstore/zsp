@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -142,7 +143,9 @@ func (c *Client) ExistsBatch(ctx context.Context, hashes []string, maxConcurrent
 func (c *Client) Upload(ctx context.Context, filePath string, sha256 string, signer nostrpkg.Signer, onProgress ProgressFunc) (*UploadResult, error) {
 	// Create and sign auth event
 	authEvent := nostrpkg.BuildBlossomAuthEvent(sha256, signer.PublicKey(), time.Now().Add(AuthExpiration))
-	if err := signer.Sign(ctx, authEvent); err != nil {
+	signCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if err := signer.Sign(signCtx, authEvent); err != nil {
 		return nil, fmt.Errorf("failed to sign auth event: %w", err)
 	}
 	return c.UploadWithAuth(ctx, filePath, sha256, authEvent, onProgress)
@@ -212,8 +215,7 @@ func (c *Client) UploadWithAuth(ctx context.Context, filePath string, sha256 str
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		reason := resp.Header.Get("X-Reason")
-		return nil, fmt.Errorf("upload failed with status %d: %s", resp.StatusCode, reason)
+		return nil, uploadError(resp)
 	}
 
 	// Parse response
@@ -234,7 +236,9 @@ func (c *Client) UploadWithAuth(ctx context.Context, filePath string, sha256 str
 func (c *Client) UploadBytes(ctx context.Context, data []byte, sha256 string, contentType string, signer nostrpkg.Signer) (*UploadResult, error) {
 	// Create and sign auth event
 	authEvent := nostrpkg.BuildBlossomAuthEvent(sha256, signer.PublicKey(), time.Now().Add(AuthExpiration))
-	if err := signer.Sign(ctx, authEvent); err != nil {
+	signCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if err := signer.Sign(signCtx, authEvent); err != nil {
 		return nil, fmt.Errorf("failed to sign auth event: %w", err)
 	}
 	return c.UploadBytesWithAuth(ctx, data, sha256, contentType, authEvent)
@@ -307,8 +311,7 @@ func (c *Client) uploadBytesWithAuth(ctx context.Context, data []byte, sha256 st
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		reason := resp.Header.Get("X-Reason")
-		return nil, fmt.Errorf("upload failed with status %d: %s", resp.StatusCode, reason)
+		return nil, uploadError(resp)
 	}
 
 	return &UploadResult{
@@ -322,6 +325,21 @@ func (c *Client) uploadBytesWithAuth(ctx context.Context, data []byte, sha256 st
 // ServerURL returns the configured server URL.
 func (c *Client) ServerURL() string {
 	return c.serverURL
+}
+
+// uploadError builds an error from a non-2xx upload response, preferring the
+// X-Reason header and falling back to the response body.
+func uploadError(resp *http.Response) error {
+	reason := strings.TrimSpace(resp.Header.Get("X-Reason"))
+	if reason == "" {
+		if body, err := io.ReadAll(io.LimitReader(resp.Body, 512)); err == nil {
+			reason = strings.TrimSpace(string(body))
+		}
+	}
+	if reason == "" {
+		return fmt.Errorf("upload failed with status %d", resp.StatusCode)
+	}
+	return fmt.Errorf("upload failed with status %d: %s", resp.StatusCode, reason)
 }
 
 // progressReader wraps a reader to track progress.

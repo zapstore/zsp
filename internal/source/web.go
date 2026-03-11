@@ -149,6 +149,22 @@ func (w *Web) saveCache(cache *webCache) error {
 	return os.WriteFile(w.cacheFilePath(), data, 0644)
 }
 
+// GetCachedRelease returns the cached release if available.
+func (w *Web) GetCachedRelease() *Release {
+	cache := w.loadCache()
+	if cache == nil || cache.AssetURL == "" {
+		return nil
+	}
+	assetName := filepath.Base(cache.AssetURL)
+	return &Release{
+		Version: cache.Version,
+		Assets: []*Asset{{
+			Name: assetName,
+			URL:  cache.AssetURL,
+		}},
+	}
+}
+
 // ClearCache removes the cached data.
 func (w *Web) ClearCache() error {
 	w.pendingCache = nil // Clear pending cache

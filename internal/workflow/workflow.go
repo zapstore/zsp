@@ -189,11 +189,15 @@ func (p *Publisher) fetchRelease(ctx context.Context) (*source.Release, error) {
 	})
 
 	if err == source.ErrNotModified {
-		if p.opts.Publish.ShouldShowSpinners() {
-			ui.PrintSuccess("Release unchanged, nothing to do")
-			fmt.Println("  Release has not changed since last publish. Use --overwrite-release to publish anyway.")
+		if provider, ok := p.src.(source.CachedReleaseProvider); ok {
+			if cached := provider.GetCachedRelease(); cached != nil {
+				if p.opts.Publish.ShouldShowSpinners() {
+					ui.PrintSuccess("Release unchanged, using cached data")
+				}
+				return cached, nil
+			}
 		}
-		return nil, ErrNothingToDo
+		return nil, fmt.Errorf("release not modified but no cached release available; try --overwrite-release")
 	}
 
 	if err != nil {
@@ -594,8 +598,8 @@ func (p *Publisher) signAndUpload(ctx context.Context) error {
 		return err
 	}
 
-	// C1 certificate linking check (skip in offline mode only)
-	if !p.isOffline() {
+	// C1 certificate linking check (skip in offline mode or when --skip-linking is set)
+	if !p.isOffline() && !p.opts.Publish.SkipCertificateLinking {
 		if err := p.checkAndLinkCertificate(ctx); err != nil {
 			return err
 		}
@@ -710,8 +714,7 @@ func (p *Publisher) checkAndLinkCertificate(ctx context.Context) error {
 
 	fmt.Println()
 	fmt.Println(ui.Dim("Link your APK signing certificate to your Nostr identity to prove ownership."))
-	fmt.Println(ui.Dim("For more options or to run later: zsp identity --link-key <key>"))
-	fmt.Println(ui.Dim("Press Ctrl+C to skip."))
+	fmt.Println(ui.Dim("To skip: use --skip-certificate-linking or run later with: zsp identity --link-key <key>"))
 	if isNpub {
 		fmt.Println(ui.Dim("The proof event will be included in the output for external signing."))
 	}
@@ -722,7 +725,7 @@ func (p *Publisher) checkAndLinkCertificate(ctx context.Context) error {
 		return fmt.Errorf("failed to load keystore: %w", loadErr)
 	}
 	if privateKey == nil {
-		// User skipped or keytool unavailable — non-fatal, publish continues.
+		// keytool unavailable — non-fatal, publish continues.
 		return nil
 	}
 	_ = cert
@@ -790,13 +793,13 @@ func (p *Publisher) loadFromJKS() (crypto.PrivateKey, *x509.Certificate, error) 
 
 	jksPath, err := ui.Prompt("Path to your keystore (.jks / .keystore): ")
 	if err != nil {
-		return nil, nil, nil // Ctrl+C
+		return nil, nil, err
 	}
 	jksPath = strings.TrimSpace(jksPath)
 
 	alias, err := ui.PromptDefault("Key alias (leave blank to use first alias)", "")
 	if err != nil {
-		return nil, nil, nil // Ctrl+C
+		return nil, nil, err
 	}
 	alias = strings.TrimSpace(alias)
 
@@ -804,7 +807,7 @@ func (p *Publisher) loadFromJKS() (crypto.PrivateKey, *x509.Certificate, error) 
 	if srcPassword == "" {
 		srcPassword, err = ui.PromptPassword("Keystore password")
 		if err != nil {
-			return nil, nil, nil // Ctrl+C — skip non-fatally
+			return nil, nil, err
 		}
 	}
 

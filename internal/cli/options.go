@@ -50,6 +50,7 @@ type PublishOptions struct {
 	SkipMetadata        bool
 	AppCreatedAtRelease bool // Use release timestamp for kind 32267 created_at
 	SkipAppEvent        bool // Publish only release events (kind 30063/3063), skip kind 32267
+	SkipCertificateLinking bool // Skip certificate-to-identity linking check
 	Wizard              bool
 	Check               bool // Verify config fetches arm64-v8a APK (exit 0=success)
 
@@ -193,6 +194,7 @@ func parsePublishFlags(opts *Options, args []string) {
 	fs.BoolVar(&opts.Publish.Wizard, "wizard", false, "Run interactive wizard (uses existing config as defaults)")
 	fs.BoolVar(&opts.Publish.AppCreatedAtRelease, "app-created-at-release", false, "Use release date for kind 32267 created_at (indexer compatibility)")
 	fs.BoolVar(&opts.Publish.SkipAppEvent, "skip-app-event", false, "Publish only release events, skip app metadata (kind 32267)")
+	fs.BoolVar(&opts.Publish.SkipCertificateLinking, "skip-certificate-linking", false, "Skip certificate-to-identity linking check")
 	fs.BoolVar(&opts.Publish.Check, "check", false, "Verify config fetches arm64-v8a APK (exit 0=success)")
 
 	// Help flag

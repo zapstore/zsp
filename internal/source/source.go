@@ -226,6 +226,13 @@ type CacheClearer interface {
 	ClearCache() error
 }
 
+// CachedReleaseProvider is an optional interface for sources that can return a
+// previously cached release. Used when FetchLatestRelease returns ErrNotModified
+// so the workflow can proceed with the cached data instead of aborting.
+type CachedReleaseProvider interface {
+	GetCachedRelease() *Release
+}
+
 // CacheCommitter is an optional interface for sources that support deferred cache commits.
 // Sources like GitHub store cache data in memory during fetch, then commit to disk
 // only after successful publishing via CommitCache().
