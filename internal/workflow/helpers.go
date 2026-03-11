@@ -78,30 +78,8 @@ func selectAPKInteractive(ranked []picker.ScoredAsset) (*source.Asset, error) {
 	return ranked[idx].Asset, nil
 }
 
-// confirmHash asks the user to confirm the file hash they just signed.
-func confirmHash(sha256Hash string, isClosedSource bool) (bool, error) {
-	fmt.Println()
-	ui.PrintWarning("You just signed an event attesting to this file hash (kind 3063):")
-	fmt.Println()
-	fmt.Printf("  %s\n", ui.Bold(sha256Hash))
-	fmt.Println()
-	fmt.Printf("  %s\n", ui.Bold("Make sure it matches the APK you intend to distribute."))
-	fmt.Println()
-	fmt.Println("  To verify, run:")
-	fmt.Printf("    %s\n", ui.Dim("shasum -a 256 <path-to-apk>   # macOS"))
-	fmt.Printf("    %s\n", ui.Dim("sha256sum <path-to-apk>       # Linux"))
-	fmt.Println()
-
-	if isClosedSource {
-		ui.PrintWarning("This application has no repository (closed source).")
-		fmt.Println()
-	}
-
-	return ui.Confirm("Confirm hash is correct?", false)
-}
-
 // confirmPublish shows a pre-publish summary and asks for confirmation.
-func confirmPublish(events *nostr.EventSet, relayURLs []string) (bool, error) {
+func confirmPublish(events *nostr.EventSet, relayURLs []string, apkSHA256 string, isClosedSource bool) (bool, error) {
 	packageID := ""
 	version := ""
 
@@ -124,6 +102,13 @@ func confirmPublish(events *nostr.EventSet, relayURLs []string) (bool, error) {
 		fmt.Printf("  Events: Kind 30063 (Release) + Kind 3063 (Asset)\n")
 	}
 	fmt.Printf("  Target: %s\n", strings.Join(relayURLs, ", "))
+	fmt.Printf("  APK SHA-256: %s\n", ui.Bold(apkSHA256))
+	if isClosedSource {
+		fmt.Printf("  %s\n", ui.Dim("Note: no repository URL (closed source)"))
+	}
+	fmt.Println()
+	fmt.Printf("  %s\n", ui.Dim("By publishing you confirm the above hash matches the APK you intend to distribute."))
+	fmt.Printf("  %s\n", ui.Dim("To verify: shasum -a 256 <apk>  (macOS)  /  sha256sum <apk>  (Linux)"))
 	fmt.Println()
 
 	for {

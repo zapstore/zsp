@@ -133,20 +133,6 @@ func (p *Publisher) Execute(ctx context.Context) error {
 		return p.outputNpubEvents()
 	}
 
-	// Hash confirmation
-	if !p.opts.Publish.Yes {
-		isClosedSource := p.cfg.Repository == ""
-		confirmed, err := confirmHash(p.apkInfo.SHA256, isClosedSource)
-		if err != nil {
-			return fmt.Errorf("hash confirmation failed: %w", err)
-		}
-		if !confirmed {
-			fmt.Println("  Aborted. No events were published.")
-			p.clearCache()
-			return nil
-		}
-	}
-
 	// Step 4: Publish to relays
 	if steps != nil {
 		steps.StartStep("Publish")
@@ -708,7 +694,6 @@ func (p *Publisher) checkAndLinkCertificate(ctx context.Context) error {
 
 	// No valid proof found (or npub signer).
 	if p.opts.Publish.Quiet {
-		fmt.Fprintf(os.Stderr, "WARNING: Certificate not linked. Run: zsp identity --link-key <keystore>\n")
 		return nil
 	}
 
@@ -1145,7 +1130,8 @@ func (p *Publisher) outputNpubEvents() error {
 func (p *Publisher) publishToRelays(ctx context.Context) error {
 	// Confirm before publishing
 	if !p.opts.Publish.Yes {
-		confirmed, err := confirmPublish(p.events, p.publisher.RelayURLs())
+		isClosedSource := p.cfg.Repository == ""
+		confirmed, err := confirmPublish(p.events, p.publisher.RelayURLs(), p.apkInfo.SHA256, isClosedSource)
 		if err != nil {
 			return fmt.Errorf("confirmation failed: %w", err)
 		}
@@ -1229,7 +1215,7 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 	}
 
 	// Show zapstore.dev URL if the app was successfully published to relay.zapstore.dev
-	if allSuccess {
+	if allSuccess && !p.opts.Publish.Quiet {
 		p.showZapstoreURL(results)
 	}
 
