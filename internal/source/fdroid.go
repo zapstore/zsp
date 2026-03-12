@@ -2,7 +2,10 @@ package source
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,12 +18,24 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// fdroidIndexCache stores the ETag and parsed package versions for a repo index.
+// Keyed on the index URL so all packages from the same repo share one cached file.
+type fdroidIndexCache struct {
+	ETag     string                          `json:"etag"`
+	Packages map[string][]fdroidPackageVersion `json:"packages"`
+}
+
 // FDroid implements Source for F-Droid compatible repositories.
 // Supports: f-droid.org, IzzyOnDroid (apt.izzysoft.de), and other F-Droid repos.
 type FDroid struct {
 	cfg      *config.Config
 	repoInfo *config.FDroidRepoInfo
 	client   *http.Client
+	cacheDir string
+	SkipCache bool
+
+	// pending holds cache data from the last fetch, not yet committed to disk.
+	pending *fdroidIndexCache
 }
 
 // NewFDroid creates a new F-Droid source.
@@ -31,11 +46,74 @@ func NewFDroid(cfg *config.Config) (*FDroid, error) {
 		return nil, fmt.Errorf("invalid F-Droid URL: %s", url)
 	}
 
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		cacheDir = os.TempDir()
+	}
+	cacheDir = filepath.Join(cacheDir, "zsp", "fdroid")
+
 	return &FDroid{
 		cfg:      cfg,
 		repoInfo: repoInfo,
-		client:   &http.Client{Timeout: 60 * time.Second},
+		client:   &http.Client{Timeout: 120 * time.Second},
+		cacheDir: cacheDir,
 	}, nil
+}
+
+// cacheFilePath returns the path for the cached index file, keyed on the index URL.
+func (f *FDroid) cacheFilePath() string {
+	h := sha256.Sum256([]byte(f.repoInfo.IndexURL))
+	return filepath.Join(f.cacheDir, hex.EncodeToString(h[:8])+".json")
+}
+
+// loadCache reads the cached index from disk.
+func (f *FDroid) loadCache() *fdroidIndexCache {
+	data, err := os.ReadFile(f.cacheFilePath())
+	if err != nil {
+		return nil
+	}
+	var cache fdroidIndexCache
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return nil
+	}
+	return &cache
+}
+
+// saveCache writes the index cache to disk.
+func (f *FDroid) saveCache(cache *fdroidIndexCache) error {
+	if err := os.MkdirAll(f.cacheDir, 0755); err != nil {
+		return err
+	}
+	data, err := json.Marshal(cache)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(f.cacheFilePath(), data, 0644)
+}
+
+// CommitCache persists the pending cache to disk after successful publishing.
+func (f *FDroid) CommitCache() error {
+	if f.pending == nil {
+		return nil
+	}
+	err := f.saveCache(f.pending)
+	if err == nil {
+		f.pending = nil
+	}
+	return err
+}
+
+// GetCachedRelease returns the cached release for this package if available.
+func (f *FDroid) GetCachedRelease() *Release {
+	cache := f.loadCache()
+	if cache == nil {
+		return nil
+	}
+	version, err := f.selectVersion(cache.Packages)
+	if err != nil {
+		return nil
+	}
+	return f.buildRelease(version)
 }
 
 // Type returns the source type.
@@ -79,44 +157,124 @@ type fdroidMetadata struct {
 }
 
 // FetchLatestRelease fetches the latest release from an F-Droid compatible repository.
+// For repos with a per-package API (f-droid.org), uses a lightweight API call.
+// For others (IzzyOnDroid), fetches the shared index with ETag caching to avoid
+// re-downloading the full 14–50 MB file when unchanged.
 func (f *FDroid) FetchLatestRelease(ctx context.Context) (*Release, error) {
-	// Try to get version info from the repo index
 	version, err := f.fetchLatestVersion(ctx)
 	if err != nil {
 		return nil, err
 	}
+	return f.buildRelease(version), nil
+}
 
-	// Build APK download URL
-	// Format: {repoURL}/{packageId}_{versionCode}.apk
+// buildRelease constructs a Release from a parsed package version entry.
+func (f *FDroid) buildRelease(version *fdroidPackageVersion) *Release {
 	apkURL := fmt.Sprintf("%s/%s_%d.apk", f.repoInfo.RepoURL, f.repoInfo.PackageID, version.VersionCode)
 	apkName := fmt.Sprintf("%s_%d.apk", f.repoInfo.PackageID, version.VersionCode)
 
-	assets := []*Asset{
-		{
-			Name: apkName,
-			URL:  apkURL,
-			Size: version.Size,
-		},
-	}
-
-	// Convert added timestamp (milliseconds) to time.Time
 	var createdAt time.Time
 	if version.Added > 0 {
 		createdAt = time.UnixMilli(version.Added)
 	}
 
 	return &Release{
-		Version:   version.VersionName,
-		Assets:    assets,
+		Version: version.VersionName,
+		Assets: []*Asset{
+			{
+				Name: apkName,
+				URL:  apkURL,
+				Size: version.Size,
+			},
+		},
 		CreatedAt: createdAt,
+	}
+}
+
+// fetchLatestVersion fetches the latest version for this package.
+// Uses the per-package API when available (f-droid.org), otherwise falls back
+// to the ETag-cached shared index (IzzyOnDroid and other F-Droid repos).
+func (f *FDroid) fetchLatestVersion(ctx context.Context) (*fdroidPackageVersion, error) {
+	if f.repoInfo.APIURL != "" {
+		return f.fetchLatestVersionFromAPI(ctx)
+	}
+	return f.fetchLatestVersionFromIndex(ctx)
+}
+
+// fdroidAPIResponse is the response from the F-Droid per-package API.
+type fdroidAPIResponse struct {
+	PackageName          string `json:"packageName"`
+	SuggestedVersionCode int64  `json:"suggestedVersionCode"`
+	Packages             []struct {
+		VersionName string `json:"versionName"`
+		VersionCode int64  `json:"versionCode"`
+	} `json:"packages"`
+}
+
+// fetchLatestVersionFromAPI uses the lightweight per-package API (f-droid.org only).
+// Returns a synthetic fdroidPackageVersion — size and nativecode are unavailable
+// from the API, but suggestedVersionCode already picks the right architecture variant.
+func (f *FDroid) fetchLatestVersionFromAPI(ctx context.Context) (*fdroidPackageVersion, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", f.repoInfo.APIURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch package info: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("package %s not found in repository", f.repoInfo.PackageID)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("package API returned status %d", resp.StatusCode)
+	}
+
+	var apiResp fdroidAPIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse package info: %w", err)
+	}
+
+	if apiResp.SuggestedVersionCode == 0 || len(apiResp.Packages) == 0 {
+		return nil, fmt.Errorf("package %s has no releases", f.repoInfo.PackageID)
+	}
+
+	// Find the version entry matching suggestedVersionCode.
+	for _, p := range apiResp.Packages {
+		if p.VersionCode == apiResp.SuggestedVersionCode {
+			return &fdroidPackageVersion{
+				VersionCode: p.VersionCode,
+				VersionName: p.VersionName,
+			}, nil
+		}
+	}
+
+	// Fallback: use the first entry (highest versionCode, as F-Droid returns them sorted).
+	p := apiResp.Packages[0]
+	return &fdroidPackageVersion{
+		VersionCode: p.VersionCode,
+		VersionName: p.VersionName,
 	}, nil
 }
 
-// fetchLatestVersion fetches the latest version info from the repo index.
-func (f *FDroid) fetchLatestVersion(ctx context.Context) (*fdroidPackageVersion, error) {
+// fetchLatestVersionFromIndex fetches the latest version from the shared repo index,
+// using a disk-cached ETag to avoid re-downloading the full 14–50 MB file when unchanged.
+func (f *FDroid) fetchLatestVersionFromIndex(ctx context.Context) (*fdroidPackageVersion, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", f.repoInfo.IndexURL, nil)
 	if err != nil {
 		return nil, err
+	}
+
+	// Send If-None-Match if we have a cached ETag (unless skipping cache).
+	var cached *fdroidIndexCache
+	if !f.SkipCache {
+		cached = f.loadCache()
+		if cached != nil && cached.ETag != "" {
+			req.Header.Set("If-None-Match", cached.ETag)
+		}
 	}
 
 	resp, err := f.client.Do(req)
@@ -125,16 +283,42 @@ func (f *FDroid) fetchLatestVersion(ctx context.Context) (*fdroidPackageVersion,
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotModified && cached != nil {
+		return f.selectVersion(cached.Packages)
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("repo index fetch failed with status %d", resp.StatusCode)
 	}
 
+	// Read the full body before decoding so a mid-stream timeout surfaces as a
+	// clear network error rather than a misleading "failed to parse" message.
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return nil, fmt.Errorf("timed out reading repo index (index may be too large or server too slow): %w", err)
+		}
+		return nil, fmt.Errorf("failed to read repo index: %w", err)
+	}
+
 	var index fdroidIndex
-	if err := json.NewDecoder(resp.Body).Decode(&index); err != nil {
+	if err := json.Unmarshal(body, &index); err != nil {
 		return nil, fmt.Errorf("failed to parse repo index: %w", err)
 	}
 
-	versions, ok := index.Packages[f.repoInfo.PackageID]
+	// Stage cache for commit after successful publish.
+	etag := resp.Header.Get("ETag")
+	if etag != "" {
+		f.pending = &fdroidIndexCache{ETag: etag, Packages: index.Packages}
+	}
+
+	return f.selectVersion(index.Packages)
+}
+
+// selectVersion picks the best available version for this package from a packages map.
+// Prefers arm64-v8a builds; falls back to architecture-independent builds.
+func (f *FDroid) selectVersion(packages map[string][]fdroidPackageVersion) (*fdroidPackageVersion, error) {
+	versions, ok := packages[f.repoInfo.PackageID]
 	if !ok || len(versions) == 0 {
 		return nil, fmt.Errorf("package %s not found in repository", f.repoInfo.PackageID)
 	}
@@ -152,7 +336,7 @@ func (f *FDroid) fetchLatestVersion(ctx context.Context) (*fdroidPackageVersion,
 	}
 
 	// Fallback: if no arm64-v8a builds, look for architecture-independent builds
-	// (pure Java/Kotlin apps with no native code)
+	// (pure Java/Kotlin apps with no native code).
 	if latest == nil {
 		for i := range versions {
 			if len(versions[i].NativeCodes) == 0 {

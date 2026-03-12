@@ -28,6 +28,15 @@ type APKBasicInfo struct {
 // It receives the config with repo/release source info and returns APK info.
 type APKInfoFetcher func(cfg *Config, matchPattern string) *APKBasicInfo
 
+// PubkeyResolver resolves the npub from a SIGN_WITH value.
+// It may make network calls (e.g., connecting to a bunker) and can return an error.
+// Returns the npub (bech32) on success, or an error if resolution fails.
+type PubkeyResolver func(ctx context.Context, signWith string) (npub string, err error)
+
+// AppExistsChecker checks whether an app with the given package ID already exists on relays.
+// Returns true if the app is found, false otherwise.
+type AppExistsChecker func(ctx context.Context, packageID string) bool
+
 // WizardOptions configures the wizard behavior.
 type WizardOptions struct {
 	// PackageID is the app's package ID (e.g., "com.example.app").
@@ -42,6 +51,14 @@ type WizardOptions struct {
 	// FetchAPKInfo is called to fetch APK info if PackageID is empty.
 	// This allows the caller to provide the APK download/parsing logic.
 	FetchAPKInfo APKInfoFetcher
+
+	// ResolvePubkey resolves the npub from a SIGN_WITH value, including async
+	// sources like bunker:// and browser. If nil, only nsec/npub are resolved.
+	ResolvePubkey PubkeyResolver
+
+	// CheckAppExists checks whether an app already exists on the relay.
+	// If set and the app is found, the pubkey step is skipped (app already published).
+	CheckAppExists AppExistsChecker
 }
 
 // MetadataSourceOption represents a metadata source that can be selected in the wizard.
@@ -83,13 +100,22 @@ func RunWizardWithOptions(defaults *Config, opts WizardOptions) (*Config, error)
 	var needsReleaseSource bool // True if we need to prompt for -s
 
 	defaultRepo := cfg.Repository
-	fmt.Println(ui.Dim("Press Enter to skip if this is a closed-source app."))
+	if defaultRepo != "" {
+		fmt.Println(ui.Dim("Enter a space to clear (closed-source app), or press Enter to keep."))
+	} else {
+		fmt.Println(ui.Dim("Press Enter to skip if this is a closed-source app."))
+	}
 
 repoLoop:
 	for {
 		source, err := ui.PromptDefault("Repository URL (optional)", defaultRepo)
 		if err != nil {
 			return nil, err
+		}
+
+		// A single space means "clear this field" (used when editing to skip/remove the repo)
+		if source == " " {
+			source = ""
 		}
 
 		// Repository is optional
@@ -346,9 +372,9 @@ repoLoop:
 	var metadataPrompt string
 	if len(selectedMetadataSources) > 0 {
 		sourceList := formatSourceList(selectedMetadataSources)
-		metadataPrompt = fmt.Sprintf("You're fetching metadata from %s. Would you like to override or further add metadata, perhaps local?", sourceList)
+		metadataPrompt = fmt.Sprintf("Fetching metadata from %s.\nWould you like to provide a name, description, and more now?", sourceList)
 	} else {
-		metadataPrompt = "Would you like to add metadata?"
+		metadataPrompt = "Would you like to provide a name, description, and more now?"
 	}
 	wantMetadataOverrides, err := ui.Confirm(metadataPrompt, false)
 	if err != nil {
@@ -449,6 +475,28 @@ repoLoop:
 		fmt.Println()
 	}
 
+	// Resolve pubkey from SIGN_WITH and store in config for relay auto-whitelisting.
+	// For nsec/npub this is synchronous; for bunker/browser we try a live connection.
+	// If resolution fails (e.g. bunker unreachable), prompt the user for their npub.
+	// Skip if the app already exists on the relay (pubkey already recorded there).
+	appAlreadyExists := false
+	if packageID != "" && opts.CheckAppExists != nil {
+		spinner := ui.NewSpinner("Checking if app already exists on relay...")
+		spinner.Start()
+		appAlreadyExists = opts.CheckAppExists(ui.GetContext(), packageID)
+		spinner.Stop()
+		fmt.Println()
+	}
+
+	if !appAlreadyExists {
+		if signWith := GetSignWith(); signWith != "" {
+			npub := resolveOrPromptPubkey(signWith, opts.ResolvePubkey)
+			if npub != "" {
+				cfg.Pubkey = npub
+			}
+		}
+	}
+
 	// Check if interrupted before saving
 	if ui.IsInterrupted() {
 		return nil, ui.ErrInterrupted
@@ -468,13 +516,6 @@ repoLoop:
 	// Store metadata sources in config if we're saving one anyway
 	if len(selectedMetadataSources) > 0 {
 		cfg.MetadataSources = selectedMetadataSources
-	}
-
-	// Derive pubkey from SIGN_WITH and store in config for relay auto-whitelisting
-	if signWith := GetSignWith(); signWith != "" {
-		if npub := ResolvePubkeyFromSignWith(signWith); npub != "" {
-			cfg.Pubkey = npub
-		}
 	}
 
 	// Always write zapstore.yaml so the relay can verify pubkey ownership
@@ -497,6 +538,60 @@ repoLoop:
 
 	// Return sentinel error so caller knows not to auto-run
 	return nil, ErrWizardComplete
+}
+
+// resolveOrPromptPubkey tries to resolve the npub from signWith.
+// For nsec/npub it resolves synchronously. For bunker/browser it calls resolver
+// (if provided) with a spinner. If resolution fails or resolver is nil, it
+// informs the user and prompts them to enter their npub manually.
+func resolveOrPromptPubkey(signWith string, resolver PubkeyResolver) string {
+	// Fast path: nsec or npub — no network needed
+	if npub := ResolvePubkeyFromSignWith(signWith); npub != "" {
+		return npub
+	}
+
+	// Async path: bunker or browser
+	if resolver != nil {
+		spinnerMsg := "Connecting to bunker to resolve your public key..."
+		if strings.HasPrefix(signWith, "browser") {
+			spinnerMsg = "Connecting to browser extension to resolve your public key..."
+		}
+		spinner := ui.NewSpinner(spinnerMsg)
+		spinner.Start()
+		ctx, cancel := context.WithTimeout(ui.GetContext(), 15*time.Second)
+		defer cancel()
+		npub, err := resolver(ctx, signWith)
+		if err == nil && npub != "" {
+			spinner.StopWithSuccess(fmt.Sprintf("Resolved pubkey: %s", npub))
+			fmt.Println()
+			return npub
+		}
+		spinner.Stop()
+		if err != nil {
+			fmt.Printf("%s Could not resolve pubkey automatically: %v\n", ui.Warning("⚠"), err)
+		}
+	} else {
+		fmt.Printf("%s Could not resolve pubkey automatically (bunker/browser requires a live connection)\n", ui.Warning("⚠"))
+	}
+
+	// Fallback: prompt the user
+	fmt.Println(ui.Dim("Your npub is needed so the relay can whitelist your key."))
+	for {
+		npub, err := ui.Prompt("Enter your npub: ")
+		if err != nil {
+			return ""
+		}
+		npub = strings.TrimSpace(npub)
+		if npub == "" {
+			fmt.Printf("%s npub is required to write pubkey to config\n", ui.Warning("⚠"))
+			continue
+		}
+		if !strings.HasPrefix(npub, "npub1") {
+			fmt.Printf("%s Must start with npub1\n", ui.Warning("⚠"))
+			continue
+		}
+		return npub
+	}
 }
 
 // buildCommand constructs the CLI command from wizard inputs.

@@ -690,6 +690,7 @@ func containsGitLab(rawURL string) bool {
 type FDroidRepoInfo struct {
 	RepoURL     string // Base repo URL (e.g., "https://f-droid.org/repo")
 	IndexURL    string // Index JSON URL (e.g., "https://f-droid.org/repo/index-v1.json")
+	APIURL      string // Per-package API URL (e.g., "https://f-droid.org/api/v1/packages/<id>"); empty if unsupported
 	PackageID   string // Package identifier (e.g., "com.example.app")
 	MetadataURL string // Metadata YAML URL (empty if not available)
 }
@@ -709,6 +710,7 @@ func GetFDroidRepoInfo(rawURL string) *FDroidRepoInfo {
 			return &FDroidRepoInfo{
 				RepoURL:     "https://f-droid.org/repo",
 				IndexURL:    "https://f-droid.org/repo/index-v1.json",
+				APIURL:      fmt.Sprintf("https://f-droid.org/api/v1/packages/%s", packageID),
 				PackageID:   packageID,
 				MetadataURL: fmt.Sprintf("https://gitlab.com/fdroid/fdroiddata/-/raw/master/metadata/%s.yml", packageID),
 			}

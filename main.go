@@ -360,7 +360,9 @@ func loadConfig(opts *cli.PublishOptions, args []string) (*config.Config, error)
 			defaults = cfg
 		}
 		return config.RunWizardWithOptions(defaults, config.WizardOptions{
-			FetchAPKInfo: fetchAPKInfoForWizard,
+			FetchAPKInfo:   fetchAPKInfoForWizard,
+			ResolvePubkey:  resolvePubkeyForWizard,
+			CheckAppExists: checkAppExistsForWizard,
 		})
 	}
 
@@ -396,7 +398,9 @@ func loadConfig(opts *cli.PublishOptions, args []string) (*config.Config, error)
 	}
 
 	return config.RunWizardWithOptions(nil, config.WizardOptions{
-		FetchAPKInfo: fetchAPKInfoForWizard,
+		FetchAPKInfo:   fetchAPKInfoForWizard,
+		ResolvePubkey:  resolvePubkeyForWizard,
+		CheckAppExists: checkAppExistsForWizard,
 	})
 }
 
@@ -464,6 +468,38 @@ func fetchAPKInfoForWizard(cfg *config.Config, matchPattern string) *config.APKB
 		PackageID: apkInfo.PackageID,
 		AppName:   apkInfo.Label,
 	}
+}
+
+// resolvePubkeyForWizard connects to the signer (including bunker/browser) to get the npub.
+// This is passed as a callback to the wizard since config package can't import internal/nostr.
+func resolvePubkeyForWizard(ctx context.Context, signWith string) (string, error) {
+	signer, err := nostrpkg.NewSigner(ctx, signWith)
+	if err != nil {
+		return "", err
+	}
+	defer signer.Close()
+
+	pubkeyHex := signer.PublicKey()
+	if pubkeyHex == "" {
+		return "", fmt.Errorf("signer returned empty public key")
+	}
+
+	npub, err := nip19.EncodePublicKey(pubkeyHex)
+	if err != nil {
+		return "", fmt.Errorf("encoding public key: %w", err)
+	}
+	return npub, nil
+}
+
+// checkAppExistsForWizard queries the default relay to check if an app already exists.
+// This is passed as a callback to the wizard since config package can't import internal/nostr.
+func checkAppExistsForWizard(ctx context.Context, packageID string) bool {
+	publisher := nostrpkg.NewPublisher(nil) // uses DefaultRelay
+	existing, err := publisher.CheckExistingApp(ctx, packageID)
+	if err != nil {
+		return false
+	}
+	return existing != nil
 }
 
 // loadAPKConfig creates config from a local APK path with optional -r and -s flags.
