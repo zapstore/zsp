@@ -191,73 +191,10 @@ func (f *FDroid) buildRelease(version *fdroidPackageVersion) *Release {
 	}
 }
 
-// fetchLatestVersion fetches the latest version for this package.
-// Uses the per-package API when available (f-droid.org), otherwise falls back
-// to the ETag-cached shared index (IzzyOnDroid and other F-Droid repos).
+// fetchLatestVersion fetches the latest version for this package from the shared repo
+// index, using a disk-cached ETag to avoid re-downloading the full index when unchanged.
 func (f *FDroid) fetchLatestVersion(ctx context.Context) (*fdroidPackageVersion, error) {
-	if f.repoInfo.APIURL != "" {
-		return f.fetchLatestVersionFromAPI(ctx)
-	}
 	return f.fetchLatestVersionFromIndex(ctx)
-}
-
-// fdroidAPIResponse is the response from the F-Droid per-package API.
-type fdroidAPIResponse struct {
-	PackageName          string `json:"packageName"`
-	SuggestedVersionCode int64  `json:"suggestedVersionCode"`
-	Packages             []struct {
-		VersionName string `json:"versionName"`
-		VersionCode int64  `json:"versionCode"`
-	} `json:"packages"`
-}
-
-// fetchLatestVersionFromAPI uses the lightweight per-package API (f-droid.org only).
-// Returns a synthetic fdroidPackageVersion — size and nativecode are unavailable
-// from the API, but suggestedVersionCode already picks the right architecture variant.
-func (f *FDroid) fetchLatestVersionFromAPI(ctx context.Context) (*fdroidPackageVersion, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", f.repoInfo.APIURL, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := f.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch package info: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("package %s not found in repository", f.repoInfo.PackageID)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("package API returned status %d", resp.StatusCode)
-	}
-
-	var apiResp fdroidAPIResponse
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		return nil, fmt.Errorf("failed to parse package info: %w", err)
-	}
-
-	if apiResp.SuggestedVersionCode == 0 || len(apiResp.Packages) == 0 {
-		return nil, fmt.Errorf("package %s has no releases", f.repoInfo.PackageID)
-	}
-
-	// Find the version entry matching suggestedVersionCode.
-	for _, p := range apiResp.Packages {
-		if p.VersionCode == apiResp.SuggestedVersionCode {
-			return &fdroidPackageVersion{
-				VersionCode: p.VersionCode,
-				VersionName: p.VersionName,
-			}, nil
-		}
-	}
-
-	// Fallback: use the first entry (highest versionCode, as F-Droid returns them sorted).
-	p := apiResp.Packages[0]
-	return &fdroidPackageVersion{
-		VersionCode: p.VersionCode,
-		VersionName: p.VersionName,
-	}, nil
 }
 
 // fetchLatestVersionFromIndex fetches the latest version from the shared repo index,
