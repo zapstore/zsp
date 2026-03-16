@@ -15,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nbd-wtf/go-nostr/nip19"
 	"github.com/zapstore/zsp/internal/apk"
 	"github.com/zapstore/zsp/internal/blossom"
 	"github.com/zapstore/zsp/internal/cli"
@@ -1259,13 +1258,7 @@ func (p *Publisher) showZapstoreURL(results map[string][]nostr.PublishResult) {
 		return
 	}
 
-	// Encode as naddr (kind 32267, pubkey, identifier, relay hint)
-	naddr, err := nip19.EncodeEntity(event.PubKey, event.Kind, identifier, []string{"wss://" + zapstoreRelayHost})
-	if err != nil {
-		return
-	}
-
-	fmt.Printf("  View your app: https://zapstore.dev/apps/%s\n\n", naddr)
+	fmt.Printf("  View your app: https://zapstore.dev/apps/%s\n\n", identifier)
 }
 
 // clearCache clears the source cache.
