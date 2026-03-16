@@ -183,10 +183,10 @@ type ExistingAsset struct {
 	Version  string
 }
 
-// CheckExistingAsset queries all relays to check if a Software Asset already exists.
-// It searches for kind 3063 events with a matching `i` tag (identifier) and `version` tag.
+// CheckExistingAssetAny queries all relays to check if a Software Asset already exists
+// from any publisher. Used by --check mode (zindex) where pubkey is not known.
 // Returns the first existing Software Asset found, or nil if none exists.
-func (p *Publisher) CheckExistingAsset(ctx context.Context, identifier, version string) (*ExistingAsset, error) {
+func (p *Publisher) CheckExistingAssetAny(ctx context.Context, identifier, version string) (*ExistingAsset, error) {
 	filter := nostr.Filter{
 		Kinds: []int{KindSoftwareAsset},
 		Tags: nostr.TagMap{
@@ -195,6 +195,27 @@ func (p *Publisher) CheckExistingAsset(ctx context.Context, identifier, version 
 		},
 		Limit: 1,
 	}
+	return p.checkExistingAssetWithFilter(ctx, filter)
+}
+
+// CheckExistingAsset queries all relays to check if a Software Asset already exists
+// for the given publisher. It searches for kind 3063 events scoped to pubkey with
+// matching `i` tag (identifier) and `version` tag.
+// Returns the first existing Software Asset found, or nil if none exists.
+func (p *Publisher) CheckExistingAsset(ctx context.Context, pubkey, identifier, version string) (*ExistingAsset, error) {
+	filter := nostr.Filter{
+		Kinds:   []int{KindSoftwareAsset},
+		Authors: []string{pubkey},
+		Tags: nostr.TagMap{
+			"i":       []string{identifier},
+			"version": []string{version},
+		},
+		Limit: 1,
+	}
+	return p.checkExistingAssetWithFilter(ctx, filter)
+}
+
+func (p *Publisher) checkExistingAssetWithFilter(ctx context.Context, filter nostr.Filter) (*ExistingAsset, error) {
 
 	// Query each relay until we find an existing asset
 	for _, url := range p.relayURLs {

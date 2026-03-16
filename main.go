@@ -321,7 +321,7 @@ func checkReleases(ctx context.Context, repoURL string, opts *cli.Options) error
 	// Check relay for an existing asset with this package ID + version.
 	relaysEnv := config.GetEnv("RELAY_URLS")
 	publisher := nostrpkg.NewPublisherFromEnv(relaysEnv)
-	existingAsset, relayErr := publisher.CheckExistingAsset(ctx, apkInfo.PackageID, version)
+	existingAsset, relayErr := publisher.CheckExistingAssetAny(ctx, apkInfo.PackageID, version)
 	if relayErr == nil && existingAsset != nil {
 		fmt.Println("UP_TO_DATE")
 		return nil

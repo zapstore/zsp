@@ -310,8 +310,7 @@ func (p *Publisher) downloadAndParseAPK(ctx context.Context) error {
 		ui.PrintKeyValue("Size", fmt.Sprintf("%.2f MB", float64(p.apkInfo.FileSize)/(1024*1024)))
 	}
 
-	// Check if asset already exists on relays
-	return p.checkExistingAsset(ctx)
+	return nil
 }
 
 // getAPKPath returns the local path to the APK, downloading if necessary.
@@ -357,13 +356,14 @@ func (p *Publisher) getAPKPath(ctx context.Context) (string, error) {
 	return apkPath, nil
 }
 
-// checkExistingAsset checks if the release already exists on relays.
-func (p *Publisher) checkExistingAsset(ctx context.Context) error {
+// checkExistingAsset checks if the release already exists on relays for this publisher.
+// pubkey must be the hex public key of the signer so the query is scoped to their events only.
+func (p *Publisher) checkExistingAsset(ctx context.Context, pubkey string) error {
 	if p.opts.Publish.OverwriteRelease || p.opts.Publish.Offline {
 		return nil
 	}
 
-	existingAsset, err := p.publisher.CheckExistingAsset(ctx, p.apkInfo.PackageID, p.apkInfo.VersionName)
+	existingAsset, err := p.publisher.CheckExistingAsset(ctx, pubkey, p.apkInfo.PackageID, p.apkInfo.VersionName)
 	if err != nil {
 		if p.opts.Global.Verbose {
 			fmt.Printf("  Could not check relays: %v\n", err)
@@ -581,6 +581,11 @@ func (p *Publisher) showPreview(ctx context.Context) error {
 func (p *Publisher) signAndUpload(ctx context.Context) error {
 	// Create signer
 	if err := p.createSigner(ctx); err != nil {
+		return err
+	}
+
+	// Check if this publisher's asset already exists on relays (scoped to their pubkey)
+	if err := p.checkExistingAsset(ctx, p.signer.PublicKey()); err != nil {
 		return err
 	}
 
