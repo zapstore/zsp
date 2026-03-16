@@ -116,6 +116,9 @@ func (g *GitHub) saveCache(etag string, release *githubRelease) error {
 	return os.WriteFile(g.cacheFilePath(), data, 0644)
 }
 
+// SetSkipCache implements CacheSkipper.
+func (g *GitHub) SetSkipCache(v bool) { g.SkipCache = v }
+
 // GetCachedRelease returns the cached release if available.
 func (g *GitHub) GetCachedRelease() *Release {
 	cache := g.loadCache()

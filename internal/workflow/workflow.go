@@ -183,7 +183,12 @@ func (p *Publisher) fetchRelease(ctx context.Context) (*source.Release, error) {
 				return cached, nil
 			}
 		}
-		return nil, fmt.Errorf("release not modified but no cached release available; try --overwrite-release")
+		// No cached release available — retry without ETag so we get a full response
+		if skipper, ok := p.src.(source.CacheSkipper); ok {
+			skipper.SetSkipCache(true)
+			return p.fetchRelease(ctx)
+		}
+		return nil, fmt.Errorf("release not modified but no cached release available")
 	}
 
 	if err != nil {

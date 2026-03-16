@@ -149,6 +149,9 @@ func (w *Web) saveCache(cache *webCache) error {
 	return os.WriteFile(w.cacheFilePath(), data, 0644)
 }
 
+// SetSkipCache implements CacheSkipper.
+func (w *Web) SetSkipCache(v bool) { w.SkipCache = v }
+
 // GetCachedRelease returns the cached release if available.
 func (w *Web) GetCachedRelease() *Release {
 	cache := w.loadCache()

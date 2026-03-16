@@ -233,6 +233,13 @@ type CachedReleaseProvider interface {
 	GetCachedRelease() *Release
 }
 
+// CacheSkipper is an optional interface for sources that support bypassing their
+// ETag/version cache. Used as a fallback when ErrNotModified is returned but no
+// cached release is available — the workflow retries with the cache skipped.
+type CacheSkipper interface {
+	SetSkipCache(bool)
+}
+
 // CacheCommitter is an optional interface for sources that support deferred cache commits.
 // Sources like GitHub store cache data in memory during fetch, then commit to disk
 // only after successful publishing via CommitCache().

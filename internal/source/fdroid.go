@@ -103,6 +103,9 @@ func (f *FDroid) CommitCache() error {
 	return err
 }
 
+// SetSkipCache implements CacheSkipper.
+func (f *FDroid) SetSkipCache(v bool) { f.SkipCache = v }
+
 // GetCachedRelease returns the cached release for this package if available.
 func (f *FDroid) GetCachedRelease() *Release {
 	cache := f.loadCache()
