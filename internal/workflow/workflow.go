@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"strconv"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -297,6 +298,13 @@ func (p *Publisher) downloadAndParseAPK(ctx context.Context) error {
 	// Backfill version from APK if not known from release
 	if p.release.Version == "" {
 		p.release.Version = p.apkInfo.VersionName
+	}
+	// Last resort: use versionCode as version string (versionName is optional in Android)
+	if p.release.Version == "" && p.apkInfo.VersionCode > 0 {
+		p.release.Version = strconv.FormatInt(p.apkInfo.VersionCode, 10)
+	}
+	if p.release.Version == "" {
+		return fmt.Errorf("could not determine version: release has no version tag and APK manifest has no android:versionName or versionCode")
 	}
 
 	// Display APK summary
