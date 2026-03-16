@@ -442,6 +442,9 @@ repoLoop:
 		fmt.Println()
 
 		// Media
+		icon, _ := ui.PromptDefault("Icon URL or local path (overrides APK icon)", cfg.Icon)
+		cfg.Icon = icon
+
 		defaultImages := strings.Join(cfg.Images, " ")
 		imagesStr, _ := ui.PromptDefault("Screenshot URLs or local paths (space-separated)", defaultImages)
 		if imagesStr != "" {
