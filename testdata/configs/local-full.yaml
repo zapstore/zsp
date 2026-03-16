@@ -23,5 +23,12 @@ repository: https://github.com/zapstore/zapstore
 # Changelog file
 changelog: ../fixtures/CHANGELOG.md
 
+# Communities: h-tag values for kind 32267 events.
+# The app will appear in each listed Nostr community.
+# Defaults to [zapstore] if omitted.
+# Single community:   communities: [zapstore]
+# Multiple:           communities: [zapstore, my-community]
+communities: [zapstore]
+
 # Fetch additional metadata
 fetch_metadata: [github]

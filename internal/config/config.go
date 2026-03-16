@@ -73,9 +73,13 @@ type Config struct {
 	// Used by the relay for auto-whitelisting via repo verification.
 	Pubkey string `yaml:"pubkey,omitempty"`
 
-	// Community is the h-tag value for kind 32267 events.
-	// Defaults to "zapstore" if not set.
-	Community string `yaml:"community,omitempty"`
+	// Communities lists the h-tag values for kind 32267 events.
+	// Each entry becomes a separate "h" tag, allowing the app to appear in
+	// multiple Nostr communities simultaneously.
+	// Defaults to ["zapstore"] if not set.
+	// Example (single):  community: zapstore
+	// Example (multiple): communities: [zapstore, my-community]
+	Communities []string `yaml:"communities,omitempty"`
 
 	// BaseDir is the directory containing the config file (for relative paths).
 	// Not parsed from YAML, set by Load().

@@ -35,7 +35,7 @@ type AppMetadata struct {
 	IconURL     string   // Blossom URL for icon
 	ImageURLs   []string // Screenshot URLs
 	Platforms   []string // Platform identifiers (e.g., "android-arm64-v8a")
-	Community   string   // h tag value; defaults to "zapstore" if empty
+	Communities []string // h tag values; defaults to ["zapstore"] if empty
 }
 
 // ReleaseMetadata contains Software Release metadata (kind 30063).
@@ -119,12 +119,14 @@ func BuildAppMetadataEvent(meta *AppMetadata, pubkey string) *nostr.Event {
 		tags = append(tags, nostr.Tag{"license", meta.License})
 	}
 
-	// h tag: community identifier (defaults to "zapstore")
-	community := meta.Community
-	if community == "" {
-		community = "zapstore"
+	// h tags: community identifiers (defaults to "zapstore")
+	communities := meta.Communities
+	if len(communities) == 0 {
+		communities = []string{"zapstore"}
 	}
-	tags = append(tags, nostr.Tag{"h", community})
+	for _, c := range communities {
+		tags = append(tags, nostr.Tag{"h", c})
+	}
 
 	return &nostr.Event{
 		Kind:      KindAppMetadata,
@@ -369,7 +371,7 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		IconURL:        params.IconURL,
 		ImageURLs:      params.ImageURLs,
 		Platforms:      platforms,
-		Community:  cfg.Community,
+		Communities: cfg.Communities,
 	}
 
 	// Determine release channel (default: main)
