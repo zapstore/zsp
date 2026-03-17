@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"syscall"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
@@ -381,15 +383,17 @@ func loadConfig(opts *cli.PublishOptions, args []string) (*config.Config, error)
 		return config.Load(args[0])
 	}
 
-	// Check for stdin
-	stat, _ := os.Stdin.Stat()
-	if (stat.Mode() & os.ModeCharDevice) == 0 {
-		return config.Parse(os.Stdin)
-	}
-
-	// Look for default config file
+	// zapstore.yaml takes priority over stdin.
 	if _, err := os.Stat("zapstore.yaml"); err == nil {
 		return config.Load("zapstore.yaml")
+	}
+
+	// No config file — use stdin only if data is actually piped in.
+	stat, _ := os.Stdin.Stat()
+	if (stat.Mode()&os.ModeCharDevice) == 0 {
+		if r, ok := peekStdin(); ok {
+			return config.Parse(r)
+		}
 	}
 
 	// Launch interactive wizard
@@ -1196,4 +1200,27 @@ func loadX509FromFile(filePath string) (crypto.PrivateKey, *x509.Certificate, er
 
 	// Unknown extension - try to detect from content
 	return nil, nil, fmt.Errorf("unsupported file type: %s (use .p12, .pfx, .pem, or .crt)", filePath)
+}
+
+// peekStdin sets stdin to non-blocking mode, attempts a 1-byte read, then
+// restores blocking mode. Returns a reader that includes the peeked byte
+// prepended to the rest of stdin, and true — or nil, false if stdin is empty.
+func peekStdin() (io.Reader, bool) {
+	fd := int(os.Stdin.Fd())
+	if err := syscall.SetNonblock(fd, true); err != nil {
+		// Can't set non-blocking; fall back to assuming data is present.
+		return os.Stdin, true
+	}
+	defer syscall.SetNonblock(fd, false) //nolint:errcheck
+
+	buf := make([]byte, 1)
+	n, err := os.Stdin.Read(buf)
+	if n == 0 {
+		// EAGAIN / EWOULDBLOCK — pipe is open but empty (CI with no piped input).
+		return nil, false
+	}
+	if err != nil && err != io.EOF {
+		return nil, false
+	}
+	return io.MultiReader(strings.NewReader(string(buf[:n])), os.Stdin), true
 }
