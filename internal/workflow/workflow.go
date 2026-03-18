@@ -1246,7 +1246,6 @@ func (p *Publisher) showZapstoreURL(results map[string][]nostr.PublishResult) {
 	}
 
 	// Check if relay.zapstore.dev accepted the software_application event
-	const zapstoreRelayHost = "relay.zapstore.dev"
 	accepted := false
 	for _, r := range results["software_application"] {
 		if r.Success && strings.Contains(r.RelayURL, zapstoreRelayHost) {

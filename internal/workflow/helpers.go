@@ -78,6 +78,19 @@ func selectAPKInteractive(ranked []picker.ScoredAsset) (*source.Asset, error) {
 	return ranked[idx].Asset, nil
 }
 
+// zapstoreRelayHost is the hostname of the Zapstore relay used to detect Zapstore publishes.
+const zapstoreRelayHost = "relay.zapstore.dev"
+
+// isPublishingToZapstore reports whether any of the relay URLs targets the Zapstore catalog relay.
+func isPublishingToZapstore(relayURLs []string) bool {
+	for _, u := range relayURLs {
+		if strings.Contains(u, zapstoreRelayHost) {
+			return true
+		}
+	}
+	return false
+}
+
 // confirmPublish shows a pre-publish summary and asks for confirmation.
 func confirmPublish(events *nostr.EventSet, relayURLs []string, apkSHA256 string, isClosedSource bool) (bool, error) {
 	packageID := ""
@@ -110,6 +123,11 @@ func confirmPublish(events *nostr.EventSet, relayURLs []string, apkSHA256 string
 	fmt.Printf("  %s\n", ui.Dim("By publishing you confirm the above hash matches the APK you intend to distribute."))
 	fmt.Printf("  %s\n", ui.Dim("To verify: shasum -a 256 <apk>  (macOS)  /  sha256sum <apk>  (Linux)"))
 	fmt.Println()
+
+	if isPublishingToZapstore(relayURLs) {
+		fmt.Printf("  By publishing to the Zapstore catalog you agree to the following terms: https://zapstore.dev/terms\n")
+		fmt.Println()
+	}
 
 	for {
 		options := []string{
