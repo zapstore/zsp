@@ -392,7 +392,8 @@ App metadata (name, description, icon, screenshots, platforms).
     ["t", "productivity"],
     ["f", "android-arm64-v8a"],
     ["license", "MIT"],
-    ["repository", "https://github.com/user/app"]
+    ["repository", "https://github.com/user/app"],
+    ["h", "acfeaea6e51420e8068fac446ca9d17d7a9ef6a5d20d93894e50fee3d4902a84"]
   ],
   "content": "Full app description..."
 }

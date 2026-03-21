@@ -11,6 +11,10 @@ import (
 	"github.com/zapstore/zsp/internal/config"
 )
 
+// DefaultCommunity is the h-tag value used when config does not set communities.
+// Zapstore catalog community (32-byte secp256k1 pubkey, lowercase hex).
+const DefaultCommunity = "acfeaea6e51420e8068fac446ca9d17d7a9ef6a5d20d93894e50fee3d4902a84"
+
 // Event kinds for Zapstore
 const (
 	KindAppMetadata   = 32267 // Software Application (name, description, icon, platforms)
@@ -35,7 +39,7 @@ type AppMetadata struct {
 	IconURL     string   // Blossom URL for icon
 	ImageURLs   []string // Screenshot URLs
 	Platforms   []string // Platform identifiers (e.g., "android-arm64-v8a")
-	Communities []string // h tag values; defaults to ["zapstore"] if empty
+	Communities []string // h tag values; defaults to [DefaultCommunity] if empty
 }
 
 // ReleaseMetadata contains Software Release metadata (kind 30063).
@@ -119,10 +123,10 @@ func BuildAppMetadataEvent(meta *AppMetadata, pubkey string) *nostr.Event {
 		tags = append(tags, nostr.Tag{"license", meta.License})
 	}
 
-	// h tags: community identifiers (defaults to "zapstore")
+	// h tags: community identifiers
 	communities := meta.Communities
 	if len(communities) == 0 {
-		communities = []string{"zapstore"}
+		communities = []string{DefaultCommunity}
 	}
 	for _, c := range communities {
 		tags = append(tags, nostr.Tag{"h", c})

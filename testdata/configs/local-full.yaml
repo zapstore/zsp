@@ -25,10 +25,10 @@ changelog: ../fixtures/CHANGELOG.md
 
 # Communities: h-tag values for kind 32267 events.
 # The app will appear in each listed Nostr community.
-# Defaults to [zapstore] if omitted.
-# Single community:   communities: [zapstore]
-# Multiple:           communities: [zapstore, my-community]
-communities: [zapstore]
+# Defaults to the Zapstore catalog pubkey (hex) if omitted (see nostr.DefaultCommunity).
+# Single community:   communities: [acfeaea6e51420e8068fac446ca9d17d7a9ef6a5d20d93894e50fee3d4902a84]
+# Multiple:           communities: [acfeaea6e51420e8068fac446ca9d17d7a9ef6a5d20d93894e50fee3d4902a84, fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210]
+communities: [acfeaea6e51420e8068fac446ca9d17d7a9ef6a5d20d93894e50fee3d4902a84]
 
 # Fetch additional metadata
 fetch_metadata: [github]

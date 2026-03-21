@@ -74,6 +74,11 @@ func TestBuildAppMetadataEvent(t *testing.T) {
 	if urlTag == nil || (*urlTag)[1] != "https://example.com" {
 		t.Error("missing or incorrect url tag")
 	}
+
+	hTags := filterExactTag(event.Tags, "h")
+	if len(hTags) != 1 || hTags[0][1] != DefaultCommunity {
+		t.Errorf("expected default h tag %q, got %v", DefaultCommunity, hTags)
+	}
 }
 
 func TestBuildReleaseEvent(t *testing.T) {

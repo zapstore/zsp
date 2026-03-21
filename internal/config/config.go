@@ -76,9 +76,9 @@ type Config struct {
 	// Communities lists the h-tag values for kind 32267 events.
 	// Each entry becomes a separate "h" tag, allowing the app to appear in
 	// multiple Nostr communities simultaneously.
-	// Defaults to ["zapstore"] if not set.
-	// Example (single):  community: zapstore
-	// Example (multiple): communities: [zapstore, my-community]
+	// Defaults to the Zapstore catalog community pubkey (hex) if not set (see nostr.DefaultCommunity).
+	// Example (single):  communities: [acfeaea6e51420e8068fac446ca9d17d7a9ef6a5d20d93894e50fee3d4902a84]
+	// Example (multiple): communities: [acfeaea6e51420e8068fac446ca9d17d7a9ef6a5d20d93894e50fee3d4902a84, fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210]
 	Communities []string `yaml:"communities,omitempty"`
 
 	// BaseDir is the directory containing the config file (for relative paths).
