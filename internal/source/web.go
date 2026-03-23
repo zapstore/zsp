@@ -403,8 +403,9 @@ func (w *Web) extractVersionHTML(ctx context.Context, v *config.VersionExtractor
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("page fetch failed with status %d", resp.StatusCode)
+	// Validate HTTP status
+	if err := checkHTTPStatus(resp, "Web page"); err != nil {
+		return "", err
 	}
 
 	// Security: Limit response size to prevent memory exhaustion
@@ -449,8 +450,9 @@ func (w *Web) extractVersionJSON(ctx context.Context, v *config.VersionExtractor
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API fetch failed with status %d", resp.StatusCode)
+	// Validate HTTP status
+	if err := checkHTTPStatus(resp, "Web API"); err != nil {
+		return "", err
 	}
 
 	// Security: Limit response size to prevent memory exhaustion
@@ -661,8 +663,9 @@ func (w *Web) Download(ctx context.Context, asset *Asset, destDir string, progre
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download failed with status %d: %s", resp.StatusCode, asset.URL)
+	// Validate HTTP status
+	if err := checkHTTPStatus(resp, "Web download"); err != nil {
+		return "", err
 	}
 
 	// Use Content-Length from response if available, otherwise use asset size

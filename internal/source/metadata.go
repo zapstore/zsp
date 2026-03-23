@@ -518,12 +518,14 @@ func (f *MetadataFetcher) scrapeFDroidWebsite(ctx context.Context, packageID str
 	}
 	defer resp.Body.Close()
 
+	// Special case: 404 with package-specific message
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("package %s not found on F-Droid", packageID)
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("F-Droid returned status %d", resp.StatusCode)
+	// Validate HTTP status
+	if err := checkHTTPStatus(resp, "F-Droid website"); err != nil {
+		return nil, err
 	}
 
 	// Security: Limit response size to prevent memory exhaustion
@@ -606,8 +608,9 @@ func (f *MetadataFetcher) fetchFDroidYAML(ctx context.Context, metadataURL strin
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("metadata not found (status %d)", resp.StatusCode)
+	// Validate HTTP status
+	if err := checkHTTPStatus(resp, "fdroiddata YAML"); err != nil {
+		return nil, err
 	}
 
 	// Security: Limit response size to prevent memory exhaustion

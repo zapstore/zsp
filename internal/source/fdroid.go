@@ -55,7 +55,7 @@ func NewFDroid(cfg *config.Config) (*FDroid, error) {
 	return &FDroid{
 		cfg:      cfg,
 		repoInfo: repoInfo,
-		client:   &http.Client{Timeout: 120 * time.Second},
+		client:   newDownloadHTTPClient(), // No total timeout, uses stall detection
 		cacheDir: cacheDir,
 	}, nil
 }
@@ -223,20 +223,31 @@ func (f *FDroid) fetchLatestVersionFromIndex(ctx context.Context) (*fdroidPackag
 	}
 	defer resp.Body.Close()
 
+	// Handle 304 Not Modified with ETag cache
 	if resp.StatusCode == http.StatusNotModified && cached != nil {
 		return f.selectVersion(cached.Packages)
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("repo index fetch failed with status %d", resp.StatusCode)
+	// Validate HTTP status
+	if err := checkHTTPStatus(resp, "F-Droid repository"); err != nil {
+		return nil, err
+	}
+
+	// Wrap body with stall timeout. F-Droid indexes are large (48+ MB) and can be
+	// slow to download, so we use stall detection (fails only if no data received
+	// for 30s) rather than a total timeout. No size limit - if F-Droid legitimately
+	// has a large index, we download it.
+	reader := &StallTimeoutReader{
+		Reader:  resp.Body,
+		Timeout: downloadStallTimeout,
 	}
 
 	// Read the full body before decoding so a mid-stream timeout surfaces as a
 	// clear network error rather than a misleading "failed to parse" message.
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(reader)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			return nil, fmt.Errorf("timed out reading repo index (index may be too large or server too slow): %w", err)
+			return nil, fmt.Errorf("timed out reading repo index (no data received for 30s): %w", err)
 		}
 		return nil, fmt.Errorf("failed to read repo index: %w", err)
 	}
@@ -343,8 +354,9 @@ func (f *FDroid) Download(ctx context.Context, asset *Asset, destDir string, pro
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download failed with status %d: %s", resp.StatusCode, asset.URL)
+	// Validate HTTP status
+	if err := checkHTTPStatus(resp, "F-Droid APK download"); err != nil {
+		return "", err
 	}
 
 	// Use Content-Length from response if available, otherwise use asset size
@@ -408,8 +420,9 @@ func (f *FDroid) FetchMetadata(ctx context.Context) (*fdroidMetadata, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("metadata not found (status %d)", resp.StatusCode)
+	// Validate HTTP status
+	if err := checkHTTPStatus(resp, "F-Droid metadata"); err != nil {
+		return nil, err
 	}
 
 	data, err := io.ReadAll(resp.Body)

@@ -62,6 +62,37 @@ func newDownloadHTTPClient() *http.Client {
 	}
 }
 
+// checkHTTPStatus validates an HTTP response status code and returns a descriptive error.
+// Returns nil if status is OK. Handles common status codes with actionable error messages.
+// serviceName is used in error messages (e.g., "F-Droid", "GitHub API").
+func checkHTTPStatus(resp *http.Response, serviceName string) error {
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return nil
+	case http.StatusNotModified:
+		return nil // Caller should handle 304 separately if using ETag caching
+	case http.StatusNotFound:
+		return fmt.Errorf("%s returned 404 Not Found: %s", serviceName, resp.Request.URL)
+	case http.StatusForbidden:
+		return fmt.Errorf("%s access forbidden (403): you may be rate limited or IP blocked", serviceName)
+	case http.StatusTooManyRequests:
+		retryAfter := resp.Header.Get("Retry-After")
+		if retryAfter != "" {
+			return fmt.Errorf("%s rate limited (429): retry after %s seconds", serviceName, retryAfter)
+		}
+		return fmt.Errorf("%s rate limited (429): too many requests", serviceName)
+	case http.StatusServiceUnavailable, http.StatusBadGateway, http.StatusGatewayTimeout:
+		return fmt.Errorf("%s temporarily unavailable (status %d): try again later", serviceName, resp.StatusCode)
+	default:
+		// Try to read error body for more context (limit to 512 bytes)
+		bodyPreview, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if len(bodyPreview) > 0 {
+			return fmt.Errorf("%s returned status %d: %s", serviceName, resp.StatusCode, string(bodyPreview))
+		}
+		return fmt.Errorf("%s returned status %d", serviceName, resp.StatusCode)
+	}
+}
+
 // StallTimeoutReader wraps an io.Reader and returns an error if no data is
 // received for the specified duration. Unlike http.Client.Timeout, this only
 // triggers when the download stalls — not after a fixed total time.
