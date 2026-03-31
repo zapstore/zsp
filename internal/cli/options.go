@@ -77,6 +77,14 @@ type Options struct {
 	Command Command
 	Args    []string // Remaining positional arguments
 
+	// FlagParseError is set when a subcommand's flag set fails to parse (e.g. unknown flag).
+	// Distinct from Global.Help: callers must exit 1 without treating this as a help request.
+	FlagParseError error
+
+	// UnknownSubcommand is the token the user passed when it is not a known command (publish, identity, utils).
+	// When non-empty, Global.Help is also set; callers should show help and exit 1.
+	UnknownSubcommand string
+
 	Global   GlobalOptions
 	Publish  PublishOptions
 	Identity IdentityOptions
@@ -170,6 +178,7 @@ func ParseCommand() *Options {
 	default:
 		// Unknown subcommand - show help
 		opts.Global.Help = true
+		opts.UnknownSubcommand = first
 		opts.Args = args
 	}
 
@@ -217,7 +226,7 @@ func parsePublishFlags(opts *Options, args []string) {
 	})
 
 	if err := fs.Parse(reorderedArgs); err != nil {
-		opts.Global.Help = true
+		opts.FlagParseError = err
 		return
 	}
 
@@ -257,7 +266,7 @@ func parseIdentityFlags(opts *Options, args []string) {
 	})
 
 	if err := fs.Parse(reorderedArgs); err != nil {
-		opts.Global.Help = true
+		opts.FlagParseError = err
 		return
 	}
 
@@ -306,7 +315,7 @@ func parseUtilsArgs(opts *Options, args []string) {
 	// Reorder so flags come before positional args
 	reorderedArgs := reorderArgsForFlagSet(remaining, map[string]bool{})
 	if err := fs.Parse(reorderedArgs); err != nil {
-		opts.Global.Help = true
+		opts.FlagParseError = err
 		return
 	}
 

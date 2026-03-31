@@ -68,6 +68,9 @@ func run(sigHandler *cli.SignalHandler) int {
 
 	// Parse CLI command and flags
 	opts := cli.ParseCommand()
+	if opts.FlagParseError != nil {
+		return 1
+	}
 
 	// Set version for UI rendering
 	ui.SetVersion(getVersion())
@@ -90,7 +93,13 @@ func run(sigHandler *cli.SignalHandler) int {
 
 	// Handle help flag at root or for subcommand
 	if opts.Global.Help {
+		if opts.UnknownSubcommand != "" {
+			fmt.Fprintln(os.Stderr, ui.SanitizeErrorMessage(fmt.Errorf("unknown command %q", opts.UnknownSubcommand)))
+		}
 		help.HandleHelp(opts.Command, opts.Args)
+		if opts.UnknownSubcommand != "" {
+			return 1
+		}
 		return 0
 	}
 
