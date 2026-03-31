@@ -72,6 +72,11 @@ func run(sigHandler *cli.SignalHandler) int {
 	// Set version for UI rendering
 	ui.SetVersion(getVersion())
 
+	// --json implies --no-color (no ANSI escapes in machine-readable output)
+	if opts.Global.JSON {
+		opts.Global.NoColor = true
+	}
+
 	// Handle no-color flag (global)
 	if opts.Global.NoColor {
 		ui.SetNoColor(true)
@@ -114,7 +119,11 @@ func runPublishCommand(ctx context.Context, opts *cli.Options) int {
 	// Handle --check flag (validates config without publishing)
 	if opts.Publish.Check {
 		if err := checkAPK(ctx, opts); err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			if opts.Global.JSON {
+				ui.PrintJSONError(err)
+			} else {
+				fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
+			}
 			return 1
 		}
 		return 0
@@ -131,19 +140,31 @@ func runPublishCommand(ctx context.Context, opts *cli.Options) int {
 		if errors.Is(err, ui.ErrInterrupted) {
 			return 130
 		}
-		fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
+		if opts.Global.JSON {
+			ui.PrintJSONError(err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
+		}
 		return 1
 	}
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: invalid configuration: %s\n", ui.SanitizeErrorMessage(err))
+		if opts.Global.JSON {
+			ui.PrintJSONError(fmt.Errorf("invalid configuration: %w", err))
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: invalid configuration: %s\n", ui.SanitizeErrorMessage(err))
+		}
 		return 1
 	}
 
 	// Validate CLI options
 	if err := opts.Publish.ValidateChannel(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
+		if opts.Global.JSON {
+			ui.PrintJSONError(err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
+		}
 		return 1
 	}
 
@@ -160,7 +181,11 @@ func runPublishCommand(ctx context.Context, opts *cli.Options) int {
 		if errors.Is(err, context.Canceled) {
 			return 130 // Standard exit code for Ctrl+C
 		}
-		fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
+		if opts.Global.JSON {
+			ui.PrintJSONError(err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
+		}
 		return 1
 	}
 
@@ -181,10 +206,18 @@ func runIdentityCommand(ctx context.Context, opts *cli.Options) int {
 				return 130
 			}
 			if errors.Is(err, identity.ErrJKSFormat) {
-				fmt.Fprint(os.Stderr, identity.JKSConversionHelp(opts.Identity.LinkKey))
+				if opts.Global.JSON {
+					ui.PrintJSONError(fmt.Errorf("JKS format not supported; convert with keytool first"))
+				} else {
+					fmt.Fprint(os.Stderr, identity.JKSConversionHelp(opts.Identity.LinkKey))
+				}
 				return 1
 			}
-			fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
+			if opts.Global.JSON {
+				ui.PrintJSONError(err)
+			} else {
+				fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
+			}
 			return 1
 		}
 		return 0
@@ -196,10 +229,18 @@ func runIdentityCommand(ctx context.Context, opts *cli.Options) int {
 				return 130
 			}
 			if errors.Is(err, identity.ErrJKSFormat) {
-				fmt.Fprint(os.Stderr, identity.JKSConversionHelp(opts.Identity.Verify))
+				if opts.Global.JSON {
+					ui.PrintJSONError(fmt.Errorf("JKS format not supported; convert with keytool first"))
+				} else {
+					fmt.Fprint(os.Stderr, identity.JKSConversionHelp(opts.Identity.Verify))
+				}
 				return 1
 			}
-			fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
+			if opts.Global.JSON {
+				ui.PrintJSONError(err)
+			} else {
+				fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
+			}
 			return 1
 		}
 		return 0
@@ -219,24 +260,40 @@ func runUtilsCommand(ctx context.Context, opts *cli.Options) int {
 	switch opts.Utils.Operation {
 	case "extract-apk":
 		if len(opts.Args) == 0 || !strings.HasSuffix(strings.ToLower(opts.Args[0]), ".apk") {
-			fmt.Fprintln(os.Stderr, "Error: extract-apk requires a local APK file as argument")
-			fmt.Fprintln(os.Stderr, "Usage: zsp utils extract-apk <file.apk>")
+			if opts.Global.JSON {
+				ui.PrintJSONError(fmt.Errorf("extract-apk requires a local APK file as argument"))
+			} else {
+				fmt.Fprintln(os.Stderr, "Error: extract-apk requires a local APK file as argument")
+				fmt.Fprintln(os.Stderr, "Usage: zsp utils extract-apk <file.apk>")
+			}
 			return 1
 		}
 		if err := extractAPKMetadata(opts.Args[0]); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
+			if opts.Global.JSON {
+				ui.PrintJSONError(err)
+			} else {
+				fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
+			}
 			return 1
 		}
 		return 0
 
 	case "check-releases":
 		if len(opts.Args) == 0 {
-			fmt.Fprintln(os.Stderr, "Error: check-releases requires a repository URL as argument")
-			fmt.Fprintln(os.Stderr, "Usage: zsp utils check-releases <repo-url>")
+			if opts.Global.JSON {
+				ui.PrintJSONError(fmt.Errorf("check-releases requires a repository URL or config file as argument"))
+			} else {
+				fmt.Fprintln(os.Stderr, "Error: check-releases requires a repository URL as argument")
+				fmt.Fprintln(os.Stderr, "Usage: zsp utils check-releases <repo-url>")
+			}
 			return 1
 		}
 		if err := checkReleases(ctx, opts.Args[0], opts); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
+			if opts.Global.JSON {
+				ui.PrintJSONError(err)
+			} else {
+				fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
+			}
 			return 1
 		}
 		return 0
@@ -248,14 +305,39 @@ func runUtilsCommand(ctx context.Context, opts *cli.Options) int {
 }
 
 // checkReleases checks for a new upstream release by downloading and parsing the APK.
-// Accepts a repository URL (e.g. https://github.com/owner/repo).
+// Accepts a repository URL (e.g. https://github.com/owner/repo) or a config file path.
 // Outputs "NEW <version>" or "UP_TO_DATE" to stdout; exits 1 on source errors.
-func checkReleases(ctx context.Context, repoURL string, opts *cli.Options) error {
-	repoURL = normalizeRepoURL(repoURL)
-	if err := config.ValidateURL(repoURL); err != nil {
-		return fmt.Errorf("invalid URL: %w", err)
+func checkReleases(ctx context.Context, arg string, opts *cli.Options) error {
+	var cfg *config.Config
+
+	// Detect whether arg is a config file (YAML) or a URL.
+	lower := strings.ToLower(arg)
+	isConfigFile := strings.HasSuffix(lower, ".yaml") || strings.HasSuffix(lower, ".yml")
+	if !isConfigFile {
+		// Also treat it as a config file if it exists on disk and is not a URL.
+		if !strings.Contains(arg, "://") && !strings.Contains(arg, ".") {
+			isConfigFile = false
+		} else if _, err := os.Stat(arg); err == nil && !strings.HasPrefix(arg, "http") {
+			isConfigFile = true
+		}
 	}
-	cfg := &config.Config{Repository: repoURL}
+
+	if isConfigFile {
+		var err error
+		cfg, err = config.Load(arg)
+		if err != nil {
+			return fmt.Errorf("failed to load config: %w", err)
+		}
+		if err := cfg.Validate(); err != nil {
+			return fmt.Errorf("invalid config: %w", err)
+		}
+	} else {
+		repoURL := normalizeRepoURL(arg)
+		if err := config.ValidateURL(repoURL); err != nil {
+			return fmt.Errorf("invalid URL: %w", err)
+		}
+		cfg = &config.Config{Repository: repoURL}
+	}
 
 	src, err := source.NewWithOptions(cfg, source.Options{
 		BaseDir:            cfg.BaseDir,
@@ -271,7 +353,8 @@ func checkReleases(ctx context.Context, repoURL string, opts *cli.Options) error
 		if cacheCommitter, ok := src.(source.CacheCommitter); ok {
 			_ = cacheCommitter.CommitCache()
 		}
-		fmt.Println("UP_TO_DATE")
+		data, _ := json.Marshal(map[string]string{"status": "up_to_date"})
+		fmt.Println(string(data))
 		return nil
 	}
 	if err != nil {
@@ -325,19 +408,20 @@ func checkReleases(ctx context.Context, repoURL string, opts *cli.Options) error
 	publisher := nostrpkg.NewPublisherFromEnv(relaysEnv)
 	existingAsset, relayErr := publisher.CheckExistingAssetAny(ctx, apkInfo.PackageID, version)
 	if relayErr == nil && existingAsset != nil {
-		fmt.Println("UP_TO_DATE")
+		data, _ := json.Marshal(map[string]string{"status": "up_to_date"})
+		fmt.Println(string(data))
 		return nil
 	}
-	// On relay error or no existing asset: report NEW.
 
-	fmt.Printf("NEW %s\n", version)
+	data, _ := json.Marshal(map[string]string{"status": "new", "version": version})
+	fmt.Println(string(data))
 	return nil
 }
 
 
 // runPublish executes the publish workflow.
 func runPublish(ctx context.Context, opts *cli.Options, cfg *config.Config) error {
-	pub, err := workflow.NewPublisher(opts, cfg)
+	pub, err := workflow.NewPublisher(ctx, opts, cfg)
 	if err != nil {
 		return err
 	}
@@ -691,7 +775,8 @@ func checkAPK(ctx context.Context, opts *cli.Options) error {
 		return fmt.Errorf("APK does not support arm64-v8a architecture (found: %v)", apkInfo.Architectures)
 	}
 
-	fmt.Println(apkInfo.PackageID)
+	data, _ := json.Marshal(map[string]string{"package_id": apkInfo.PackageID})
+	fmt.Println(string(data))
 	return nil
 }
 

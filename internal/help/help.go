@@ -65,8 +65,7 @@ func renderURL(s string) string {
 func RootHelp() string {
 	var b strings.Builder
 
-	b.WriteString(ui.RenderLogo())
-	b.WriteString(renderWhite("Publish Android apps to Nostr relays used by Zapstore") + "\n")
+	b.WriteString(renderBold("zsp") + " " + renderWhite("— Publish Android apps to Nostr relays used by Zapstore") + "\n")
 
 	b.WriteString(renderBold("USAGE") + "\n")
 	b.WriteString("  " + renderAccent("zsp") + " <command> [options]\n\n")
@@ -94,8 +93,14 @@ func RootHelp() string {
 	b.WriteString(renderBold("GLOBAL FLAGS") + "\n")
 	b.WriteString("  " + renderAccent("-h, --help") + "      " + renderWhite("Show help") + "\n")
 	b.WriteString("  " + renderAccent("-v, --version") + "   " + renderWhite("Show version") + "\n")
+	b.WriteString("  " + renderAccent("--json") + "          " + renderWhite("Machine-readable output (errors as JSON to stderr, data as JSONL to stdout)") + "\n")
 	b.WriteString("  " + renderAccent("--verbose") + "       " + renderWhite("Debug output") + "\n")
 	b.WriteString("  " + renderAccent("--no-color") + "      " + renderWhite("Disable colored output") + "\n\n")
+
+	b.WriteString(renderBold("EXIT CODES") + "\n")
+	b.WriteString("  " + renderAccent("0") + "   Success\n")
+	b.WriteString("  " + renderAccent("1") + "   Error\n")
+	b.WriteString("  " + renderAccent("130") + " Cancelled (Ctrl+C)\n\n")
 
 	b.WriteString(renderBold("MORE INFO") + "\n")
 	b.WriteString("  " + renderAccent("zsp publish --wizard") + "  " + renderWhite("Interactive wizard to determine best options") + "\n")
@@ -110,8 +115,7 @@ func RootHelp() string {
 func PublishHelp() string {
 	var b strings.Builder
 
-	b.WriteString(ui.RenderLogo())
-	b.WriteString(renderBold("zsp publish") + " " + renderWhite("- Publish APK releases to Nostr relays") + "\n")
+	b.WriteString(renderBold("zsp publish") + " " + renderWhite("— Publish APK releases to Nostr relays") + "\n")
 	b.WriteString("\n")
 
 	b.WriteString(renderBold("USAGE") + "\n")
@@ -140,16 +144,21 @@ func PublishHelp() string {
 
 	// Behavior flags
 	b.WriteString(renderBold("BEHAVIOR FLAGS") + "\n")
-	writeFlag(&b, "-y", "Skip confirmations (auto-yes)")
 	writeFlag(&b, "--offline", "Sign events without uploading/publishing (outputs JSON)")
 	b.WriteString("                            " + renderGreyDark("Events go to stdout, upload manifest to stderr") + "\n")
-	writeFlag(&b, "--quiet", "Minimal output, no prompts (implies -y)")
+	writeFlag(&b, "--quiet", "No prompts, no spinners, auto-yes to all confirmations")
 	writeFlag(&b, "--wizard", "Run interactive wizard (uses existing config as defaults)")
 	writeFlag(&b, "--skip-preview", "Skip the browser preview prompt")
 	writeFlag(&b, "--port <port>", "Custom port for browser preview/signing")
 	writeFlag(&b, "--app-created-at-release", "Use release date for kind 32267 created_at")
 	writeFlag(&b, "--skip-app-event", "Publish only release events, skip kind 32267 app metadata")
 	b.WriteString("                            " + renderGreyDark("Used by indexer after copying developer's 32267") + "\n")
+	b.WriteString("\n")
+
+	// Source behavior flags
+	b.WriteString(renderBold("SOURCE BEHAVIOR FLAGS") + "\n")
+	writeFlag(&b, "--pre-release", "Include pre-releases when fetching the latest release")
+	writeFlag(&b, "--skip-certificate-linking", "Skip certificate-to-identity linking check")
 	b.WriteString("\n")
 
 	// Cache flags
@@ -162,7 +171,10 @@ func PublishHelp() string {
 	// Other flags
 	b.WriteString(renderBold("OTHER FLAGS") + "\n")
 	writeFlag(&b, "--check", "Verify config fetches arm64-v8a APK (exit 0=success)")
-	b.WriteString("                            " + renderGreyDark("Useful for CI/CD validation") + "\n")
+	b.WriteString("                            " + renderGreyDark("Outputs {\"package_id\":\"...\"} on success") + "\n")
+	writeFlag(&b, "--json", "Machine-readable output (implies --no-color, no prompts, no spinners)")
+	b.WriteString("                            " + renderGreyDark("Errors: {\"error\":\"...\"} to stderr; events: JSONL to stdout") + "\n")
+	b.WriteString("                            " + renderGreyDark("Nothing to do: silent exit 0") + "\n")
 	writeFlag(&b, "--verbose", "Debug output")
 	writeFlag(&b, "--no-color", "Disable colored output")
 	writeFlag(&b, "-h, --help", "Show this help")
@@ -196,13 +208,16 @@ func PublishHelp() string {
 	b.WriteString("  " + renderAccent("zsp publish -q zapstore.yaml --offline | nak event wss://relay.zapstore.dev") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # CI/CD mode - no prompts, auto-confirm") + "\n")
-	b.WriteString("  " + renderAccent("zsp publish -y zapstore.yaml") + "\n\n")
+	b.WriteString("  " + renderAccent("zsp publish --quiet zapstore.yaml") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Force re-publish even if unchanged") + "\n")
 	b.WriteString("  " + renderAccent("zsp publish zapstore.yaml --overwrite-release") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Validate config fetches correct APK (CI/CD)") + "\n")
 	b.WriteString("  " + renderAccent("zsp publish --check zapstore.yaml") + "\n\n")
+
+	b.WriteString(renderGreyDark("  # Machine-readable mode (for agents / CI pipelines)") + "\n")
+	b.WriteString("  " + renderAccent("zsp --json publish --quiet zapstore.yaml") + "\n\n")
 
 	// Config section
 	b.WriteString(renderBold("CONFIGURATION") + "\n")
@@ -219,7 +234,12 @@ func PublishHelp() string {
 	b.WriteString("  " + renderAccent("match:") + "           " + renderWhite("'.*arm64.*\\.apk$'") + "\n")
 	b.WriteString("  " + renderAccent("release_notes:") + "   " + renderWhite("./CHANGELOG.md") + "\n\n")
 
-	b.WriteString(renderGreyDark("  Default config file: ") + renderWhite("./zapstore.yaml") + "\n")
+	b.WriteString(renderGreyDark("  Default config file: ") + renderWhite("./zapstore.yaml") + "\n\n")
+
+	b.WriteString(renderBold("EXIT CODES") + "\n")
+	b.WriteString("  " + renderAccent("0") + "   Success (or nothing to do — release already published)\n")
+	b.WriteString("  " + renderAccent("1") + "   Error (config invalid, source unreachable, signing failed, etc.)\n")
+	b.WriteString("  " + renderAccent("130") + " Cancelled (Ctrl+C)\n")
 
 	return b.String()
 }
@@ -228,8 +248,7 @@ func PublishHelp() string {
 func IdentityHelp() string {
 	var b strings.Builder
 
-	b.WriteString(ui.RenderLogo())
-	b.WriteString(renderBold("zsp identity") + " " + renderWhite("- Link your APK signing certificate to your Nostr identity") + "\n")
+	b.WriteString(renderBold("zsp identity") + " " + renderWhite("— Link your APK signing certificate to your Nostr identity") + "\n")
 
 	b.WriteString(renderBold("WHAT IS THIS?") + "\n")
 	b.WriteString(renderWhite("  Links your Android signing key to your Nostr identity.") + "\n")
@@ -260,6 +279,7 @@ func IdentityHelp() string {
 	b.WriteString(renderBold("OTHER FLAGS") + "\n")
 	writeFlag(&b, "--offline", "Output event JSON to stdout instead of publishing")
 	b.WriteString("                            " + renderGreyDark("Event is signed unless SIGN_WITH is npub (unsigned)") + "\n")
+	writeFlag(&b, "--json", "Machine-readable output (errors as JSON to stderr)")
 	writeFlag(&b, "--verbose", "Debug output")
 	writeFlag(&b, "--no-color", "Disable colored output")
 	writeFlag(&b, "-h, --help", "Show this help")
@@ -311,7 +331,12 @@ func IdentityHelp() string {
 	b.WriteString(renderWhite("  2. Signs a message with your certificate's private key") + "\n")
 	b.WriteString(renderWhite("  3. Creates a kind 30509 Nostr event with the proof") + "\n")
 	b.WriteString(renderWhite("  4. Signs the event with your Nostr key") + "\n")
-	b.WriteString(renderWhite("  5. Publishes to relays for others to verify") + "\n")
+	b.WriteString(renderWhite("  5. Publishes to relays for others to verify") + "\n\n")
+
+	b.WriteString(renderBold("EXIT CODES") + "\n")
+	b.WriteString("  " + renderAccent("0") + "   Success\n")
+	b.WriteString("  " + renderAccent("1") + "   Error (file not found, signing failed, relay unreachable, etc.)\n")
+	b.WriteString("  " + renderAccent("130") + " Cancelled (Ctrl+C)\n")
 
 	return b.String()
 }
@@ -320,8 +345,7 @@ func IdentityHelp() string {
 func UtilsHelp() string {
 	var b strings.Builder
 
-	b.WriteString(ui.RenderLogo())
-	b.WriteString(renderBold("zsp utils") + " " + renderWhite("- Operational utilities") + "\n\n")
+	b.WriteString(renderBold("zsp utils") + " " + renderWhite("— Operational utilities") + "\n\n")
 
 	b.WriteString(renderBold("USAGE") + "\n")
 	b.WriteString("  " + renderAccent("zsp utils") + " <operation> [args]\n\n")
@@ -330,7 +354,7 @@ func UtilsHelp() string {
 	writeFlag(&b, "extract-apk <file.apk>", "Extract APK metadata as JSON (stdout)")
 	b.WriteString("                            " + renderGreyDark("Also extracts the app icon to <name>_icon.png") + "\n")
 	writeFlag(&b, "check-releases <repo-url|config>", "Check for new upstream release without publishing")
-	b.WriteString("                                    " + renderGreyDark("Outputs: NEW <version> or UP_TO_DATE") + "\n")
+	b.WriteString("                                    " + renderGreyDark("{\"status\":\"new\",\"version\":\"x.y.z\"} or {\"status\":\"up_to_date\"}") + "\n")
 	b.WriteString("\n")
 
 	b.WriteString(renderBold("EXAMPLES") + "\n\n")
@@ -344,12 +368,18 @@ func UtilsHelp() string {
 	b.WriteString(renderGreyDark("  # Or use a config file") + "\n")
 	b.WriteString("  " + renderAccent("zsp utils check-releases zapstore.yaml") + "\n\n")
 
-	b.WriteString(renderGreyDark("  # Use in scripts to detect new versions") + "\n")
-	b.WriteString("  " + renderAccent("result=$(zsp utils check-releases https://github.com/owner/repo)") + "\n")
-	b.WriteString("  " + renderAccent("if [[ $result == NEW* ]]; then version=${result#NEW }; fi") + "\n\n")
+	b.WriteString(renderGreyDark("  # Use in scripts to detect new versions (output is always JSON)") + "\n")
+	b.WriteString("  " + renderAccent("zsp utils check-releases https://github.com/owner/repo | jq -r .status") + "\n\n")
+
+	b.WriteString(renderBold("FLAGS") + "\n")
+	writeFlag(&b, "--pre-release", "Include pre-releases (check-releases)")
+	writeFlag(&b, "--json", "Machine-readable output (errors as JSON to stderr)")
+	writeFlag(&b, "--verbose", "Debug output")
+	writeFlag(&b, "--no-color", "Disable colored output")
+	b.WriteString("\n")
 
 	b.WriteString(renderBold("EXIT CODES") + "\n")
-	b.WriteString("  " + renderAccent("0") + "   Success (NEW or UP_TO_DATE for check-releases)\n")
+	b.WriteString("  " + renderAccent("0") + "   Success (check-releases: JSON result on stdout)\n")
 	b.WriteString("  " + renderAccent("1") + "   Error (source unreachable, no releases, invalid config)\n")
 
 	return b.String()

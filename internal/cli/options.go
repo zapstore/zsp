@@ -26,6 +26,7 @@ type GlobalOptions struct {
 	NoColor bool
 	Version bool
 	Help    bool
+	JSON    bool // Machine-readable output: errors as {"error":"..."} to stderr, events/results as JSONL to stdout
 }
 
 // PublishOptions holds flags specific to the publish subcommand.
@@ -41,9 +42,8 @@ type PublishOptions struct {
 	Channel string // Release channel: main (default), beta, nightly, dev
 
 	// Behavior flags
-	Yes                 bool
 	Offline             bool // Sign events without uploading/publishing (outputs to stdout)
-	Quiet               bool
+	Quiet               bool // No prompts, no spinners, auto-yes to all confirmations
 	SkipPreview         bool
 	OverwriteRelease    bool
 	IncludePreReleases  bool
@@ -146,6 +146,15 @@ func ParseCommand() *Options {
 		}
 		first = args[0]
 	}
+	if first == "--json" {
+		opts.Global.JSON = true
+		args = args[1:]
+		if len(args) == 0 {
+			opts.Global.Help = true
+			return opts
+		}
+		first = args[0]
+	}
 
 	// Dispatch to subcommand
 	switch first {
@@ -180,10 +189,9 @@ func parsePublishFlags(opts *Options, args []string) {
 	fs.StringVar(&opts.Publish.Match, "match", "", "Regex pattern to filter APK assets")
 	fs.StringVar(&opts.Publish.Commit, "commit", "", "Git commit hash for reproducible builds")
 	fs.StringVar(&opts.Publish.Channel, "channel", "main", "Release channel: main, beta, nightly, dev")
-	fs.BoolVar(&opts.Publish.Yes, "y", false, "Skip confirmations (auto-yes)")
 	fs.BoolVar(&opts.Publish.Offline, "offline", false, "Sign events without uploading/publishing (outputs JSON to stdout)")
-	fs.BoolVar(&opts.Publish.Quiet, "quiet", false, "Minimal output, no prompts (implies -y)")
-	fs.BoolVar(&opts.Publish.Quiet, "q", false, "Minimal output, no prompts (alias)")
+	fs.BoolVar(&opts.Publish.Quiet, "quiet", false, "No prompts, no spinners, auto-yes to all confirmations")
+	fs.BoolVar(&opts.Publish.Quiet, "q", false, "Alias for --quiet")
 	fs.BoolVar(&opts.Global.Verbose, "verbose", false, "Debug output")
 	fs.BoolVar(&opts.Global.NoColor, "no-color", false, "Disable colored output")
 	fs.BoolVar(&opts.Publish.SkipPreview, "skip-preview", false, "Skip the browser preview prompt")
@@ -196,6 +204,7 @@ func parsePublishFlags(opts *Options, args []string) {
 	fs.BoolVar(&opts.Publish.SkipAppEvent, "skip-app-event", false, "Publish only release events, skip app metadata (kind 32267)")
 	fs.BoolVar(&opts.Publish.SkipCertificateLinking, "skip-certificate-linking", false, "Skip certificate-to-identity linking check")
 	fs.BoolVar(&opts.Publish.Check, "check", false, "Verify config fetches arm64-v8a APK (exit 0=success)")
+	fs.BoolVar(&opts.Global.JSON, "json", false, "Machine-readable output (errors as JSON to stderr, events as JSONL to stdout)")
 
 	// Help flag
 	var showHelp bool
@@ -219,11 +228,6 @@ func parsePublishFlags(opts *Options, args []string) {
 
 	opts.Publish.Metadata = metadataFlags
 	opts.Args = fs.Args()
-
-	// Quiet implies yes
-	if opts.Publish.Quiet {
-		opts.Publish.Yes = true
-	}
 }
 
 // parseIdentityFlags parses flags for the identity subcommand.
@@ -240,6 +244,7 @@ func parseIdentityFlags(opts *Options, args []string) {
 	fs.BoolVar(&opts.Identity.Offline, "offline", false, "Output event JSON to stdout instead of publishing")
 	fs.BoolVar(&opts.Global.Verbose, "verbose", false, "Debug output")
 	fs.BoolVar(&opts.Global.NoColor, "no-color", false, "Disable colored output")
+	fs.BoolVar(&opts.Global.JSON, "json", false, "Machine-readable output (errors as JSON to stderr)")
 
 	// Help flag
 	var showHelp bool
@@ -288,7 +293,24 @@ func parseUtilsArgs(opts *Options, args []string) {
 	}
 
 	opts.Utils.Operation = args[0]
-	opts.Args = args[1:]
+	remaining := args[1:]
+
+	// Parse flags for the operation
+	fs := flag.NewFlagSet("utils "+opts.Utils.Operation, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	fs.BoolVar(&opts.Publish.IncludePreReleases, "pre-release", false, "Include pre-releases when fetching the latest release")
+	fs.BoolVar(&opts.Global.Verbose, "verbose", false, "Debug output")
+	fs.BoolVar(&opts.Global.NoColor, "no-color", false, "Disable colored output")
+	fs.BoolVar(&opts.Global.JSON, "json", false, "Machine-readable output (errors as JSON to stderr)")
+
+	// Reorder so flags come before positional args
+	reorderedArgs := reorderArgsForFlagSet(remaining, map[string]bool{})
+	if err := fs.Parse(reorderedArgs); err != nil {
+		opts.Global.Help = true
+		return
+	}
+
+	opts.Args = fs.Args()
 }
 
 // reorderArgsForFlagSet moves flags before positional arguments.
@@ -312,14 +334,16 @@ func reorderArgsForFlagSet(args []string, valuedFlags map[string]bool) []string 
 	return append(flags, positional...)
 }
 
-// IsInteractive returns true if the CLI should be interactive (for publish).
-func (o *PublishOptions) IsInteractive() bool {
-	return !o.Quiet && !o.Yes
+// IsInteractive returns true if the CLI should show interactive prompts.
+// False when --quiet or --json is active.
+func (o *Options) IsInteractive() bool {
+	return !o.Publish.Quiet && !o.Global.JSON
 }
 
-// ShouldShowSpinners returns true if spinners/progress should be shown (for publish).
-func (o *PublishOptions) ShouldShowSpinners() bool {
-	return !o.Quiet
+// ShouldShowSpinners returns true if spinners/progress should be shown.
+// False when --quiet or --json is active (both require clean stderr).
+func (o *Options) ShouldShowSpinners() bool {
+	return !o.Publish.Quiet && !o.Global.JSON
 }
 
 // ValidateChannel returns an error if the channel is invalid.
@@ -329,16 +353,6 @@ func (o *PublishOptions) ValidateChannel() error {
 		return fmt.Errorf("invalid --channel %q: must be one of main, beta, nightly, dev", o.Channel)
 	}
 	return nil
-}
-
-// IsInteractive returns true if the CLI should be interactive (for identity).
-func (o *IdentityOptions) IsInteractive() bool {
-	return true
-}
-
-// ShouldShowSpinners returns true if spinners/progress should be shown (for identity).
-func (o *IdentityOptions) ShouldShowSpinners() bool {
-	return true
 }
 
 // ParseExpiryDuration parses a human-friendly duration string.

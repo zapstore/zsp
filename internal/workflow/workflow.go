@@ -9,10 +9,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"strconv"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,7 +51,7 @@ type Publisher struct {
 }
 
 // NewPublisher creates a new publish workflow.
-func NewPublisher(opts *cli.Options, cfg *config.Config) (*Publisher, error) {
+func NewPublisher(ctx context.Context, opts *cli.Options, cfg *config.Config) (*Publisher, error) {
 	// Create source with base directory for relative paths
 	src, err := source.NewWithOptions(cfg, source.Options{
 		BaseDir:            cfg.BaseDir,
@@ -62,15 +62,58 @@ func NewPublisher(opts *cli.Options, cfg *config.Config) (*Publisher, error) {
 		return nil, fmt.Errorf("failed to create source: %w", err)
 	}
 
-	// Get Blossom server URL
-	blossomURL := config.GetEnv("BLOSSOM_URL")
+	// RELAY_URLS env serves as bootstrap relays for kind:10222 lookups.
+	// If not set, DefaultBootstrapRelays are used for community resolution.
+	relaysEnv := config.GetEnv("RELAY_URLS")
+	bootstrapRelays := splitRelays(relaysEnv)
+
+	// BLOSSOM_URL env is an explicit operator override; takes precedence over
+	// anything resolved from a community event.
+	blossomEnv := config.GetEnv("BLOSSOM_URL")
+
+	blossomURL := blossomEnv
+	var publisher *nostr.Publisher
+
+	// Resolve community infra from kind:10222 for any non-default community.
+	// Skip in offline mode: there is nothing to publish to, so knowing the
+	// community's relay and Blossom targets is not needed.
+	if !opts.Publish.Offline {
+		communities := cfg.Communities
+		if len(communities) == 0 {
+			communities = []string{nostr.DefaultCommunity}
+		}
+
+		commCfg, err := nostr.ResolveCommunityConfigs(ctx, communities, bootstrapRelays)
+		if err != nil {
+			// Non-fatal: warn and fall back to defaults so a single unreachable
+			// bootstrap relay does not block publishing.
+			if !opts.Publish.Quiet && !opts.Global.JSON {
+				fmt.Fprintf(os.Stderr, "warning: community resolution failed: %v\n", err)
+			}
+		}
+
+		if commCfg != nil {
+			// Use relays from the community event as the publish targets.
+			if len(commCfg.RelayURLs) > 0 {
+				publisher = nostr.NewPublisher(commCfg.RelayURLs)
+			}
+			// Use community Blossom server only when the operator has not set one.
+			if blossomURL == "" && commCfg.BlossomURL != "" {
+				blossomURL = commCfg.BlossomURL
+			}
+		}
+	}
+
+	// Fall back to env-configured (or default) relays when community resolution
+	// either was skipped, returned no results, or yielded no relay URLs.
+	if publisher == nil {
+		publisher = nostr.NewPublisherFromEnv(relaysEnv)
+	}
+
+	// Fall back to the Zapstore CDN when nothing else provided a Blossom URL.
 	if blossomURL == "" {
 		blossomURL = blossom.DefaultServer
 	}
-
-	// Create relay publisher
-	relaysEnv := config.GetEnv("RELAY_URLS")
-	publisher := nostr.NewPublisherFromEnv(relaysEnv)
 
 	return &Publisher{
 		opts:       opts,
@@ -79,6 +122,22 @@ func NewPublisher(opts *cli.Options, cfg *config.Config) (*Publisher, error) {
 		publisher:  publisher,
 		blossomURL: blossomURL,
 	}, nil
+}
+
+// splitRelays splits a comma-separated relay URL string into a slice.
+// Returns nil for an empty string.
+func splitRelays(env string) []string {
+	if env == "" {
+		return nil
+	}
+	var out []string
+	for _, u := range strings.Split(env, ",") {
+		u = strings.TrimSpace(u)
+		if u != "" {
+			out = append(out, u)
+		}
+	}
+	return out
 }
 
 // Execute runs the complete publish workflow.
@@ -90,7 +149,7 @@ func (p *Publisher) Execute(ctx context.Context) error {
 	}
 
 	var steps *ui.StepTracker
-	if p.opts.Publish.ShouldShowSpinners() {
+	if p.opts.ShouldShowSpinners() {
 		steps = ui.NewStepTracker(totalSteps)
 	}
 
@@ -177,7 +236,7 @@ func (p *Publisher) fetchRelease(ctx context.Context) (*source.Release, error) {
 	if err == source.ErrNotModified {
 		if provider, ok := p.src.(source.CachedReleaseProvider); ok {
 			if cached := provider.GetCachedRelease(); cached != nil {
-				if p.opts.Publish.ShouldShowSpinners() {
+				if p.opts.ShouldShowSpinners() {
 					ui.PrintSuccess("Release unchanged, using cached data")
 				}
 				return cached, nil
@@ -195,7 +254,7 @@ func (p *Publisher) fetchRelease(ctx context.Context) (*source.Release, error) {
 		return nil, fmt.Errorf("failed to fetch release: %w", err)
 	}
 
-	if p.opts.Publish.ShouldShowSpinners() {
+	if p.opts.ShouldShowSpinners() {
 		if release.Version != "" {
 			ui.PrintSuccess(fmt.Sprintf("Found release %s with %d assets", release.Version, len(release.Assets)))
 		} else {
@@ -245,7 +304,7 @@ func (p *Publisher) selectAPK(ctx context.Context) (*source.Asset, error) {
 
 	// Single APK - use it
 	if len(apkAssets) == 1 {
-		if p.opts.Publish.ShouldShowSpinners() {
+		if p.opts.ShouldShowSpinners() {
 			ui.PrintSuccess(fmt.Sprintf("Selected %s", apkAssets[0].Name))
 		}
 		return apkAssets[0], nil
@@ -262,12 +321,12 @@ func (p *Publisher) selectAPK(ctx context.Context) (*source.Asset, error) {
 	}
 
 	// Interactive selection if not quiet mode
-	if p.opts.Publish.IsInteractive() && len(ranked) > 1 {
+	if p.opts.IsInteractive() && len(ranked) > 1 {
 		return selectAPKInteractive(ranked)
 	}
 
 	// Auto-select best match
-	if p.opts.Publish.ShouldShowSpinners() {
+	if p.opts.ShouldShowSpinners() {
 		ui.PrintSuccess(fmt.Sprintf("Selected %s (best match)", ranked[0].Asset.Name))
 	}
 	return ranked[0].Asset, nil
@@ -296,7 +355,7 @@ func (p *Publisher) downloadAndParseAPK(ctx context.Context) error {
 		return fmt.Errorf("APK does not support arm64-v8a architecture (found: %v)", p.apkInfo.Architectures)
 	}
 
-	if p.opts.Publish.ShouldShowSpinners() {
+	if p.opts.ShouldShowSpinners() {
 		ui.PrintSuccess("Parsed and verified APK")
 	}
 
@@ -313,7 +372,7 @@ func (p *Publisher) downloadAndParseAPK(ctx context.Context) error {
 	}
 
 	// Display APK summary
-	if p.opts.Publish.ShouldShowSpinners() {
+	if p.opts.ShouldShowSpinners() {
 		ui.PrintSectionHeader("APK Summary")
 		ui.PrintKeyValue("Name", p.apkInfo.Label)
 		ui.PrintKeyValue("App ID", p.apkInfo.PackageID)
@@ -328,7 +387,7 @@ func (p *Publisher) downloadAndParseAPK(ctx context.Context) error {
 // getAPKPath returns the local path to the APK, downloading if necessary.
 func (p *Publisher) getAPKPath(ctx context.Context) (string, error) {
 	if p.selectedAsset.LocalPath != "" {
-		if p.opts.Publish.ShouldShowSpinners() {
+		if p.opts.ShouldShowSpinners() {
 			ui.PrintSuccess("Using local APK file")
 		}
 		return p.selectedAsset.LocalPath, nil
@@ -339,7 +398,7 @@ func (p *Publisher) getAPKPath(ctx context.Context) (string, error) {
 		_ = source.DeleteCachedDownload(p.selectedAsset.URL, p.selectedAsset.Name)
 	} else if cachedPath := source.GetCachedDownload(p.selectedAsset.URL, p.selectedAsset.Name); cachedPath != "" {
 		p.selectedAsset.LocalPath = cachedPath
-		if p.opts.Publish.ShouldShowSpinners() {
+		if p.opts.ShouldShowSpinners() {
 			ui.PrintSuccess("Using cached APK")
 		}
 		return cachedPath, nil
@@ -352,7 +411,7 @@ func (p *Publisher) getAPKPath(ctx context.Context) (string, error) {
 
 	var tracker *ui.DownloadTracker
 	var progressCallback source.DownloadProgress
-	if p.opts.Publish.ShouldShowSpinners() {
+	if p.opts.ShouldShowSpinners() {
 		tracker = ui.NewDownloadTracker(fmt.Sprintf("Downloading %s", p.selectedAsset.Name), p.selectedAsset.Size)
 		progressCallback = tracker.Callback()
 	}
@@ -378,13 +437,13 @@ func (p *Publisher) checkExistingAsset(ctx context.Context, pubkey string) error
 	existingAsset, err := p.publisher.CheckExistingAsset(ctx, pubkey, p.apkInfo.PackageID, p.apkInfo.VersionName)
 	if err != nil {
 		if p.opts.Global.Verbose {
-			fmt.Printf("  Could not check relays: %v\n", err)
+			fmt.Fprintf(os.Stderr, "  Could not check relays: %v\n", err)
 		}
 		return nil
 	}
 
 	if existingAsset != nil {
-		if p.opts.Publish.ShouldShowSpinners() {
+		if p.opts.ShouldShowSpinners() {
 			ui.PrintWarning(fmt.Sprintf("Asset %s@%s already exists on %s",
 				p.apkInfo.PackageID, p.apkInfo.VersionName, existingAsset.RelayURL))
 			fmt.Println("  Use --overwrite-release to publish anyway.")
@@ -406,10 +465,10 @@ func (p *Publisher) gatherMetadata(ctx context.Context) error {
 			if err := p.fetchExternalMetadata(ctx); err != nil {
 				return err
 			}
-		} else if p.opts.Publish.ShouldShowSpinners() {
+		} else if p.opts.ShouldShowSpinners() {
 			ui.PrintInfo("Skipping metadata fetch (--skip-metadata)")
 		}
-	} else if p.opts.Publish.ShouldShowSpinners() {
+	} else if p.opts.ShouldShowSpinners() {
 		ui.PrintInfo("Skipping external metadata fetch (--offline)")
 	}
 
@@ -417,7 +476,7 @@ func (p *Publisher) gatherMetadata(ctx context.Context) error {
 	p.releaseNotes = p.release.Changelog
 	if p.cfg.ReleaseNotes != "" {
 		if p.isOffline() && isRemoteURL(p.cfg.ReleaseNotes) {
-			if p.opts.Publish.ShouldShowSpinners() {
+			if p.opts.ShouldShowSpinners() {
 				ui.PrintInfo("Skipping remote release notes (--offline)")
 			}
 		} else {
@@ -444,7 +503,7 @@ func (p *Publisher) fetchExternalMetadata(ctx context.Context) error {
 	}
 
 	if len(metadataSources) == 0 {
-		if p.opts.Publish.ShouldShowSpinners() {
+		if p.opts.ShouldShowSpinners() {
 			ui.PrintInfo("No external metadata sources configured")
 		}
 		return nil
@@ -494,7 +553,7 @@ func (p *Publisher) preDownloadImages(ctx context.Context) error {
 // handlePreview shows the browser preview if requested.
 func (p *Publisher) handlePreview(ctx context.Context) error {
 	// Skip preview if metadata fetch was skipped (may have incomplete data)
-	if p.opts.Publish.Quiet || p.opts.Publish.Yes || p.opts.Publish.SkipPreview || p.opts.Publish.SkipMetadata {
+	if p.opts.Publish.Quiet || p.opts.Global.JSON || p.opts.Publish.SkipPreview || p.opts.Publish.SkipMetadata {
 		return nil
 	}
 
@@ -644,7 +703,7 @@ func (p *Publisher) createSigner(ctx context.Context) error {
 
 	// Determine port for browser signer
 	signerPort := p.browserPort
-	if signWith == "browser" && p.browserPort == 0 && p.opts.Publish.IsInteractive() {
+	if signWith == "browser" && p.browserPort == 0 && p.opts.IsInteractive() {
 		port, err := ui.ConfirmWithPortYesOnly("Browser signing port?", nostr.DefaultNIP07Port)
 		if err != nil {
 			return fmt.Errorf("prompt failed: %w", err)
@@ -692,7 +751,7 @@ func (p *Publisher) checkAndLinkCertificate(ctx context.Context) error {
 	if !isNpub {
 		event, err := p.publisher.FetchIdentityProof(ctx, pubkey, certHash)
 		if err != nil {
-			if p.opts.Publish.ShouldShowSpinners() {
+			if p.opts.ShouldShowSpinners() {
 				ui.PrintWarning(fmt.Sprintf("Could not check certificate link: %v", err))
 			}
 			return nil
@@ -701,7 +760,7 @@ func (p *Publisher) checkAndLinkCertificate(ctx context.Context) error {
 		if event != nil {
 			proof, parseErr := identity.ParseIdentityProofFromEvent(event)
 			if parseErr == nil && !proof.IsExpired() {
-				if p.opts.Publish.ShouldShowSpinners() {
+				if p.opts.ShouldShowSpinners() {
 					ui.PrintSuccess(fmt.Sprintf("APK signing certificate linked to your Nostr identity ✓ (valid until %s)", proof.ExpiryTime().Format("2 Jan 2006")))
 				}
 				return nil
@@ -742,7 +801,7 @@ func (p *Publisher) checkAndLinkCertificate(ctx context.Context) error {
 	if isNpub {
 		// Attach unsigned to the event set; SignEventSet will fill in pubkey+ID via NpubSigner.
 		p.events.IdentityProof = proofEvent
-		if p.opts.Publish.ShouldShowSpinners() {
+		if p.opts.ShouldShowSpinners() {
 			ui.PrintSuccess("Identity proof event added to output (sign externally)")
 		}
 		return nil
@@ -769,7 +828,7 @@ func (p *Publisher) checkAndLinkCertificate(ctx context.Context) error {
 		return fmt.Errorf("identity proof was not accepted by any relay")
 	}
 
-	if p.opts.Publish.ShouldShowSpinners() {
+	if p.opts.ShouldShowSpinners() {
 		ui.PrintSuccess("Certificate linked to identity")
 	}
 	return nil
@@ -1014,7 +1073,7 @@ func (p *Publisher) outputOffline() error {
 	// Output events to stdout (JSON, one per line for piping to nak)
 	OutputEventsToStdout(p.events)
 
-	// Output upload manifest to stderr
+	// Output upload manifest to stderr (human text or JSONL depending on --json)
 	p.outputUploadManifest()
 
 	return nil
@@ -1065,7 +1124,7 @@ func (p *Publisher) outputUploadManifest() {
 	}
 
 	// Output manifest to stderr
-	OutputUploadManifest(entries, p.blossomURL)
+	OutputUploadManifest(entries, p.blossomURL, p.opts)
 }
 
 // resolveIconPath returns the path to the icon file, saving APK-extracted icons to temp.
@@ -1132,12 +1191,12 @@ func extractHashFromBlossomURL(url string) string {
 
 // outputNpubEvents outputs unsigned events for npub signer.
 func (p *Publisher) outputNpubEvents() error {
-	if p.opts.Publish.ShouldShowSpinners() {
+	if p.opts.ShouldShowSpinners() {
 		fmt.Println()
 		ui.PrintInfo("npub mode - outputting unsigned events for external signing")
 	}
 	OutputEvents(p.events)
-	if p.opts.Publish.ShouldShowSpinners() {
+	if p.opts.ShouldShowSpinners() {
 		ui.PrintCompletionSummary(true, "Unsigned events generated - sign externally before publishing")
 	}
 	return nil
@@ -1146,7 +1205,7 @@ func (p *Publisher) outputNpubEvents() error {
 // publishToRelays publishes events to configured relays.
 func (p *Publisher) publishToRelays(ctx context.Context) error {
 	// Confirm before publishing
-	if !p.opts.Publish.Yes {
+	if !p.opts.Publish.Quiet && !p.opts.Global.JSON {
 		isClosedSource := p.cfg.Repository == ""
 		confirmed, err := confirmPublish(p.events, p.publisher.RelayURLs(), p.apkInfo.SHA256, isClosedSource)
 		if err != nil {
@@ -1161,7 +1220,7 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 
 	// Publish with spinner
 	var publishSpinner *ui.Spinner
-	if p.opts.Publish.ShouldShowSpinners() {
+	if p.opts.ShouldShowSpinners() {
 		publishSpinner = ui.NewSpinner(fmt.Sprintf("Publishing to %d relays...", len(p.publisher.RelayURLs())))
 		publishSpinner.Start()
 	}
@@ -1222,7 +1281,7 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 	}
 
 	// Print completion summary
-	if p.opts.Publish.ShouldShowSpinners() {
+	if p.opts.ShouldShowSpinners() {
 		if allSuccess {
 			ui.PrintCompletionSummary(true, fmt.Sprintf("Published %s v%s to %s",
 				p.apkInfo.PackageID, p.apkInfo.VersionName, strings.Join(p.publisher.RelayURLs(), ", ")))
@@ -1232,8 +1291,13 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 	}
 
 	// Show zapstore.dev URL if the app was successfully published to relay.zapstore.dev
-	if allSuccess && !p.opts.Publish.Quiet {
+	if allSuccess && !p.opts.Publish.Quiet && !p.opts.Global.JSON {
 		p.showZapstoreURL(results)
+	}
+
+	// In JSON mode, emit the signed events as JSONL (same format as --offline)
+	if p.opts.Global.JSON {
+		OutputEventsToStdout(p.events)
 	}
 
 	return nil

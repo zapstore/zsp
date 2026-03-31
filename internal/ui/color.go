@@ -2,6 +2,8 @@
 package ui
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 
@@ -272,6 +274,13 @@ func ColorizeJSON(jsonStr string) string {
 	}
 
 	return string(result)
+}
+
+// PrintJSONError writes {"error": "<message>"} to stderr. Use when --json is active.
+func PrintJSONError(err error) {
+	msg := SanitizeErrorMessage(err)
+	data, _ := json.Marshal(map[string]string{"error": msg})
+	fmt.Fprintln(os.Stderr, string(data))
 }
 
 // SanitizeErrorMessage redacts potentially sensitive path information from error messages.

@@ -17,7 +17,7 @@ import (
 // Returns the result and any error from the function.
 func WithSpinner[T any](opts *cli.Options, message string, fn func() (T, error)) (T, error) {
 	var zero T
-	if !opts.Publish.ShouldShowSpinners() {
+	if !opts.ShouldShowSpinners() {
 		return fn()
 	}
 
@@ -36,7 +36,7 @@ func WithSpinner[T any](opts *cli.Options, message string, fn func() (T, error))
 
 // WithSpinnerMsg executes a function with spinner feedback and custom success message.
 func WithSpinnerMsg(opts *cli.Options, message string, fn func() error, successMsg func(error) string) error {
-	if !opts.Publish.ShouldShowSpinners() {
+	if !opts.ShouldShowSpinners() {
 		return fn()
 	}
 
@@ -239,8 +239,23 @@ func outputEventLine(event any) {
 }
 
 // OutputUploadManifest outputs the upload manifest to stderr.
-func OutputUploadManifest(entries []UploadManifestEntry, blossomServer string) {
+// In JSON mode, each entry is emitted as a JSONL object with type="upload".
+func OutputUploadManifest(entries []UploadManifestEntry, blossomServer string, opts *cli.Options) {
 	if len(entries) == 0 {
+		return
+	}
+
+	if opts.Global.JSON {
+		for _, e := range entries {
+			data, _ := json.Marshal(map[string]string{
+				"type":        "upload",
+				"description": e.Description,
+				"file_path":   e.FilePath,
+				"sha256":      e.SHA256,
+				"blossom_url": e.BlossomURL,
+			})
+			fmt.Fprintln(os.Stderr, string(data))
+		}
 		return
 	}
 
