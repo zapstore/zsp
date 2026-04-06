@@ -147,6 +147,9 @@ func (s *NIP07Signer) SignBatch(ctx context.Context, events []*nostr.Event) erro
 }
 
 func (s *NIP07Signer) Close() error {
+	if s == nil {
+		return nil
+	}
 	s.mu.Lock()
 	s.shouldClose = true
 	s.mu.Unlock()

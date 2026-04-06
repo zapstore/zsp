@@ -711,13 +711,13 @@ func (p *Publisher) createSigner(ctx context.Context) error {
 		signerPort = port
 	}
 
-	var err error
-	p.signer, err = nostr.NewSignerWithOptions(ctx, signWith, nostr.SignerOptions{
+	signer, err := nostr.NewSignerWithOptions(ctx, signWith, nostr.SignerOptions{
 		Port: signerPort,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create signer: %w", err)
 	}
+	p.signer = signer
 
 	if p.opts.Global.Verbose {
 		pubkey := p.signer.PublicKey()

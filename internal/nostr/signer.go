@@ -145,6 +145,9 @@ func (s *NsecSigner) Sign(ctx context.Context, event *nostr.Event) error {
 // Setting to empty string allows the original to be garbage collected sooner
 // and reduces the window of exposure.
 func (s *NsecSigner) Close() error {
+	if s == nil {
+		return nil
+	}
 	s.privateKey = ""
 	return nil
 }
