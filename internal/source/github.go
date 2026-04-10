@@ -40,6 +40,7 @@ type GitHub struct {
 	cacheDir  string
 	SkipCache          bool // Set to true to bypass ETag cache (--overwrite-release)
 	IncludePreReleases bool // Set to true to include pre-releases (--pre-release)
+	SkipDownloadCache  bool // Set to true to skip saving APKs to download cache
 
 	// pending holds cache data from the last fetch, not yet committed to disk.
 	// Call CommitCache() after successful publishing to persist it.
@@ -440,11 +441,12 @@ func (g *GitHub) Download(ctx context.Context, asset *Asset, destDir string, pro
 		return "", fmt.Errorf("failed to write file: %w", err)
 	}
 
-	// Save to download cache (best-effort, ignore errors)
-	if cachedPath, err := SaveToDownloadCache(asset.URL, asset.Name, destPath); err == nil {
-		// Use cached path instead of temp path
-		os.Remove(destPath)
-		destPath = cachedPath
+	// Save to download cache (best-effort, ignore errors) unless skipped
+	if !g.SkipDownloadCache {
+		if cachedPath, err := SaveToDownloadCache(asset.URL, asset.Name, destPath); err == nil {
+			os.Remove(destPath)
+			destPath = cachedPath
+		}
 	}
 
 	// Update asset with local path

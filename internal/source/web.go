@@ -23,10 +23,11 @@ import (
 
 // Web implements Source for web scraping with version extraction.
 type Web struct {
-	cfg       *config.Config
-	client    *http.Client
-	cacheDir  string
-	SkipCache bool // Set to true to bypass version/HTTP cache
+	cfg               *config.Config
+	client            *http.Client
+	cacheDir          string
+	SkipCache         bool // Set to true to bypass version/HTTP cache
+	SkipDownloadCache bool // Set to true to skip saving APKs to download cache
 
 	// pendingCache holds the cache from the last fetch, not yet committed to disk.
 	// Call CommitCache() after successful publishing to persist it.
@@ -702,10 +703,12 @@ func (w *Web) Download(ctx context.Context, asset *Asset, destDir string, progre
 		return "", fmt.Errorf("failed to write file: %w", err)
 	}
 
-	// Save to download cache (best-effort, ignore errors)
-	if cachedPath, err := SaveToDownloadCache(asset.URL, asset.Name, destPath); err == nil {
-		os.Remove(destPath)
-		destPath = cachedPath
+	// Save to download cache (best-effort, ignore errors) unless skipped
+	if !w.SkipDownloadCache {
+		if cachedPath, err := SaveToDownloadCache(asset.URL, asset.Name, destPath); err == nil {
+			os.Remove(destPath)
+			destPath = cachedPath
+		}
 	}
 
 	asset.LocalPath = destPath

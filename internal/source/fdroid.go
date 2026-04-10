@@ -28,11 +28,12 @@ type fdroidIndexCache struct {
 // FDroid implements Source for F-Droid compatible repositories.
 // Supports: f-droid.org, IzzyOnDroid (apt.izzysoft.de), and other F-Droid repos.
 type FDroid struct {
-	cfg      *config.Config
-	repoInfo *config.FDroidRepoInfo
-	client   *http.Client
-	cacheDir string
-	SkipCache bool
+	cfg               *config.Config
+	repoInfo          *config.FDroidRepoInfo
+	client            *http.Client
+	cacheDir          string
+	SkipCache         bool
+	SkipDownloadCache bool // Set to true to skip saving APKs to download cache
 
 	// pending holds cache data from the last fetch, not yet committed to disk.
 	pending *fdroidIndexCache
@@ -393,10 +394,12 @@ func (f *FDroid) Download(ctx context.Context, asset *Asset, destDir string, pro
 		return "", fmt.Errorf("failed to write file: %w", err)
 	}
 
-	// Save to download cache (best-effort, ignore errors)
-	if cachedPath, err := SaveToDownloadCache(asset.URL, asset.Name, destPath); err == nil {
-		os.Remove(destPath)
-		destPath = cachedPath
+	// Save to download cache (best-effort, ignore errors) unless skipped
+	if !f.SkipDownloadCache {
+		if cachedPath, err := SaveToDownloadCache(asset.URL, asset.Name, destPath); err == nil {
+			os.Remove(destPath)
+			destPath = cachedPath
+		}
 	}
 
 	asset.LocalPath = destPath

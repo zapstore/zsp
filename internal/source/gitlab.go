@@ -22,10 +22,11 @@ var gitlabArchRegex = regexp.MustCompile(`\((arm64-v8a|armeabi-v7a|arm|x86_64|x8
 // GitLab implements Source for GitLab releases.
 // Supports both gitlab.com and self-hosted GitLab instances.
 type GitLab struct {
-	cfg       *config.Config
-	baseURL   string // e.g., "https://gitlab.com" or self-hosted URL
-	projectID string // URL-encoded project path (e.g., "user%2Frepo")
-	client    *http.Client
+	cfg               *config.Config
+	baseURL           string // e.g., "https://gitlab.com" or self-hosted URL
+	projectID         string // URL-encoded project path (e.g., "user%2Frepo")
+	client            *http.Client
+	SkipDownloadCache bool // Set to true to skip saving APKs to download cache
 }
 
 // NewGitLab creates a new GitLab source.
@@ -289,10 +290,12 @@ func (g *GitLab) Download(ctx context.Context, asset *Asset, destDir string, pro
 		return "", fmt.Errorf("failed to write file: %w", err)
 	}
 
-	// Save to download cache (best-effort, ignore errors)
-	if cachedPath, err := SaveToDownloadCache(asset.URL, asset.Name, destPath); err == nil {
-		os.Remove(destPath)
-		destPath = cachedPath
+	// Save to download cache (best-effort, ignore errors) unless skipped
+	if !g.SkipDownloadCache {
+		if cachedPath, err := SaveToDownloadCache(asset.URL, asset.Name, destPath); err == nil {
+			os.Remove(destPath)
+			destPath = cachedPath
+		}
 	}
 
 	asset.LocalPath = destPath

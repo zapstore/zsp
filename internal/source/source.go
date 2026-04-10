@@ -197,6 +197,10 @@ type Options struct {
 
 	// IncludePreReleases includes pre-releases when fetching the latest release (--pre-release).
 	IncludePreReleases bool
+
+	// SkipDownloadCache skips saving downloaded APKs to the download cache.
+	// Used in --quiet mode and for transient operations like --check.
+	SkipDownloadCache bool
 }
 
 // New creates a new source based on the config.
@@ -222,24 +226,37 @@ func NewWithOptions(cfg *config.Config, opts Options) (Source, error) {
 		}
 		gh.SkipCache = opts.SkipCache
 		gh.IncludePreReleases = opts.IncludePreReleases
+		gh.SkipDownloadCache = opts.SkipDownloadCache
 		return gh, nil
 	case config.SourceGitLab:
-		return NewGitLab(cfg)
+		gl, err := NewGitLab(cfg)
+		if err != nil {
+			return nil, err
+		}
+		gl.SkipDownloadCache = opts.SkipDownloadCache
+		return gl, nil
 	case config.SourceGitea:
 		gt, err := NewGitea(cfg)
 		if err != nil {
 			return nil, err
 		}
 		gt.IncludePreReleases = opts.IncludePreReleases
+		gt.SkipDownloadCache = opts.SkipDownloadCache
 		return gt, nil
 	case config.SourceFDroid:
-		return NewFDroid(cfg)
+		fd, err := NewFDroid(cfg)
+		if err != nil {
+			return nil, err
+		}
+		fd.SkipDownloadCache = opts.SkipDownloadCache
+		return fd, nil
 	case config.SourceWeb:
 		web, err := NewWeb(cfg)
 		if err != nil {
 			return nil, err
 		}
 		web.SkipCache = opts.SkipCache
+		web.SkipDownloadCache = opts.SkipDownloadCache
 		return web, nil
 	default:
 		return nil, fmt.Errorf("unsupported source type: %s", sourceType)

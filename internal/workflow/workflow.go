@@ -56,6 +56,7 @@ func NewPublisher(ctx context.Context, opts *cli.Options, cfg *config.Config) (*
 	src, err := source.NewWithOptions(cfg, source.Options{
 		BaseDir:            cfg.BaseDir,
 		SkipCache:          opts.Publish.OverwriteRelease,
+		SkipDownloadCache:  opts.Publish.Quiet,
 		IncludePreReleases: opts.Publish.IncludePreReleases,
 	})
 	if err != nil {

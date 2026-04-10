@@ -24,6 +24,7 @@ type Gitea struct {
 	token              string
 	client             *http.Client
 	IncludePreReleases bool // Set to true to include pre-releases (--pre-release)
+	SkipDownloadCache  bool // Set to true to skip saving APKs to download cache
 }
 
 // NewGitea creates a new Gitea source.
@@ -273,10 +274,12 @@ func (g *Gitea) Download(ctx context.Context, asset *Asset, destDir string, prog
 		return "", fmt.Errorf("failed to write file: %w", err)
 	}
 
-	// Save to download cache (best-effort, ignore errors)
-	if cachedPath, err := SaveToDownloadCache(asset.URL, asset.Name, destPath); err == nil {
-		os.Remove(destPath)
-		destPath = cachedPath
+	// Save to download cache (best-effort, ignore errors) unless skipped
+	if !g.SkipDownloadCache {
+		if cachedPath, err := SaveToDownloadCache(asset.URL, asset.Name, destPath); err == nil {
+			os.Remove(destPath)
+			destPath = cachedPath
+		}
 	}
 
 	// Update asset with local path

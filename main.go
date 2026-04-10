@@ -350,6 +350,7 @@ func checkReleases(ctx context.Context, arg string, opts *cli.Options) error {
 
 	src, err := source.NewWithOptions(cfg, source.Options{
 		BaseDir:            cfg.BaseDir,
+		SkipDownloadCache:  true,
 		IncludePreReleases: opts.Publish.IncludePreReleases,
 	})
 	if err != nil {
@@ -775,6 +776,7 @@ func checkAPK(ctx context.Context, opts *cli.Options) error {
 	src, err := source.NewWithOptions(cfg, source.Options{
 		BaseDir:            cfg.BaseDir,
 		SkipCache:          true,
+		SkipDownloadCache:  true,
 		IncludePreReleases: opts.Publish.IncludePreReleases,
 	})
 	if err != nil {
