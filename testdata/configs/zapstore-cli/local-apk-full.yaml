@@ -1,0 +1,13 @@
+name: Sample
+description: Just a sample APK
+summary: Sample summary
+homepage: https://zapstore.dev
+tags: zapstore repository blah
+icon: icon.png
+images:
+  - https://raw.githubusercontent.com/purplebase/purplestack/main/assets/images/purplestack.png
+license: MIT
+repository: https://github.com/zapstore/zapstore
+assets:
+  - ./.*.apk
+changelog: CHANGELOG.md

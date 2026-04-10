@@ -1,0 +1,5 @@
+repository: https://github.com/ZeusLN/zeus
+assets:
+  - .*.apk$
+remote_metadata:
+  - playstore

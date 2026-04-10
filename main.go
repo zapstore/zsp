@@ -473,12 +473,12 @@ func loadConfig(opts *cli.PublishOptions, args []string) (*config.Config, error)
 
 	// Config file as positional argument
 	if len(args) > 0 {
-		return config.Load(args[0])
+		return loadConfigWithMigrationCheck(args[0], opts.Quiet)
 	}
 
 	// zapstore.yaml takes priority over stdin.
 	if _, err := os.Stat("zapstore.yaml"); err == nil {
-		return config.Load("zapstore.yaml")
+		return loadConfigWithMigrationCheck("zapstore.yaml", opts.Quiet)
 	}
 
 	// No config file — use stdin only if data is actually piped in.
@@ -499,6 +499,67 @@ func loadConfig(opts *cli.PublishOptions, args []string) (*config.Config, error)
 		ResolvePubkey:  resolvePubkeyForWizard,
 		CheckAppExists: checkAppExistsForWizard,
 	})
+}
+
+// loadConfigWithMigrationCheck loads a config file, detecting and migrating zapstore-cli format if needed.
+// In quiet mode, migration is an error. Otherwise, prompts user to migrate.
+func loadConfigWithMigrationCheck(path string, quiet bool) (*config.Config, error) {
+	// Read file to check format
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	// No migration needed - load normally
+	if !config.NeedsMigration(data) {
+		return config.Load(path)
+	}
+
+	// Migration needed
+	if quiet {
+		return nil, fmt.Errorf("zapstore-cli config format detected. Run 'zsp publish' without --quiet to migrate")
+	}
+
+	// Check if auto-migration is possible
+	if err := config.CanMigrate(data); err != nil {
+		return nil, fmt.Errorf("config migration needed but cannot auto-migrate: %w", err)
+	}
+
+	// Prompt user
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, ui.Warning("zapstore-cli config format detected"))
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintf(os.Stderr, "Original will be backed up to %s.bak\n", path)
+	fmt.Fprintln(os.Stderr)
+
+	confirmed, err := ui.Confirm("Migrate to zsp format?", true)
+	if err != nil {
+		return nil, err
+	}
+	if !confirmed {
+		return nil, fmt.Errorf("migration declined. Please migrate manually or use zapstore-cli")
+	}
+
+	// Perform migration
+	result, err := config.MigrateConfigFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("migration failed: %w", err)
+	}
+
+	// Show warnings (if any)
+	if len(result.Warnings) > 0 {
+		fmt.Fprintln(os.Stderr)
+		for _, w := range result.Warnings {
+			fmt.Fprintln(os.Stderr, ui.Warning(w))
+		}
+	}
+
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, ui.Success("Config migrated successfully"))
+	fmt.Fprintln(os.Stderr)
+
+	// Load the migrated config
+	return config.Load(path)
 }
 
 // fetchAPKInfoForWizard downloads the APK and extracts basic info.
