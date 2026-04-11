@@ -90,6 +90,7 @@ func TestBuildReleaseEvent(t *testing.T) {
 		Channel:        "beta",
 		AssetEventIDs:  []string{"abc123eventid", "def456eventid"},
 		AssetRelayHint: "wss://relay.example.com",
+		Platforms:      []string{"android-arm64-v8a", "android-armeabi-v7a"},
 	}
 
 	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -123,6 +124,12 @@ func TestBuildReleaseEvent(t *testing.T) {
 		t.Errorf("missing or incorrect c tag: %v", cTag)
 	}
 
+	// Check platform tags (f tags) - same as kind 32267
+	fTags := filterExactTag(event.Tags, "f")
+	if len(fTags) != 2 {
+		t.Errorf("expected 2 f tags, got %d", len(fTags))
+	}
+
 	// Check content is changelog (release notes)
 	if event.Content != "Bug fixes and improvements" {
 		t.Errorf("expected changelog in content, got %q", event.Content)
@@ -144,6 +151,7 @@ func TestBuildReleaseEventDefaultChannel(t *testing.T) {
 		PackageID:     "com.example.app",
 		Version:       "1.0.0",
 		AssetEventIDs: []string{},
+		Platforms:     []string{"android-arm64-v8a"},
 	}
 
 	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -291,13 +299,22 @@ func TestBuildEventSet(t *testing.T) {
 		t.Errorf("expected name 'My App', got %v", nameTag)
 	}
 
-	// Check platform identifiers are converted correctly
+	// Check platform identifiers are converted correctly in app metadata
 	fTags := filterExactTag(events.AppMetadata.Tags, "f")
 	if len(fTags) != 1 {
-		t.Errorf("expected 1 f tag, got %d", len(fTags))
+		t.Errorf("expected 1 f tag in app metadata, got %d", len(fTags))
 	}
 	if len(fTags) > 0 && fTags[0][1] != "android-arm64-v8a" {
 		t.Errorf("expected f tag android-arm64-v8a, got %s", fTags[0][1])
+	}
+
+	// Check release has the same platform identifiers (f tags)
+	releaseFTags := filterExactTag(events.Release.Tags, "f")
+	if len(releaseFTags) != 1 {
+		t.Errorf("expected 1 f tag in release, got %d", len(releaseFTags))
+	}
+	if len(releaseFTags) > 0 && releaseFTags[0][1] != "android-arm64-v8a" {
+		t.Errorf("expected f tag android-arm64-v8a in release, got %s", releaseFTags[0][1])
 	}
 
 	// Check release has channel tag

@@ -52,6 +52,7 @@ type ReleaseMetadata struct {
 	AssetEventIDs  []string // Event IDs of asset events (kind 3063)
 	AssetRelayHint string   // Optional relay hint for asset events
 	Commit         string   // Git commit hash
+	Platforms      []string // Platform identifiers (e.g., "android-arm64-v8a")
 }
 
 // AssetMetadata contains Software Asset metadata (kind 3063).
@@ -157,6 +158,11 @@ func BuildReleaseEvent(meta *ReleaseMetadata, pubkey string) *nostr.Event {
 		nostr.Tag{"d", meta.PackageID + "@" + meta.Version},
 		nostr.Tag{"c", channel},
 	)
+
+	// Platform identifiers (f tags) - same as kind 32267
+	for _, platform := range meta.Platforms {
+		tags = append(tags, nostr.Tag{"f", platform})
+	}
 
 	// Asset event references (e tags)
 	for _, eventID := range meta.AssetEventIDs {
@@ -394,6 +400,7 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		Channel:       channel,
 		AssetEventIDs: []string{}, // Populated after signing
 		Commit:        params.Commit,
+		Platforms:     platforms,
 	}
 
 	// Software Asset event
@@ -467,4 +474,47 @@ func (es *EventSet) AddAssetReferences(relayHint string) {
 	for _, asset := range es.SoftwareAssets {
 		es.AddAssetReference(asset.ID, relayHint)
 	}
+}
+
+// UpdateReleasePlatforms aggregates platform identifiers (f tags) from all Software Assets
+// and updates the Release event. This should be called after all assets are added to the EventSet
+// but before the Release event is signed. This is useful when publishing multiple APK variants
+// in a single release, where each asset may support different architectures.
+func (es *EventSet) UpdateReleasePlatforms() {
+	// Collect unique platforms from all assets
+	platformSet := make(map[string]bool)
+	for _, asset := range es.SoftwareAssets {
+		// Extract f tags from asset
+		for _, tag := range asset.Tags {
+			if len(tag) > 1 && tag[0] == "f" {
+				platformSet[tag[1]] = true
+			}
+		}
+	}
+
+	// Remove existing f tags from Release event
+	newTags := nostr.Tags{}
+	for _, tag := range es.Release.Tags {
+		if len(tag) > 0 && tag[0] != "f" {
+			newTags = append(newTags, tag)
+		}
+	}
+
+	// Find the position to insert f tags (after c tag, before e tags)
+	insertPos := 0
+	for i, tag := range newTags {
+		if len(tag) > 0 && tag[0] == "c" {
+			insertPos = i + 1
+			break
+		}
+	}
+
+	// Insert f tags at the correct position
+	for platform := range platformSet {
+		fTag := nostr.Tag{"f", platform}
+		newTags = append(newTags[:insertPos], append(nostr.Tags{fTag}, newTags[insertPos:]...)...)
+		insertPos++
+	}
+
+	es.Release.Tags = newTags
 }
