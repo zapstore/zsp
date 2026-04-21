@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1238,9 +1239,14 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 	allSuccess := true
 	hasDuplicates := false
 	var messages []string
+	// Track per-event-type success: an event is considered published if it
+	// succeeded on at least one relay. If every relay rejected an event, that
+	// event failed to publish and zsp must exit non-zero (critical for CI).
+	eventHasSuccess := make(map[string]bool, len(results))
 	for eventType, eventResults := range results {
 		for _, r := range eventResults {
 			if r.Success {
+				eventHasSuccess[eventType] = true
 				if r.IsDuplicate {
 					hasDuplicates = true
 					messages = append(messages, fmt.Sprintf("    %s -> %s: already exists", eventType, r.RelayURL))
@@ -1251,6 +1257,14 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 				messages = append(messages, fmt.Sprintf("    %s -> %s: FAILED (%v)", eventType, r.RelayURL, r.Error))
 				allSuccess = false
 			}
+		}
+	}
+
+	// An event entirely rejected by all relays is a hard failure.
+	var failedEventTypes []string
+	for eventType := range results {
+		if !eventHasSuccess[eventType] {
+			failedEventTypes = append(failedEventTypes, eventType)
 		}
 	}
 
@@ -1299,6 +1313,14 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 	// In JSON mode, emit the signed events as JSONL (same format as --offline)
 	if p.opts.Global.JSON {
 		OutputEventsToStdout(p.events)
+	}
+
+	// If any event was rejected by every relay, publishing did not succeed.
+	// Returning an error ensures zsp exits non-zero so CI pipelines (GitHub
+	// Actions, etc.) surface the failure instead of silently passing.
+	if len(failedEventTypes) > 0 {
+		sort.Strings(failedEventTypes)
+		return fmt.Errorf("failed to publish event(s) to any relay: %s", strings.Join(failedEventTypes, ", "))
 	}
 
 	return nil
