@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -129,6 +130,9 @@ func (g *Gitea) fetchLatestFromList(ctx context.Context) (*Release, error) {
 	for _, r := range releases {
 		// Skip drafts; skip prereleases unless explicitly included
 		if r.Draft || (r.Prerelease && !g.IncludePreReleases) {
+			continue
+		}
+		if !g.matchesReleaseFilter(r.TagName) {
 			continue
 		}
 		release := g.convertRelease(&r)
@@ -286,5 +290,18 @@ func (g *Gitea) Download(ctx context.Context, asset *Asset, destDir string, prog
 	asset.LocalPath = destPath
 
 	return destPath, nil
+}
+
+// matchesReleaseFilter checks if a tag name matches the configured release_filter.
+// Returns true if no filter is configured or if the tag matches the filter.
+func (g *Gitea) matchesReleaseFilter(tagName string) bool {
+	if g.cfg.ReleaseFilter == "" {
+		return true
+	}
+	matched, err := regexp.MatchString(g.cfg.ReleaseFilter, tagName)
+	if err != nil {
+		return false
+	}
+	return matched
 }
 

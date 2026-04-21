@@ -28,6 +28,9 @@ type Config struct {
 	ReleaseSource    *ReleaseSource `yaml:"-"`
 	ReleaseSourceRaw yaml.Node      `yaml:"release_source,omitempty"`
 
+	// Release filtering (optional, filters releases by tag name)
+	ReleaseFilter string `yaml:"release_filter,omitempty"`
+
 	// Asset matching (optional, overrides auto-detection)
 	Match string `yaml:"match,omitempty"`
 
@@ -465,6 +468,13 @@ func (c *Config) Validate() error {
 	for name, pattern := range c.Variants {
 		if _, err := regexp.Compile(pattern); err != nil {
 			return fmt.Errorf("invalid variant %q regex pattern %q: %w", name, pattern, err)
+		}
+	}
+
+	// Validate release_filter regex pattern
+	if c.ReleaseFilter != "" {
+		if _, err := regexp.Compile(c.ReleaseFilter); err != nil {
+			return fmt.Errorf("invalid release_filter pattern %q: %w", c.ReleaseFilter, err)
 		}
 	}
 

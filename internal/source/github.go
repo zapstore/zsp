@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -231,8 +232,8 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	}
 
 	// Use the fast-path result if it qualifies: not a draft, not an unwanted pre-release,
-	// and actually contains a valid APK.
-	if !ghRelease.Draft && !(ghRelease.Prerelease && !g.IncludePreReleases) {
+	// matches release filter, and actually contains a valid APK.
+	if !ghRelease.Draft && !(ghRelease.Prerelease && !g.IncludePreReleases) && g.matchesReleaseFilter(ghRelease.TagName) {
 		release := g.convertRelease(&ghRelease)
 		if HasValidAPKs(release.Assets) {
 			// Store ETag and release for later commit (after successful publish).
@@ -299,6 +300,9 @@ func (g *GitHub) fetchLatestFromList(ctx context.Context) (*Release, error) {
 	for i := range releases {
 		ghRelease := &releases[i]
 		if ghRelease.Draft || (ghRelease.Prerelease && !g.IncludePreReleases) {
+			continue
+		}
+		if !g.matchesReleaseFilter(ghRelease.TagName) {
 			continue
 		}
 		release := g.convertRelease(ghRelease)
@@ -453,4 +457,17 @@ func (g *GitHub) Download(ctx context.Context, asset *Asset, destDir string, pro
 	asset.LocalPath = destPath
 
 	return destPath, nil
+}
+
+// matchesReleaseFilter checks if a tag name matches the configured release_filter.
+// Returns true if no filter is configured or if the tag matches the filter.
+func (g *GitHub) matchesReleaseFilter(tagName string) bool {
+	if g.cfg.ReleaseFilter == "" {
+		return true
+	}
+	matched, err := regexp.MatchString(g.cfg.ReleaseFilter, tagName)
+	if err != nil {
+		return false
+	}
+	return matched
 }

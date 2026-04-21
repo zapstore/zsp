@@ -1,0 +1,9 @@
+# Example: Publishing K-9 Mail from the shared thunderbird-android repo
+# This repo releases both Thunderbird and K-9 Mail
+repository: https://github.com/thunderbird/thunderbird-android
+
+# Filter to only match K-9 Mail releases (not Thunderbird)
+release_filter: "^K9MAIL_.*"
+
+name: K-9 Mail
+description: Email client for Android

@@ -1,0 +1,5 @@
+# Config with release_filter - Thunderbird/K-9 Mail example
+repository: https://github.com/thunderbird/thunderbird-android
+
+# Only match K-9 Mail releases (not Thunderbird releases)
+release_filter: "^K9MAIL_.*"

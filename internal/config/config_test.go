@@ -1039,6 +1039,22 @@ func TestValidateConfigCases(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "valid release_filter passes",
+			config: Config{
+				Repository:    "https://github.com/user/app",
+				ReleaseFilter: "^v[0-9]+\\.[0-9]+\\.[0-9]+$",
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid release_filter regex fails",
+			config: Config{
+				Repository:    "https://github.com/user/app",
+				ReleaseFilter: "[invalid(regex",
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1200,9 +1216,12 @@ func TestLoadAllFixtures(t *testing.T) {
 		"web-redirect.yaml", // Header extractor (version.header)
 		"web-direct.yaml",   // Direct URL (no version extraction)
 		// Features
-		"match-pattern.yaml",      // Asset match regex
-		"playstore-metadata.yaml", // Play Store metadata
-		"metadata-sources.yaml",   // Multiple metadata sources
+		"match-pattern.yaml",           // Asset match regex
+		"release-filter.yaml",          // Release filter regex
+		"release-filter-thunderbird.yaml", // Thunderbird from shared repo
+		"release-filter-k9.yaml",       // K-9 Mail from shared repo
+		"playstore-metadata.yaml",      // Play Store metadata
+		"metadata-sources.yaml",        // Multiple metadata sources
 	}
 
 	for _, fixture := range fixtures {

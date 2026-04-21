@@ -121,6 +121,9 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 
 	// Find the first release with valid APKs
 	for _, glRelease := range releases {
+		if !g.matchesReleaseFilter(glRelease.TagName) {
+			continue
+		}
 		release := g.convertRelease(&glRelease)
 		if HasValidAPKs(release.Assets) {
 			return release, nil
@@ -300,4 +303,17 @@ func (g *GitLab) Download(ctx context.Context, asset *Asset, destDir string, pro
 
 	asset.LocalPath = destPath
 	return destPath, nil
+}
+
+// matchesReleaseFilter checks if a tag name matches the configured release_filter.
+// Returns true if no filter is configured or if the tag matches the filter.
+func (g *GitLab) matchesReleaseFilter(tagName string) bool {
+	if g.cfg.ReleaseFilter == "" {
+		return true
+	}
+	matched, err := regexp.MatchString(g.cfg.ReleaseFilter, tagName)
+	if err != nil {
+		return false
+	}
+	return matched
 }
