@@ -182,7 +182,16 @@ type githubAsset struct {
 // Uses conditional requests (ETag/If-None-Match) on the fast path to reduce rate limit
 // usage. Returns ErrNotModified if the latest release hasn't changed since the last check.
 // Set SkipCache to true to bypass the ETag check and always fetch fresh data.
+//
+// Note: /releases/latest always returns the latest stable release — GitHub excludes
+// prereleases from that endpoint by design. When IncludePreReleases is set we skip
+// straight to the list endpoint so that a prerelease newer than the latest stable
+// release is not missed.
 func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
+	if g.IncludePreReleases {
+		return g.fetchLatestFromList(ctx)
+	}
+
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", g.owner, g.repo)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
