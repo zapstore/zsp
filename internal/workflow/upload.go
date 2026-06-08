@@ -69,6 +69,19 @@ type uploadItem struct {
 	apkPath    string
 }
 
+// PendingUploads holds blob uploads to be executed after Nostr events are published to relays.
+type PendingUploads struct {
+	client    *blossom.Client
+	items     []uploadItem
+	existsMap map[string]bool
+	opts      *cli.Options
+}
+
+// Execute performs the pending blob uploads to the Blossom server.
+func (p *PendingUploads) Execute(ctx context.Context) error {
+	return performUploads(ctx, p.client, p.items, p.existsMap, p.opts)
+}
+
 // PreDownloadImages downloads cfg.Icon and cfg.Images if they are remote URLs.
 func PreDownloadImages(ctx context.Context, cfg *config.Config, opts *cli.Options) (*PreDownloadedImages, error) {
 	result := &PreDownloadedImages{}
@@ -255,7 +268,7 @@ func resolveImageURLs(ctx context.Context, cfg *config.Config, blossomURL string
 }
 
 // UploadAndSignWithBatch handles uploads and signing when using a batch signer.
-func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.EventSet, error) {
+func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.EventSet, *PendingUploads, error) {
 	var uploads []uploadItem
 	var iconURL string
 	var imageURLs []string
@@ -284,7 +297,7 @@ func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.Ev
 		var err error
 		releaseNotes, err = source.FetchReleaseNotes(ctx, params.Cfg.ReleaseNotes, params.APKInfo.VersionName, params.Cfg.BaseDir)
 		if err != nil {
-			return nil, fmt.Errorf("failed to fetch release notes: %w", err)
+			return nil, nil, fmt.Errorf("failed to fetch release notes: %w", err)
 		}
 	}
 
@@ -338,50 +351,66 @@ func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.Ev
 		if signSpinner != nil {
 			signSpinner.StopWithError("Failed to sign events")
 		}
-		return nil, fmt.Errorf("failed to batch sign events: %w", err)
+		return nil, nil, fmt.Errorf("failed to batch sign events: %w", err)
 	}
 	if signSpinner != nil {
 		signSpinner.StopWithSuccess("Signed events")
 	}
 
-	// Perform uploads
-	if err := performUploads(ctx, params.Client, uploads, existsMap, params.Opts); err != nil {
-		return nil, err
+	pending := &PendingUploads{
+		client:    params.Client,
+		items:     uploads,
+		existsMap: existsMap,
+		opts:      params.Opts,
 	}
-
-	return events, nil
+	return events, pending, nil
 }
 
-// UploadWithIndividualSigning handles uploads with regular signers.
-func UploadWithIndividualSigning(ctx context.Context, params UploadParams) (iconURL string, imageURLs []string, err error) {
-	// Process icon
-	iconURL, err = uploadIcon(ctx, params)
-	if err != nil {
-		return "", nil, err
-	}
+// UploadWithIndividualSigning collects blobs for upload, signs their auth events one by one,
+// and returns the resolved URLs and a PendingUploads to be executed after relay publishing.
+func UploadWithIndividualSigning(ctx context.Context, params UploadParams) (iconURL string, imageURLs []string, pending *PendingUploads, err error) {
+	expiration := time.Now().Add(blossom.AuthExpiration)
 
-	// Process pre-downloaded images
-	if params.PreDownloaded != nil && len(params.PreDownloaded.Images) > 0 {
-		urls, err := uploadPreDownloadedImages(ctx, params)
-		if err != nil {
-			return "", nil, err
+	var uploads []uploadItem
+
+	// Collect icon
+	iconURL, iconUploads := collectIconUpload(ctx, params, expiration)
+	uploads = append(uploads, iconUploads...)
+
+	// Collect images
+	imgURLs, imgUploads := collectImageUploads(ctx, params, expiration)
+	imageURLs = append(imageURLs, imgURLs...)
+	uploads = append(uploads, imgUploads...)
+
+	// Add APK upload item
+	uploads = append(uploads, uploadItem{
+		isAPK:   true,
+		apkPath: params.APKPath,
+		hash:    params.APKInfo.SHA256,
+		authEvent: nostr.BuildBlossomAuthEvent(
+			params.APKInfo.SHA256, params.Pubkey, expiration,
+		),
+	})
+
+	// Sign each auth event individually
+	for _, u := range uploads {
+		signCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		signErr := params.Signer.Sign(signCtx, u.authEvent)
+		cancel()
+		if signErr != nil {
+			return "", nil, nil, fmt.Errorf("failed to sign blossom auth event: %w", signErr)
 		}
-		imageURLs = append(imageURLs, urls...)
 	}
 
-	// Process remaining config images
-	urls, err := uploadConfigImages(ctx, params)
-	if err != nil {
-		return "", nil, err
-	}
-	imageURLs = append(imageURLs, urls...)
+	// Pre-check existence for non-APK uploads
+	existsMap := checkUploadsExist(ctx, params.Client, uploads, params.Opts)
 
-	// Upload APK
-	if err := uploadAPK(ctx, params); err != nil {
-		return "", nil, err
-	}
-
-	return iconURL, imageURLs, nil
+	return iconURL, imageURLs, &PendingUploads{
+		client:    params.Client,
+		items:     uploads,
+		existsMap: existsMap,
+		opts:      params.Opts,
+	}, nil
 }
 
 // uploadIcon handles icon upload with various sources.
