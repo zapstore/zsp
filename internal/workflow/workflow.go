@@ -46,6 +46,7 @@ type Publisher struct {
 	releaseNotes             string
 	preDownloaded            *PreDownloadedImages
 	events                   *nostr.EventSet
+	pendingUploads           *PendingUploads
 	blossomURL               string
 	browserPort              int
 	existingReleaseTimestamp time.Time // created_at of existing 30063 on relay (for --overwrite-release)
@@ -145,7 +146,7 @@ func splitRelays(env string) []string {
 // Execute runs the complete publish workflow.
 func (p *Publisher) Execute(ctx context.Context) error {
 	// Determine total steps based on mode
-	totalSteps := 4
+	totalSteps := 5
 	if p.opts.Publish.Offline {
 		totalSteps = 2
 	}
@@ -176,9 +177,9 @@ func (p *Publisher) Execute(ctx context.Context) error {
 		return err
 	}
 
-	// Step 3: Sign & Upload (skip in offline mode)
+	// Step 3: Sign (skip in offline mode)
 	if steps != nil && !p.opts.Publish.Offline {
-		steps.StartStep("Sign & Upload")
+		steps.StartStep("Sign")
 	}
 	if err := p.signAndUpload(ctx); err != nil {
 		return err
@@ -198,7 +199,15 @@ func (p *Publisher) Execute(ctx context.Context) error {
 	if steps != nil {
 		steps.StartStep("Publish")
 	}
-	return p.publishToRelays(ctx)
+	if err := p.publishToRelays(ctx); err != nil {
+		return err
+	}
+
+	// Step 5: Upload blobs to Blossom
+	if steps != nil {
+		steps.StartStep("Upload")
+	}
+	return p.uploadBlobs(ctx)
 }
 
 // fetchAssets fetches and selects the APK to publish.
@@ -957,7 +966,7 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 
 	if isBatchSigner {
 		var err error
-		p.events, err = UploadAndSignWithBatch(ctx, UploadParams{
+		p.events, p.pendingUploads, err = UploadAndSignWithBatch(ctx, UploadParams{
 			Cfg:                 p.cfg,
 			APKInfo:             p.apkInfo,
 			APKPath:             p.apkPath,
@@ -981,12 +990,13 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 
 	// Regular signing mode
 	var err error
-	p.iconURL, p.imageURLs, err = UploadWithIndividualSigning(ctx, UploadParams{
+	p.iconURL, p.imageURLs, p.pendingUploads, err = UploadWithIndividualSigning(ctx, UploadParams{
 		Cfg:           p.cfg,
 		APKInfo:       p.apkInfo,
 		APKPath:       p.apkPath,
 		Client:        client,
 		Signer:        p.signer,
+		Pubkey:        p.signer.PublicKey(),
 		PreDownloaded: p.preDownloaded,
 		Opts:          p.opts,
 	})
@@ -1287,7 +1297,6 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 	// Commit or clear cache
 	if allSuccess {
 		p.commitCache()
-		p.deleteCachedAPK()
 	} else {
 		p.clearCache()
 		if p.opts.Global.Verbose {
@@ -1323,6 +1332,18 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 		return fmt.Errorf("failed to publish event(s) to any relay: %s", strings.Join(failedEventTypes, ", "))
 	}
 
+	return nil
+}
+
+// uploadBlobs executes pending Blossom uploads after events have been published to relays.
+func (p *Publisher) uploadBlobs(ctx context.Context) error {
+	if p.pendingUploads == nil {
+		return nil
+	}
+	if err := p.pendingUploads.Execute(ctx); err != nil {
+		return err
+	}
+	p.deleteCachedAPK()
 	return nil
 }
 
