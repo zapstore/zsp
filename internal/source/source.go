@@ -297,6 +297,12 @@ type CacheCommitter interface {
 	CommitCache() error
 }
 
+// PublishedVersionReader is an optional interface for sources that can return
+// the last successfully published release version from their cache.
+type PublishedVersionReader interface {
+	GetPublishedVersion() string
+}
+
 // Downloader wraps an io.Reader to track download progress.
 type ProgressReader struct {
 	Reader     io.Reader

@@ -353,12 +353,18 @@ func UtilsHelp() string {
 	b.WriteString(renderBold("OPERATIONS") + "\n")
 	writeFlag(&b, "extract-apk <file.apk>", "Extract APK metadata as JSON (stdout)")
 	b.WriteString("                            " + renderGreyDark("Also extracts the app icon to <name>_icon.png") + "\n")
+	writeFlag(&b, "has-new-release <config|url>", "Check if a new release exists since last publish")
+	b.WriteString("                             " + renderGreyDark("{\"has_new_release\":false} or {\"has_new_release\":true,\"version\":\"x.y.z\"}") + "\n")
+	b.WriteString("                             " + renderGreyDark("Local cache only — does not download the APK or query the relay") + "\n")
 	b.WriteString("\n")
 
 	b.WriteString(renderBold("EXAMPLES") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Extract metadata from an APK") + "\n")
 	b.WriteString("  " + renderAccent("zsp utils extract-apk myapp.apk") + "\n\n")
+
+	b.WriteString(renderGreyDark("  # Check if a new release is available (uses local cache)") + "\n")
+	b.WriteString("  " + renderAccent("zsp utils has-new-release zapstore.yaml") + "\n\n")
 
 	b.WriteString(renderBold("FLAGS") + "\n")
 	writeFlag(&b, "--json", "Machine-readable output (errors as JSON to stderr)")

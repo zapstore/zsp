@@ -287,10 +287,98 @@ func runUtilsCommand(ctx context.Context, opts *cli.Options) int {
 		}
 		return 0
 
+	case "has-new-release":
+		if len(opts.Args) == 0 {
+			if opts.Global.JSON {
+				ui.PrintJSONError(fmt.Errorf("has-new-release requires a repository URL or config file as argument"))
+			} else {
+				fmt.Fprintln(os.Stderr, "Error: has-new-release requires a config file or URL as argument")
+				fmt.Fprintln(os.Stderr, "Usage: zsp utils has-new-release <config.yaml|repo-url>")
+			}
+			return 1
+		}
+		if err := hasNewRelease(ctx, opts.Args[0], opts); err != nil {
+			if opts.Global.JSON {
+				ui.PrintJSONError(err)
+			} else {
+				fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
+			}
+			return 1
+		}
+		return 0
+
 	default:
 		help.HandleHelp(cli.CommandUtils, nil)
 		return 0
 	}
+}
+
+// hasNewRelease checks whether there is a new release since the last successful publish.
+// It is a read-only, local-cache-based check: it uses ETag and the stored
+// latest_published_release_version. It does NOT download the APK or query the relay.
+func hasNewRelease(ctx context.Context, arg string, opts *cli.Options) error {
+	var cfg *config.Config
+
+	lower := strings.ToLower(arg)
+	isConfigFile := strings.HasSuffix(lower, ".yaml") || strings.HasSuffix(lower, ".yml")
+	if !isConfigFile {
+		if _, err := os.Stat(arg); err == nil && !strings.HasPrefix(arg, "http") {
+			isConfigFile = true
+		}
+	}
+
+	if isConfigFile {
+		var err error
+		cfg, err = config.Load(arg)
+		if err != nil {
+			return fmt.Errorf("failed to load config: %w", err)
+		}
+		if err := cfg.Validate(); err != nil {
+			return fmt.Errorf("invalid config: %w", err)
+		}
+	} else {
+		repoURL := normalizeRepoURL(arg)
+		if err := config.ValidateURL(repoURL); err != nil {
+			return fmt.Errorf("invalid URL: %w", err)
+		}
+		cfg = &config.Config{Repository: repoURL}
+	}
+
+	src, err := source.NewWithOptions(cfg, source.Options{
+		BaseDir:            cfg.BaseDir,
+		SkipDownloadCache:  true,
+		IncludePreReleases: opts.Publish.IncludePreReleases,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create source: %w", err)
+	}
+
+	release, err := src.FetchLatestRelease(ctx)
+	if err == source.ErrNotModified {
+		data, _ := json.Marshal(map[string]any{"has_new_release": false})
+		fmt.Println(string(data))
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to fetch release: %w", err)
+	}
+
+	// Compare with last published version
+	if reader, ok := src.(source.PublishedVersionReader); ok {
+		if cached := reader.GetPublishedVersion(); cached != "" && cached == release.Version {
+			data, _ := json.Marshal(map[string]any{"has_new_release": false})
+			fmt.Println(string(data))
+			return nil
+		}
+	}
+
+	result := map[string]any{"has_new_release": true}
+	if release.Version != "" {
+		result["version"] = release.Version
+	}
+	data, _ := json.Marshal(result)
+	fmt.Println(string(data))
+	return nil
 }
 
 // runPublish executes the publish workflow.

@@ -60,7 +60,7 @@ type PublishOptions struct {
 
 // UtilsOptions holds flags specific to the utils subcommand.
 type UtilsOptions struct {
-	Operation string // "extract-apk"
+	Operation string // "extract-apk", "has-new-release"
 }
 
 // IdentityOptions holds flags specific to the identity subcommand.
