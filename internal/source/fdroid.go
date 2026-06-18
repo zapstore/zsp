@@ -21,8 +21,9 @@ import (
 // fdroidIndexCache stores the ETag and parsed package versions for a repo index.
 // Keyed on the index URL so all packages from the same repo share one cached file.
 type fdroidIndexCache struct {
-	ETag     string                          `json:"etag"`
-	Packages map[string][]fdroidPackageVersion `json:"packages"`
+	ETag                          string                            `json:"etag"`
+	Packages                      map[string][]fdroidPackageVersion `json:"packages"`
+	LatestPublishedReleaseVersion string                            `json:"latest_published_release_version,omitempty"`
 }
 
 // FDroid implements Source for F-Droid compatible repositories.
@@ -168,6 +169,9 @@ func (f *FDroid) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	version, err := f.fetchLatestVersion(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if f.pending != nil && version != nil {
+		f.pending.LatestPublishedReleaseVersion = version.VersionName
 	}
 	return f.buildRelease(version), nil
 }

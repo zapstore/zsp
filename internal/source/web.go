@@ -44,6 +44,8 @@ type webCache struct {
 	ETag          string `json:"etag,omitempty"`
 	LastModified  string `json:"last_modified,omitempty"`
 	ContentLength int64  `json:"content_length,omitempty"` // Fallback when ETag/Last-Modified unavailable
+
+	LatestPublishedReleaseVersion string `json:"latest_published_release_version,omitempty"`
 }
 
 // NewWeb creates a new web scraping source.
@@ -322,6 +324,9 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	}
 
 	// Store cache for later commit
+	if newCache != nil {
+		newCache.LatestPublishedReleaseVersion = version
+	}
 	w.pendingCache = newCache
 
 	// Create asset

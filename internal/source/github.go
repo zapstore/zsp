@@ -20,25 +20,27 @@ var ErrNotModified = fmt.Errorf("release not modified")
 
 // releaseCache stores ETag and release data for conditional requests.
 type releaseCache struct {
-	ETag    string         `json:"etag"`
-	Release *githubRelease `json:"release"`
+	ETag                          string         `json:"etag"`
+	Release                       *githubRelease `json:"release"`
+	LatestPublishedReleaseVersion string         `json:"latest_published_release_version,omitempty"`
 }
 
 // pendingCache stores cache data that hasn't been committed yet.
 // It's only saved to disk after successful publishing via CommitCache().
 type pendingCache struct {
-	ETag    string
-	Release *githubRelease
+	ETag                          string
+	Release                       *githubRelease
+	LatestPublishedReleaseVersion string
 }
 
 // GitHub implements Source for GitHub releases.
 type GitHub struct {
-	cfg       *config.Config
-	owner     string
-	repo      string
-	token     string
-	client    *http.Client
-	cacheDir  string
+	cfg                *config.Config
+	owner              string
+	repo               string
+	token              string
+	client             *http.Client
+	cacheDir           string
 	SkipCache          bool // Set to true to bypass ETag cache (--overwrite-release)
 	IncludePreReleases bool // Set to true to include pre-releases (--pre-release)
 	SkipDownloadCache  bool // Set to true to skip saving APKs to download cache
@@ -103,13 +105,14 @@ func (g *GitHub) loadCache() *releaseCache {
 }
 
 // saveCache writes the release data and ETag to disk.
-func (g *GitHub) saveCache(etag string, release *githubRelease) error {
+func (g *GitHub) saveCache(etag string, release *githubRelease, version string) error {
 	if err := os.MkdirAll(g.cacheDir, 0755); err != nil {
 		return err
 	}
 	cache := releaseCache{
-		ETag:    etag,
-		Release: release,
+		ETag:                          etag,
+		Release:                       release,
+		LatestPublishedReleaseVersion: version,
 	}
 	data, err := json.Marshal(&cache)
 	if err != nil {
@@ -148,7 +151,7 @@ func (g *GitHub) CommitCache() error {
 	if g.pending == nil {
 		return nil // Nothing to commit
 	}
-	err := g.saveCache(g.pending.ETag, g.pending.Release)
+	err := g.saveCache(g.pending.ETag, g.pending.Release, g.pending.LatestPublishedReleaseVersion)
 	if err == nil {
 		g.pending = nil // Clear pending after successful commit
 	}
@@ -245,9 +248,9 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	if !ghRelease.Draft && !(ghRelease.Prerelease && !g.IncludePreReleases) && g.matchesReleaseFilter(ghRelease.TagName) {
 		release := g.convertRelease(&ghRelease)
 		if HasValidAPKs(release.Assets) {
-			// Store ETag and release for later commit (after successful publish).
+			// Store ETag, release, and version for later commit (after successful publish).
 			if etag := resp.Header.Get("ETag"); etag != "" {
-				g.pending = &pendingCache{ETag: etag, Release: &ghRelease}
+				g.pending = &pendingCache{ETag: etag, Release: &ghRelease, LatestPublishedReleaseVersion: release.Version}
 			}
 			return release, nil
 		}
