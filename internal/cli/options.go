@@ -42,17 +42,17 @@ type PublishOptions struct {
 	Channel string // Release channel: main (default), beta, nightly, dev
 
 	// Behavior flags
-	Offline             bool // Sign events without uploading/publishing (outputs to stdout)
-	Quiet               bool // No prompts, no spinners, auto-yes to all confirmations
-	SkipPreview         bool
-	OverwriteRelease    bool
-	IncludePreReleases  bool
-	SkipMetadata        bool
-	AppCreatedAtRelease bool // Use release timestamp for kind 32267 created_at
-	SkipAppEvent        bool // Publish only release events (kind 30063/3063), skip kind 32267
+	Offline                bool // Sign events without uploading/publishing (outputs to stdout)
+	Quiet                  bool // No prompts, no spinners, auto-yes to all confirmations
+	SkipPreview            bool
+	OverwriteRelease       bool
+	IncludePreReleases     bool
+	SkipMetadata           bool
+	AppCreatedAtRelease    bool // Use release timestamp for kind 32267 created_at
+	SkipAppEvent           bool // Publish only release events (kind 30063/3063), skip kind 32267
 	SkipCertificateLinking bool // Skip certificate-to-identity linking check
-	Wizard              bool
-	Check               bool // Verify config fetches arm64-v8a APK (exit 0=success)
+	Wizard                 bool
+	Check                  bool // Verify config fetches arm64-v8a APK (exit 0=success)
 
 	// Server options
 	Port int
@@ -60,7 +60,7 @@ type PublishOptions struct {
 
 // UtilsOptions holds flags specific to the utils subcommand.
 type UtilsOptions struct {
-	Operation string // "extract-apk" or "check-releases"
+	Operation string // "extract-apk"
 }
 
 // IdentityOptions holds flags specific to the identity subcommand.
@@ -286,7 +286,7 @@ func parseIdentityFlags(opts *Options, args []string) {
 }
 
 // parseUtilsArgs parses positional args for the utils subcommand.
-// The first positional arg is the operation: "extract-apk" or "check-releases".
+// The first positional arg is the operation: "extract-apk".
 func parseUtilsArgs(opts *Options, args []string) {
 	// Check for help
 	for _, a := range args {

@@ -9,10 +9,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"syscall"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"syscall"
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
@@ -287,147 +287,11 @@ func runUtilsCommand(ctx context.Context, opts *cli.Options) int {
 		}
 		return 0
 
-	case "check-releases":
-		if len(opts.Args) == 0 {
-			if opts.Global.JSON {
-				ui.PrintJSONError(fmt.Errorf("check-releases requires a repository URL or config file as argument"))
-			} else {
-				fmt.Fprintln(os.Stderr, "Error: check-releases requires a repository URL as argument")
-				fmt.Fprintln(os.Stderr, "Usage: zsp utils check-releases <repo-url>")
-			}
-			return 1
-		}
-		if err := checkReleases(ctx, opts.Args[0], opts); err != nil {
-			if opts.Global.JSON {
-				ui.PrintJSONError(err)
-			} else {
-				fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
-			}
-			return 1
-		}
-		return 0
-
 	default:
 		help.HandleHelp(cli.CommandUtils, nil)
 		return 0
 	}
 }
-
-// checkReleases checks for a new upstream release by downloading and parsing the APK.
-// Accepts a repository URL (e.g. https://github.com/owner/repo) or a config file path.
-// Outputs "NEW <version>" or "UP_TO_DATE" to stdout; exits 1 on source errors.
-func checkReleases(ctx context.Context, arg string, opts *cli.Options) error {
-	var cfg *config.Config
-
-	// Detect whether arg is a config file (YAML) or a URL.
-	lower := strings.ToLower(arg)
-	isConfigFile := strings.HasSuffix(lower, ".yaml") || strings.HasSuffix(lower, ".yml")
-	if !isConfigFile {
-		// Also treat it as a config file if it exists on disk and is not a URL.
-		if !strings.Contains(arg, "://") && !strings.Contains(arg, ".") {
-			isConfigFile = false
-		} else if _, err := os.Stat(arg); err == nil && !strings.HasPrefix(arg, "http") {
-			isConfigFile = true
-		}
-	}
-
-	if isConfigFile {
-		var err error
-		cfg, err = config.Load(arg)
-		if err != nil {
-			return fmt.Errorf("failed to load config: %w", err)
-		}
-		if err := cfg.Validate(); err != nil {
-			return fmt.Errorf("invalid config: %w", err)
-		}
-	} else {
-		repoURL := normalizeRepoURL(arg)
-		if err := config.ValidateURL(repoURL); err != nil {
-			return fmt.Errorf("invalid URL: %w", err)
-		}
-		cfg = &config.Config{Repository: repoURL}
-	}
-
-	src, err := source.NewWithOptions(cfg, source.Options{
-		BaseDir:            cfg.BaseDir,
-		SkipDownloadCache:  true,
-		IncludePreReleases: opts.Publish.IncludePreReleases,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create source: %w", err)
-	}
-
-	release, err := src.FetchLatestRelease(ctx)
-	if err == source.ErrNotModified {
-		// ETag 304 — nothing changed since last check
-		if cacheCommitter, ok := src.(source.CacheCommitter); ok {
-			_ = cacheCommitter.CommitCache()
-		}
-		data, _ := json.Marshal(map[string]string{"status": "up_to_date"})
-		fmt.Println(string(data))
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("failed to fetch release: %w", err)
-	}
-
-	// Commit ETag cache after successful fetch
-	defer func() {
-		if cacheCommitter, ok := src.(source.CacheCommitter); ok {
-			_ = cacheCommitter.CommitCache()
-		}
-	}()
-
-	version := release.Version
-	if version == "" {
-		return fmt.Errorf("could not determine version from release (no version tag)")
-	}
-
-	// Select best APK asset
-	apkAssets := picker.FilterAPKs(release.Assets)
-	if len(apkAssets) == 0 {
-		return fmt.Errorf("no APK files found in release")
-	}
-
-	var selectedAsset *source.Asset
-	if len(apkAssets) == 1 {
-		selectedAsset = apkAssets[0]
-	} else {
-		ranked := picker.DefaultModel.RankAssets(apkAssets)
-		selectedAsset = ranked[0].Asset
-	}
-
-	// Download the APK (uses the shared download cache) and parse it for the real package ID.
-	apkPath, err := src.Download(ctx, selectedAsset, "", nil)
-	if err != nil {
-		return fmt.Errorf("failed to download APK: %w", err)
-	}
-
-	apkInfo, err := apk.Parse(apkPath)
-	if err != nil {
-		return fmt.Errorf("failed to parse APK: %w", err)
-	}
-
-	// Use the version from the APK if the release didn't carry one.
-	if version == "" {
-		version = apkInfo.VersionName
-	}
-
-	// Check relay for an existing asset with this package ID + version.
-	relaysEnv := config.GetEnv("RELAY_URLS")
-	publisher := nostrpkg.NewPublisherFromEnv(relaysEnv)
-	existingAsset, relayErr := publisher.CheckExistingAssetAny(ctx, apkInfo.PackageID, version)
-	if relayErr == nil && existingAsset != nil {
-		data, _ := json.Marshal(map[string]string{"status": "up_to_date"})
-		fmt.Println(string(data))
-		return nil
-	}
-
-	data, _ := json.Marshal(map[string]string{"status": "new", "version": version})
-	fmt.Println(string(data))
-	return nil
-}
-
 
 // runPublish executes the publish workflow.
 func runPublish(ctx context.Context, opts *cli.Options, cfg *config.Config) error {
@@ -484,7 +348,7 @@ func loadConfig(opts *cli.PublishOptions, args []string) (*config.Config, error)
 
 	// No config file — use stdin only if data is actually piped in.
 	stat, _ := os.Stdin.Stat()
-	if (stat.Mode()&os.ModeCharDevice) == 0 {
+	if (stat.Mode() & os.ModeCharDevice) == 0 {
 		if r, ok := peekStdin(); ok {
 			return config.Parse(r)
 		}

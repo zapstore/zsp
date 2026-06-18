@@ -13,9 +13,9 @@ import (
 
 // Greyscale palette only.
 var (
-	grey      = lipgloss.Color("245")
-	greyDark  = lipgloss.Color("242")
-	white     = lipgloss.Color("252")
+	grey       = lipgloss.Color("245")
+	greyDark   = lipgloss.Color("242")
+	white      = lipgloss.Color("252")
 	greyBright = lipgloss.Color("250")
 )
 
@@ -73,7 +73,7 @@ func RootHelp() string {
 	b.WriteString(renderBold("COMMANDS") + "\n")
 	b.WriteString("  " + renderAccent("publish") + "     " + renderWhite("Publish APK releases to Nostr relays") + "\n")
 	b.WriteString("  " + renderAccent("identity") + "    " + renderWhite("Manage cryptographic identity proofs (NIP-C1)") + "\n")
-	b.WriteString("  " + renderAccent("utils") + "       " + renderWhite("Operational utilities (extract-apk, check-releases)") + "\n\n")
+	b.WriteString("  " + renderAccent("utils") + "       " + renderWhite("Operational utilities (extract-apk)") + "\n\n")
 
 	b.WriteString(renderBold("EXAMPLES") + "\n")
 	writeExample(&b, "zsp publish --wizard", "Interactive wizard (recommended for first-time setup)")
@@ -353,8 +353,6 @@ func UtilsHelp() string {
 	b.WriteString(renderBold("OPERATIONS") + "\n")
 	writeFlag(&b, "extract-apk <file.apk>", "Extract APK metadata as JSON (stdout)")
 	b.WriteString("                            " + renderGreyDark("Also extracts the app icon to <name>_icon.png") + "\n")
-	writeFlag(&b, "check-releases <repo-url|config>", "Check for new upstream release without publishing")
-	b.WriteString("                                    " + renderGreyDark("{\"status\":\"new\",\"version\":\"x.y.z\"} or {\"status\":\"up_to_date\"}") + "\n")
 	b.WriteString("\n")
 
 	b.WriteString(renderBold("EXAMPLES") + "\n\n")
@@ -362,24 +360,14 @@ func UtilsHelp() string {
 	b.WriteString(renderGreyDark("  # Extract metadata from an APK") + "\n")
 	b.WriteString("  " + renderAccent("zsp utils extract-apk myapp.apk") + "\n\n")
 
-	b.WriteString(renderGreyDark("  # Check if a new release is available") + "\n")
-	b.WriteString("  " + renderAccent("zsp utils check-releases https://github.com/owner/repo") + "\n\n")
-
-	b.WriteString(renderGreyDark("  # Or use a config file") + "\n")
-	b.WriteString("  " + renderAccent("zsp utils check-releases zapstore.yaml") + "\n\n")
-
-	b.WriteString(renderGreyDark("  # Use in scripts to detect new versions (output is always JSON)") + "\n")
-	b.WriteString("  " + renderAccent("zsp utils check-releases https://github.com/owner/repo | jq -r .status") + "\n\n")
-
 	b.WriteString(renderBold("FLAGS") + "\n")
-	writeFlag(&b, "--pre-release", "Include pre-releases (check-releases)")
 	writeFlag(&b, "--json", "Machine-readable output (errors as JSON to stderr)")
 	writeFlag(&b, "--verbose", "Debug output")
 	writeFlag(&b, "--no-color", "Disable colored output")
 	b.WriteString("\n")
 
 	b.WriteString(renderBold("EXIT CODES") + "\n")
-	b.WriteString("  " + renderAccent("0") + "   Success (check-releases: JSON result on stdout)\n")
+	b.WriteString("  " + renderAccent("0") + "   Success\n")
 	b.WriteString("  " + renderAccent("1") + "   Error (source unreachable, no releases, invalid config)\n")
 
 	return b.String()
