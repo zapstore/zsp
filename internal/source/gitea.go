@@ -15,6 +15,11 @@ import (
 	"github.com/zapstore/zsp/internal/config"
 )
 
+// giteaCache stores the last successfully published release version.
+type giteaCache struct {
+	LatestPublishedReleaseVersion string `json:"latest_published_release_version,omitempty"`
+}
+
 // Gitea implements Source for Gitea/Forgejo/Codeberg releases.
 // This covers any Gitea-compatible forge (Gitea, Forgejo, Codeberg, etc.)
 type Gitea struct {
@@ -24,6 +29,8 @@ type Gitea struct {
 	repo               string
 	token              string
 	client             *http.Client
+	cacheDir           string
+	pendingVersion     string
 	IncludePreReleases bool // Set to true to include pre-releases (--pre-release)
 	SkipDownloadCache  bool // Set to true to skip saving APKs to download cache
 }
@@ -41,14 +48,68 @@ func NewGitea(cfg *config.Config) (*Gitea, error) {
 		return nil, fmt.Errorf("invalid Gitea repo path: %s", repoPath)
 	}
 
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		cacheDir = os.TempDir()
+	}
+	cacheDir = filepath.Join(cacheDir, "zsp", "gitea")
+
 	return &Gitea{
-		cfg:     cfg,
-		baseURL: baseURL,
-		owner:   parts[0],
-		repo:    parts[1],
-		token:   os.Getenv("GITEA_TOKEN"),
-		client:  newSecureHTTPClient(30 * time.Second),
+		cfg:      cfg,
+		baseURL:  baseURL,
+		owner:    parts[0],
+		repo:     parts[1],
+		token:    os.Getenv("GITEA_TOKEN"),
+		client:   newSecureHTTPClient(30 * time.Second),
+		cacheDir: cacheDir,
 	}, nil
+}
+
+func (g *Gitea) cacheFilePath() string {
+	return filepath.Join(g.cacheDir, fmt.Sprintf("%s_%s.json", g.owner, g.repo))
+}
+
+func (g *Gitea) loadCache() *giteaCache {
+	data, err := os.ReadFile(g.cacheFilePath())
+	if err != nil {
+		return nil
+	}
+	var cache giteaCache
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return nil
+	}
+	return &cache
+}
+
+func (g *Gitea) saveCache(cache *giteaCache) error {
+	if err := os.MkdirAll(g.cacheDir, 0755); err != nil {
+		return err
+	}
+	data, err := json.Marshal(cache)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(g.cacheFilePath(), data, 0644)
+}
+
+// CommitCache implements CacheCommitter.
+func (g *Gitea) CommitCache() error {
+	if g.pendingVersion == "" {
+		return nil
+	}
+	err := g.saveCache(&giteaCache{LatestPublishedReleaseVersion: g.pendingVersion})
+	if err == nil {
+		g.pendingVersion = ""
+	}
+	return err
+}
+
+// GetPublishedVersion returns the last successfully published release version.
+func (g *Gitea) GetPublishedVersion() string {
+	if cache := g.loadCache(); cache != nil {
+		return cache.LatestPublishedReleaseVersion
+	}
+	return ""
 }
 
 // Type returns the source type.
@@ -137,6 +198,7 @@ func (g *Gitea) fetchLatestFromList(ctx context.Context) (*Release, error) {
 		}
 		release := g.convertRelease(&r)
 		if HasValidAPKs(release.Assets) {
+			g.pendingVersion = release.Version
 			return release, nil
 		}
 	}
@@ -304,4 +366,3 @@ func (g *Gitea) matchesReleaseFilter(tagName string) bool {
 	}
 	return matched
 }
-
