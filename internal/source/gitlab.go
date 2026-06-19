@@ -19,6 +19,11 @@ import (
 // gitlabArchRegex extracts architecture from GitLab asset names like "APK (arm64-v8a)"
 var gitlabArchRegex = regexp.MustCompile(`\((arm64-v8a|armeabi-v7a|arm|x86_64|x86)\)`)
 
+// gitlabCache stores the last successfully published release version.
+type gitlabCache struct {
+	LatestPublishedReleaseVersion string `json:"latest_published_release_version,omitempty"`
+}
+
 // GitLab implements Source for GitLab releases.
 // Supports both gitlab.com and self-hosted GitLab instances.
 type GitLab struct {
@@ -26,6 +31,8 @@ type GitLab struct {
 	baseURL           string // e.g., "https://gitlab.com" or self-hosted URL
 	projectID         string // URL-encoded project path (e.g., "user%2Frepo")
 	client            *http.Client
+	cacheDir          string
+	pendingVersion    string
 	SkipDownloadCache bool // Set to true to skip saving APKs to download cache
 }
 
@@ -47,12 +54,68 @@ func NewGitLab(cfg *config.Config) (*GitLab, error) {
 	// URL-encode the project path for API calls
 	projectID := url.PathEscape(repoPath)
 
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		cacheDir = os.TempDir()
+	}
+	cacheDir = filepath.Join(cacheDir, "zsp", "gitlab")
+
 	return &GitLab{
 		cfg:       cfg,
 		baseURL:   baseURL,
 		projectID: projectID,
 		client:    newSecureHTTPClient(30 * time.Second),
+		cacheDir:  cacheDir,
 	}, nil
+}
+
+func (g *GitLab) cacheFilePath() string {
+	name, _ := url.PathUnescape(g.projectID)
+	name = strings.ReplaceAll(name, "/", "_")
+	return filepath.Join(g.cacheDir, name+".json")
+}
+
+func (g *GitLab) loadCache() *gitlabCache {
+	data, err := os.ReadFile(g.cacheFilePath())
+	if err != nil {
+		return nil
+	}
+	var cache gitlabCache
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return nil
+	}
+	return &cache
+}
+
+func (g *GitLab) saveCache(cache *gitlabCache) error {
+	if err := os.MkdirAll(g.cacheDir, 0755); err != nil {
+		return err
+	}
+	data, err := json.Marshal(cache)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(g.cacheFilePath(), data, 0644)
+}
+
+// CommitCache implements CacheCommitter.
+func (g *GitLab) CommitCache() error {
+	if g.pendingVersion == "" {
+		return nil
+	}
+	err := g.saveCache(&gitlabCache{LatestPublishedReleaseVersion: g.pendingVersion})
+	if err == nil {
+		g.pendingVersion = ""
+	}
+	return err
+}
+
+// GetPublishedVersion returns the last successfully published release version.
+func (g *GitLab) GetPublishedVersion() string {
+	if cache := g.loadCache(); cache != nil {
+		return cache.LatestPublishedReleaseVersion
+	}
+	return ""
 }
 
 // Type returns the source type.
@@ -126,6 +189,7 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		}
 		release := g.convertRelease(&glRelease)
 		if HasValidAPKs(release.Assets) {
+			g.pendingVersion = release.Version
 			return release, nil
 		}
 	}

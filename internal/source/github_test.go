@@ -6,6 +6,67 @@ import (
 	"github.com/zapstore/zsp/internal/config"
 )
 
+func TestGitHubCacheRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+
+	g := &GitHub{
+		owner:    "owner",
+		repo:     "repo",
+		cacheDir: dir,
+	}
+
+	// No cache yet
+	if got := g.GetPublishedVersion(); got != "" {
+		t.Fatalf("expected empty version before any publish, got %q", got)
+	}
+
+	// Simulate FetchLatestRelease setting pending
+	g.pending = &pendingCache{
+		ETag:                          `"etag-v1"`,
+		Release:                       &githubRelease{TagName: "v1.2.3"},
+		LatestPublishedReleaseVersion: "1.2.3",
+	}
+
+	// CommitCache should write to disk and clear pending
+	if err := g.CommitCache(); err != nil {
+		t.Fatalf("CommitCache() error: %v", err)
+	}
+	if g.pending != nil {
+		t.Fatal("expected pending to be nil after CommitCache")
+	}
+
+	// GetPublishedVersion should read the written version
+	if got := g.GetPublishedVersion(); got != "1.2.3" {
+		t.Fatalf("GetPublishedVersion() = %q, want %q", got, "1.2.3")
+	}
+
+	// Commit with a new version
+	g.pending = &pendingCache{
+		ETag:                          `"etag-v2"`,
+		Release:                       &githubRelease{TagName: "v2.0.0"},
+		LatestPublishedReleaseVersion: "2.0.0",
+	}
+	if err := g.CommitCache(); err != nil {
+		t.Fatalf("CommitCache() error on second publish: %v", err)
+	}
+	if got := g.GetPublishedVersion(); got != "2.0.0" {
+		t.Fatalf("GetPublishedVersion() after update = %q, want %q", got, "2.0.0")
+	}
+
+	// ClearCache should delete the file
+	if err := g.ClearCache(); err != nil {
+		t.Fatalf("ClearCache() error: %v", err)
+	}
+	if got := g.GetPublishedVersion(); got != "" {
+		t.Fatalf("expected empty version after ClearCache, got %q", got)
+	}
+
+	// CommitCache with no pending is a no-op
+	if err := g.CommitCache(); err != nil {
+		t.Fatalf("CommitCache() with nil pending should not error: %v", err)
+	}
+}
+
 func TestGitHub_matchesReleaseFilter(t *testing.T) {
 	tests := []struct {
 		name          string
