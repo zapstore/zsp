@@ -145,6 +145,14 @@ func (g *GitHub) ClearCache() error {
 	return err
 }
 
+// GetPublishedVersion implements PublishedVersionReader.
+func (g *GitHub) GetPublishedVersion() string {
+	if cache := g.loadCache(); cache != nil {
+		return cache.LatestPublishedReleaseVersion
+	}
+	return ""
+}
+
 // CommitCache saves the pending cache to disk.
 // This should be called after successful publishing to persist the ETag.
 func (g *GitHub) CommitCache() error {

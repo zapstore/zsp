@@ -105,6 +105,14 @@ func (f *FDroid) CommitCache() error {
 	return err
 }
 
+// GetPublishedVersion implements PublishedVersionReader.
+func (f *FDroid) GetPublishedVersion() string {
+	if cache := f.loadCache(); cache != nil {
+		return cache.LatestPublishedReleaseVersion
+	}
+	return ""
+}
+
 // SetSkipCache implements CacheSkipper.
 func (f *FDroid) SetSkipCache(v bool) { f.SkipCache = v }
 
