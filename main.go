@@ -355,7 +355,13 @@ func hasNewRelease(ctx context.Context, arg string, opts *cli.Options) error {
 
 	release, err := src.FetchLatestRelease(ctx)
 	if err == source.ErrNotModified {
-		data, _ := json.Marshal(map[string]any{"has_new_release": false})
+		result := map[string]any{"has_new_release": false}
+		if reader, ok := src.(source.PublishedVersionReader); ok {
+			if v := reader.GetPublishedVersion(); v != "" {
+				result["release_version"] = v
+			}
+		}
+		data, _ := json.Marshal(result)
 		fmt.Println(string(data))
 		return nil
 	}
@@ -366,7 +372,7 @@ func hasNewRelease(ctx context.Context, arg string, opts *cli.Options) error {
 	// Compare with last published version
 	if reader, ok := src.(source.PublishedVersionReader); ok {
 		if cached := reader.GetPublishedVersion(); cached != "" && cached == release.Version {
-			data, _ := json.Marshal(map[string]any{"has_new_release": false})
+			data, _ := json.Marshal(map[string]any{"has_new_release": false, "release_version": release.Version})
 			fmt.Println(string(data))
 			return nil
 		}
@@ -374,7 +380,7 @@ func hasNewRelease(ctx context.Context, arg string, opts *cli.Options) error {
 
 	result := map[string]any{"has_new_release": true}
 	if release.Version != "" {
-		result["version"] = release.Version
+		result["release_version"] = release.Version
 	}
 	data, _ := json.Marshal(result)
 	fmt.Println(string(data))
