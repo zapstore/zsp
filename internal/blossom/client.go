@@ -204,7 +204,8 @@ func (c *Client) UploadWithAuth(ctx context.Context, filePath string, sha256 str
 
 	req.Header.Set("Authorization", authHeader)
 	req.Header.Set("Content-Type", "application/vnd.android.package-archive")
-	req.Header.Set("Content-Digest", sha256)
+	req.Header.Set("Content-Digest", sha256) // TODO: deprecate this over time
+	req.Header.Set("X-SHA-256", sha256)
 	req.ContentLength = fi.Size()
 
 	// Execute upload
@@ -300,7 +301,8 @@ func (c *Client) uploadBytesWithAuth(ctx context.Context, data []byte, sha256 st
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	req.Header.Set("Content-Digest", sha256)
+	req.Header.Set("Content-Digest", sha256) // TODO: deprecate this over time
+	req.Header.Set("X-SHA-256", sha256)
 	req.ContentLength = int64(len(data))
 
 	// Execute upload
