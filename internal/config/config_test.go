@@ -446,6 +446,27 @@ func TestGetGitHubRepo(t *testing.T) {
 	}
 }
 
+func TestGetGitLabRepo(t *testing.T) {
+	tests := []struct {
+		url  string
+		want string
+	}{
+		{"https://gitlab.com/user/repo", "user/repo"},
+		{"https://gitlab.com/group/subgroup/repo", "group/subgroup/repo"},
+		{"https://gitlab.com/group/subgroup/repo/-/releases", "group/subgroup/repo"},
+		{"https://GITLAB.COM/Group/Subgroup/Repo", "Group/Subgroup/Repo"},
+		{"https://github.com/user/repo", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			if got := GetGitLabRepo(tt.url); got != tt.want {
+				t.Errorf("GetGitLabRepo(%q) = %q, want %q", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSourcePrecedence(t *testing.T) {
 	// Test that release_source > repository
 	tests := []struct {
@@ -611,9 +632,19 @@ func TestGetGitLabRepoWithBase(t *testing.T) {
 			"org/project",
 		},
 		{
+			"https://gitlab.example.com/group/subgroup/project",
+			"https://gitlab.example.com",
+			"group/subgroup/project",
+		},
+		{
 			"https://gitlab.com/user/repo/-/releases",
 			"https://gitlab.com",
 			"user/repo",
+		},
+		{
+			"https://gitlab.example.com/group/subgroup/project/-/releases",
+			"https://gitlab.example.com",
+			"group/subgroup/project",
 		},
 	}
 
@@ -925,16 +956,16 @@ func TestValidateURLCases(t *testing.T) {
 		wantErr bool
 	}{
 		{"https://github.com/user/repo", false},
-		{"http://github.com/user/repo", true},   // HTTP not allowed for remote hosts (security)
+		{"http://github.com/user/repo", true}, // HTTP not allowed for remote hosts (security)
 		{"https://localhost:8080/user/repo", false},
-		{"http://localhost/path", false},        // HTTP allowed for localhost
-		{"http://127.0.0.1/path", false},        // HTTP allowed for 127.0.0.1
-		{"ftp://github.com/user/repo", true},    // Invalid scheme
-		{"github.com/user/repo", true},          // No scheme
-		{"https://", true},                      // No host
-		{"https:///path", true},                 // No host
-		{"https://singleword", true},            // No TLD (unless localhost)
-		{"", true},                              // Empty
+		{"http://localhost/path", false},     // HTTP allowed for localhost
+		{"http://127.0.0.1/path", false},     // HTTP allowed for 127.0.0.1
+		{"ftp://github.com/user/repo", true}, // Invalid scheme
+		{"github.com/user/repo", true},       // No scheme
+		{"https://", true},                   // No host
+		{"https:///path", true},              // No host
+		{"https://singleword", true},         // No TLD (unless localhost)
+		{"", true},                           // Empty
 	}
 
 	for _, tt := range tests {
@@ -1216,12 +1247,12 @@ func TestLoadAllFixtures(t *testing.T) {
 		"web-redirect.yaml", // Header extractor (version.header)
 		"web-direct.yaml",   // Direct URL (no version extraction)
 		// Features
-		"match-pattern.yaml",           // Asset match regex
-		"release-filter.yaml",          // Release filter regex
+		"match-pattern.yaml",              // Asset match regex
+		"release-filter.yaml",             // Release filter regex
 		"release-filter-thunderbird.yaml", // Thunderbird from shared repo
-		"release-filter-k9.yaml",       // K-9 Mail from shared repo
-		"playstore-metadata.yaml",      // Play Store metadata
-		"metadata-sources.yaml",        // Multiple metadata sources
+		"release-filter-k9.yaml",          // K-9 Mail from shared repo
+		"playstore-metadata.yaml",         // Play Store metadata
+		"metadata-sources.yaml",           // Multiple metadata sources
 	}
 
 	for _, fixture := range fixtures {

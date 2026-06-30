@@ -2,7 +2,27 @@ package source
 
 import (
 	"testing"
+
+	"github.com/zapstore/zsp/internal/config"
 )
+
+func TestNewGitLabNestedProjectPath(t *testing.T) {
+	cfg := &config.Config{
+		Repository: "https://gitlab.example.com/group/subgroup/project",
+	}
+
+	g, err := NewGitLab(cfg)
+	if err != nil {
+		t.Fatalf("NewGitLab() error = %v", err)
+	}
+
+	if g.baseURL != "https://gitlab.example.com" {
+		t.Fatalf("baseURL = %q, want %q", g.baseURL, "https://gitlab.example.com")
+	}
+	if g.projectID != "group%2Fsubgroup%2Fproject" {
+		t.Fatalf("projectID = %q, want %q", g.projectID, "group%2Fsubgroup%2Fproject")
+	}
+}
 
 func TestGitLabCacheRoundtrip(t *testing.T) {
 	dir := t.TempDir()

@@ -720,12 +720,12 @@ func GetFDroidRepoInfo(rawURL string) *FDroidRepoInfo {
 		if idx := strings.Index(lower, "/packages/"); idx != -1 {
 			packageID := rawURL[idx+len("/packages/"):]
 			packageID = strings.TrimSuffix(packageID, "/")
-		return &FDroidRepoInfo{
-			RepoURL:     "https://f-droid.org/repo",
-			IndexURL:    "https://f-droid.org/repo/index-v1.json",
-			PackageID:   packageID,
-			MetadataURL: fmt.Sprintf("https://gitlab.com/fdroid/fdroiddata/-/raw/master/metadata/%s.yml", packageID),
-		}
+			return &FDroidRepoInfo{
+				RepoURL:     "https://f-droid.org/repo",
+				IndexURL:    "https://f-droid.org/repo/index-v1.json",
+				PackageID:   packageID,
+				MetadataURL: fmt.Sprintf("https://gitlab.com/fdroid/fdroiddata/-/raw/master/metadata/%s.yml", packageID),
+			}
 		}
 	}
 
@@ -773,19 +773,13 @@ func GetGitHubRepo(url string) string {
 	return ""
 }
 
-// GetGitLabRepo extracts owner/repo from a GitLab URL.
+// GetGitLabRepo extracts the project path from a gitlab.com URL.
 func GetGitLabRepo(rawURL string) string {
-	// Handle: https://gitlab.com/owner/repo
-	lower := strings.ToLower(rawURL)
-	if idx := strings.Index(lower, "gitlab.com/"); idx != -1 {
-		path := rawURL[idx+len("gitlab.com/"):]
-		// Remove trailing parts
-		parts := strings.Split(path, "/")
-		if len(parts) >= 2 {
-			return parts[0] + "/" + parts[1]
-		}
+	parsed, err := url.Parse(rawURL)
+	if err != nil || !strings.EqualFold(parsed.Hostname(), "gitlab.com") {
+		return ""
 	}
-	return ""
+	return gitLabProjectPath(parsed.Path)
 }
 
 // GetGiteaRepo extracts owner/repo and base URL from a Gitea-compatible URL.
@@ -810,7 +804,7 @@ func GetGiteaRepo(rawURL string) (baseURL, repoPath string) {
 	return baseURL, repoPath
 }
 
-// GetGitLabRepoWithBase extracts owner/repo and base URL from a GitLab URL.
+// GetGitLabRepoWithBase extracts project path and base URL from a GitLab URL.
 // Returns baseURL (e.g., "https://gitlab.com") and repoPath (e.g., "owner/repo").
 // Supports self-hosted GitLab instances.
 func GetGitLabRepoWithBase(rawURL string) (baseURL, repoPath string) {
@@ -822,14 +816,20 @@ func GetGitLabRepoWithBase(rawURL string) (baseURL, repoPath string) {
 	// Extract base URL
 	baseURL = fmt.Sprintf("%s://%s", parsed.Scheme, parsed.Host)
 
-	// Extract repo path (first two segments after host)
-	path := strings.TrimPrefix(parsed.Path, "/")
-	parts := strings.Split(path, "/")
-	if len(parts) >= 2 {
-		repoPath = parts[0] + "/" + parts[1]
-	}
+	repoPath = gitLabProjectPath(parsed.Path)
 
 	return baseURL, repoPath
+}
+
+func gitLabProjectPath(path string) string {
+	path = strings.Trim(path, "/")
+	if idx := strings.Index(path, "/-/"); idx >= 0 {
+		path = path[:idx]
+	}
+	if strings.Count(path, "/") < 1 {
+		return ""
+	}
+	return path
 }
 
 // GetRelayURLs returns the RELAY_URLS environment variable value.
