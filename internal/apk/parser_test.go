@@ -104,6 +104,37 @@ func TestParseAllTestAPKs(t *testing.T) {
 	}
 }
 
+func TestParseBraveAPI37Manifest(t *testing.T) {
+	path := filepath.Join("..", "..", "testdata", "apks", "BraveMonoarm64.apk")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		t.Skipf("test APK not found: %s", path)
+	}
+
+	info, err := Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if info.PackageID != "com.brave.browser" {
+		t.Errorf("PackageID = %q, want %q", info.PackageID, "com.brave.browser")
+	}
+	if info.VersionName != "1.92.140" {
+		t.Errorf("VersionName = %q, want %q", info.VersionName, "1.92.140")
+	}
+	if info.VersionCode != 429214004 {
+		t.Errorf("VersionCode = %d, want %d", info.VersionCode, 429214004)
+	}
+	if info.TargetSDK != 36 {
+		t.Errorf("TargetSDK = %d, want %d", info.TargetSDK, 36)
+	}
+	if info.Label != "Brave" {
+		t.Errorf("Label = %q, want %q", info.Label, "Brave")
+	}
+	if !info.IsArm64() {
+		t.Errorf("IsArm64() = false, want true; architectures = %v", info.Architectures)
+	}
+}
+
 func TestIsArm64(t *testing.T) {
 	tests := []struct {
 		name  string

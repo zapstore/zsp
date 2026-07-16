@@ -6,16 +6,18 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"crypto/x509"
-	"encoding/binary"
 	"encoding/hex"
+	"encoding/xml"
 	"fmt"
 	"image"
 	"image/png"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
+	"github.com/avast/apkparser"
 	"github.com/avast/apkverifier"
 	"github.com/shogo82148/androidbinary"
 	"github.com/shogo82148/androidbinary/apk"
@@ -74,36 +76,28 @@ func Parse(path string) (*APKInfo, error) {
 		return nil, fmt.Errorf("failed to hash APK: %w", err)
 	}
 
-	// Open APK for manifest parsing
-	pkg, err := apk.OpenFile(path)
+	// Parse the manifest with apkparser. Unlike androidbinary, it supports
+	// manifests produced by current Android build tools.
+	manifest, err := parseManifest(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open APK: %w", err)
+		return nil, fmt.Errorf("failed to parse APK manifest: %w", err)
 	}
-	defer pkg.Close()
-
-	manifest := pkg.Manifest()
 
 	info := &APKInfo{
-		PackageID:   manifest.Package.MustString(),
-		VersionName: manifest.VersionName.MustString(),
-		VersionCode: int64(manifest.VersionCode.MustInt32()),
+		PackageID:   manifest.PackageID,
+		VersionName: manifest.VersionName,
+		VersionCode: manifest.VersionCode,
+		MinSDK:      manifest.MinSDK,
+		TargetSDK:   manifest.TargetSDK,
+		Label:       manifest.Label,
+		Permissions: manifest.Permissions,
 		FilePath:    path,
 		FileSize:    fi.Size(),
 		SHA256:      sha256Hash,
 	}
 
-	// Extract SDK versions
-	info.MinSDK = manifest.SDK.Min.MustInt32()
-	info.TargetSDK = manifest.SDK.Target.MustInt32()
-
-	// Extract app label
-	info.Label = extractLabel(pkg, path)
-
 	// Extract native architectures from lib/ directory
 	info.Architectures = extractArchitectures(path)
-
-	// Extract permissions from manifest
-	info.Permissions = extractPermissions(manifest)
 
 	// Verify signature and extract certificate fingerprint
 	certFingerprint, err := verifyCertificate(path)
@@ -112,283 +106,94 @@ func Parse(path string) (*APKInfo, error) {
 	}
 	info.CertFingerprint = certFingerprint
 
-	// Extract icon
-	icon, err := extractIcon(pkg, path)
+	// Extract icon. Icon extraction failure is not fatal.
+	icon, err := extractIcon(path)
 	if err == nil {
 		info.Icon = icon
 	}
-	// Icon extraction failure is not fatal
 
 	return info, nil
 }
 
-// extractLabel extracts the app label from an APK.
-// It handles nested resource references that the standard library doesn't resolve.
-// Prioritizes English locale to avoid getting localized names in other scripts.
-func extractLabel(pkg *apk.Apk, path string) string {
-	// Try English locale first to avoid getting Arabic/RTL/other localized names
-	englishConfig := &androidbinary.ResTableConfig{
-		Language: [2]uint8{'e', 'n'},
-	}
-	label, err := pkg.Label(englishConfig)
-	if err == nil && label != "" && isLikelyEnglish(label) {
-		return label
-	}
-
-	// Try with default/nil config
-	label, err = pkg.Label(nil)
-	if err == nil && label != "" && isLikelyEnglish(label) {
-		return label
-	}
-
-	// Fall back to our custom extraction that handles nested references
-	// with English preference
-	return extractLabelWithReferences(path)
+type manifestInfo struct {
+	PackageID   string
+	VersionName string
+	VersionCode int64
+	MinSDK      int32
+	TargetSDK   int32
+	Label       string
+	Permissions []string
 }
 
-// isLikelyEnglish checks if a string appears to be in English/Latin script.
-// Returns false if it contains characters from Arabic, Hebrew, CJK, or other non-Latin scripts.
-func isLikelyEnglish(s string) bool {
-	for _, r := range s {
-		// Arabic range: U+0600 to U+06FF (Arabic)
-		// Arabic Supplement: U+0750 to U+077F
-		// Arabic Extended-A: U+08A0 to U+08FF
-		// Hebrew: U+0590 to U+05FF
-		// CJK ranges start at U+4E00
-		// Cyrillic: U+0400 to U+04FF
-		// Thai: U+0E00 to U+0E7F
-		// Devanagari: U+0900 to U+097F
-		if (r >= 0x0600 && r <= 0x06FF) || // Arabic
-			(r >= 0x0750 && r <= 0x077F) || // Arabic Supplement
-			(r >= 0x08A0 && r <= 0x08FF) || // Arabic Extended-A
-			(r >= 0x0590 && r <= 0x05FF) || // Hebrew
-			(r >= 0x4E00 && r <= 0x9FFF) || // CJK Unified Ideographs
-			(r >= 0x3040 && r <= 0x30FF) || // Hiragana + Katakana
-			(r >= 0x0400 && r <= 0x04FF) || // Cyrillic
-			(r >= 0x0E00 && r <= 0x0E7F) || // Thai
-			(r >= 0x0900 && r <= 0x097F) { // Devanagari
-			return false
-		}
-	}
-	return true
+// manifestCollector records the fields zsp needs from an Android manifest.
+// apkparser supplies already-decoded XML tokens and resolves string resources
+// when resources.arsc can be parsed.
+type manifestCollector struct {
+	info manifestInfo
 }
 
-// extractLabelWithReferences extracts the label by manually resolving resource references.
-// This handles cases where the label points to another string resource (nested references).
-func extractLabelWithReferences(path string) string {
-	r, err := zip.OpenReader(path)
-	if err != nil {
-		return ""
+func (c *manifestCollector) EncodeToken(token xml.Token) error {
+	start, ok := token.(xml.StartElement)
+	if !ok {
+		return nil
 	}
-	defer r.Close()
 
-	// Read resources.arsc
-	var resData []byte
-	for _, f := range r.File {
-		// Security: Validate zip entry path to prevent zip slip attacks
-		if !isValidZipEntryPath(f.Name) {
-			continue
-		}
-		if f.Name == "resources.arsc" {
-			if f.UncompressedSize64 > maxZipFileSize {
-				return ""
-			}
-			rc, err := f.Open()
-			if err != nil {
-				return ""
-			}
-			resData, err = io.ReadAll(io.LimitReader(rc, int64(maxZipFileSize)))
-			rc.Close()
-			if err != nil {
-				return ""
-			}
-			break
+	switch start.Name.Local {
+	case "manifest":
+		c.info.PackageID = attribute(start, "package")
+		c.info.VersionName = attribute(start, "versionName")
+		c.info.VersionCode = parseManifestInt(attribute(start, "versionCode"))
+	case "uses-sdk":
+		c.info.MinSDK = int32(parseManifestInt(attribute(start, "minSdkVersion")))
+		c.info.TargetSDK = int32(parseManifestInt(attribute(start, "targetSdkVersion")))
+	case "application":
+		c.info.Label = attribute(start, "label")
+	case "uses-permission", "uses-permission-sdk-23", "uses-permission-sdk-m":
+		if permission := attribute(start, "name"); permission != "" {
+			c.info.Permissions = append(c.info.Permissions, permission)
 		}
 	}
-	if resData == nil {
-		return ""
-	}
 
-	// Read AndroidManifest.xml
-	var manifestData []byte
-	for _, f := range r.File {
-		// Security: Validate zip entry path to prevent zip slip attacks
-		if !isValidZipEntryPath(f.Name) {
-			continue
-		}
-		if f.Name == "AndroidManifest.xml" {
-			if f.UncompressedSize64 > maxZipFileSize {
-				return ""
-			}
-			rc, err := f.Open()
-			if err != nil {
-				return ""
-			}
-			manifestData, err = io.ReadAll(io.LimitReader(rc, int64(maxZipFileSize)))
-			rc.Close()
-			if err != nil {
-				return ""
-			}
-			break
-		}
-	}
-	if manifestData == nil {
-		return ""
-	}
-
-	// Parse the resource table
-	table, err := androidbinary.NewTableFile(bytes.NewReader(resData))
-	if err != nil {
-		return ""
-	}
-
-	// Parse manifest to get the label resource ID
-	xmlFile, err := androidbinary.NewXMLFile(bytes.NewReader(manifestData))
-	if err != nil {
-		return ""
-	}
-
-	// Find the application label attribute in the XML
-	labelResID := findLabelResourceID(xmlFile, manifestData)
-	if labelResID == 0 {
-		return ""
-	}
-
-	// Try English locale first
-	englishConfig := &androidbinary.ResTableConfig{
-		Language: [2]uint8{'e', 'n'},
-	}
-	label := resolveStringResource(table, androidbinary.ResID(labelResID), englishConfig, 10)
-	if label != "" && isLikelyEnglish(label) {
-		return label
-	}
-
-	// Fall back to default config
-	label = resolveStringResource(table, androidbinary.ResID(labelResID), nil, 10)
-	if label != "" && isLikelyEnglish(label) {
-		return label
-	}
-
-	// Return whatever we got, even if it's not English
-	return label
+	return nil
 }
 
-// findLabelResourceID finds the label resource ID from the binary XML manifest.
-// It parses the binary AXML format to find the application element's label attribute.
-func findLabelResourceID(xmlFile *androidbinary.XMLFile, data []byte) uint32 {
-	reader := bytes.NewReader(data)
-
-	// Read the main AXML header
-	var mainChunkType uint16
-	var mainHeaderSize uint16
-	var mainChunkSize uint32
-	binary.Read(reader, binary.LittleEndian, &mainChunkType)
-	binary.Read(reader, binary.LittleEndian, &mainHeaderSize)
-	binary.Read(reader, binary.LittleEndian, &mainChunkSize)
-
-	// Start parsing after the main header
-	offset := int64(mainHeaderSize)
-	fileSize := int64(len(data))
-
-	for offset < fileSize {
-		if offset+8 > fileSize {
-			break
-		}
-
-		reader.Seek(offset, io.SeekStart)
-		var chunkType uint16
-		var headerSize uint16
-		var chunkSize uint32
-		binary.Read(reader, binary.LittleEndian, &chunkType)
-		binary.Read(reader, binary.LittleEndian, &headerSize)
-		binary.Read(reader, binary.LittleEndian, &chunkSize)
-
-		if chunkSize == 0 || chunkSize > uint32(fileSize) {
-			break
-		}
-
-		// START_ELEMENT = 0x0102
-		if chunkType == 0x0102 {
-			// Read ResXMLTreeNode header (skip lineNumber and comment)
-			reader.Seek(offset+int64(headerSize), io.SeekStart)
-
-			// Read ResXMLTreeAttrExt
-			var ns uint32
-			var name uint32
-			binary.Read(reader, binary.LittleEndian, &ns)
-			binary.Read(reader, binary.LittleEndian, &name)
-
-			elemName := xmlFile.GetString(androidbinary.ResStringPoolRef(name))
-
-			var attrStart uint16
-			var attrSize uint16
-			var attrCount uint16
-			binary.Read(reader, binary.LittleEndian, &attrStart)
-			binary.Read(reader, binary.LittleEndian, &attrSize)
-			binary.Read(reader, binary.LittleEndian, &attrCount)
-
-			// Skip idIndex, classIndex, styleIndex
-			reader.Seek(6, io.SeekCurrent)
-
-			// Only process application element
-			if elemName == "application" {
-				for i := uint16(0); i < attrCount; i++ {
-					var attrNsIdx uint32
-					var attrNameIdx uint32
-					var attrRawValue uint32
-					var attrTypedValueSize uint16
-					var attrTypedValueRes0 uint8
-					var attrTypedValueDataType uint8
-					var attrTypedValueData uint32
-
-					binary.Read(reader, binary.LittleEndian, &attrNsIdx)
-					binary.Read(reader, binary.LittleEndian, &attrNameIdx)
-					binary.Read(reader, binary.LittleEndian, &attrRawValue)
-					binary.Read(reader, binary.LittleEndian, &attrTypedValueSize)
-					binary.Read(reader, binary.LittleEndian, &attrTypedValueRes0)
-					binary.Read(reader, binary.LittleEndian, &attrTypedValueDataType)
-					binary.Read(reader, binary.LittleEndian, &attrTypedValueData)
-
-					attrName := xmlFile.GetString(androidbinary.ResStringPoolRef(attrNameIdx))
-
-					// Check if this is a label attribute with a reference value
-					if attrName == "label" && attrTypedValueDataType == 0x01 && attrTypedValueData != 0 {
-						return attrTypedValueData
-					}
-				}
-			}
-		}
-
-		offset += int64(chunkSize)
-	}
-
-	return 0
+func (c *manifestCollector) Flush() error {
+	return nil
 }
 
-// resolveStringResource resolves a resource ID to a string, following references.
-func resolveStringResource(table *androidbinary.TableFile, id androidbinary.ResID, config *androidbinary.ResTableConfig, maxDepth int) string {
-	if maxDepth <= 0 {
-		return ""
+func parseManifest(path string) (manifestInfo, error) {
+	collector := &manifestCollector{}
+	zipErr, _, manifestErr := apkparser.ParseApk(path, collector)
+	if zipErr != nil {
+		return manifestInfo{}, fmt.Errorf("open APK: %w", zipErr)
 	}
-
-	val, err := table.GetResource(id, config)
-	if err != nil {
-		return ""
+	if manifestErr != nil {
+		return manifestInfo{}, fmt.Errorf("parse AndroidManifest.xml: %w", manifestErr)
 	}
+	if collector.info.PackageID == "" {
+		return manifestInfo{}, fmt.Errorf("parse AndroidManifest.xml: package is missing")
+	}
+	return collector.info, nil
+}
 
-	switch v := val.(type) {
-	case string:
-		return v
-	case uint32:
-		// This is likely a reference to another resource
-		// Check if it looks like a valid resource ID (0x7fXXXXXX pattern)
-		if v&0xFF000000 == 0x7F000000 {
-			return resolveStringResource(table, androidbinary.ResID(v), config, maxDepth-1)
+func attribute(start xml.StartElement, name string) string {
+	for _, attr := range start.Attr {
+		if attr.Name.Local == name {
+			return attr.Value
 		}
-		return ""
-	default:
-		return ""
 	}
+	return ""
+}
+
+func parseManifestInt(value string) int64 {
+	if value == "" {
+		return 0
+	}
+	parsed, err := strconv.ParseInt(value, 0, 64)
+	if err != nil {
+		return 0
+	}
+	return parsed
 }
 
 // hashFile calculates SHA256 hash of a file.
@@ -461,22 +266,6 @@ func isValidZipEntryPath(path string) bool {
 	return true
 }
 
-// extractPermissions extracts Android permissions from the manifest.
-func extractPermissions(manifest apk.Manifest) []string {
-	if len(manifest.UsesPermissions) == 0 {
-		return nil
-	}
-
-	permissions := make([]string, 0, len(manifest.UsesPermissions))
-	for _, perm := range manifest.UsesPermissions {
-		name := perm.Name.MustString()
-		if name != "" {
-			permissions = append(permissions, name)
-		}
-	}
-	return permissions
-}
-
 // verifyCertificate verifies the APK signature and returns the certificate fingerprint.
 func verifyCertificate(path string) (string, error) {
 	res, err := apkverifier.Verify(path, nil)
@@ -514,7 +303,13 @@ func ExtractCertificate(path string) (*x509.Certificate, error) {
 
 // extractIcon extracts the app icon from the APK as PNG bytes.
 // It tries to get the highest resolution icon available by requesting different densities.
-func extractIcon(pkg *apk.Apk, path string) ([]byte, error) {
+func extractIcon(path string) ([]byte, error) {
+	pkg, err := apk.OpenFile(path)
+	if err != nil {
+		return extractIconManually(path)
+	}
+	defer pkg.Close()
+
 	// Android density values from highest to lowest
 	// xxxhdpi=640, xxhdpi=480, xhdpi=320, hdpi=240, mdpi=160
 	densities := []uint16{640, 480, 320, 240, 160}
