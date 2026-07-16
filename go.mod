@@ -7,6 +7,7 @@ toolchain go1.24.11
 require (
 	github.com/PaesslerAG/jsonpath v0.1.1
 	github.com/PuerkitoBio/goquery v1.11.0
+	github.com/avast/apkparser v0.0.0-20251022140151-7294e274bf65
 	github.com/avast/apkverifier v0.0.0-20251022140917-74acdc5f8b3f
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.4
@@ -23,7 +24,6 @@ require (
 	github.com/ImVexed/fasturl v0.0.0-20230304231329-4e41488060f3 // indirect
 	github.com/PaesslerAG/gval v1.0.0 // indirect
 	github.com/andybalholm/cascadia v1.3.3 // indirect
-	github.com/avast/apkparser v0.0.0-20251022140151-7294e274bf65 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/btcsuite/btcd/btcec/v2 v2.3.4 // indirect
 	github.com/btcsuite/btcd/btcutil v1.1.5 // indirect
