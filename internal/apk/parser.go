@@ -173,7 +173,36 @@ func parseManifest(path string) (manifestInfo, error) {
 	if collector.info.PackageID == "" {
 		return manifestInfo{}, fmt.Errorf("parse AndroidManifest.xml: package is missing")
 	}
+	if isResourceReference(collector.info.Label) {
+		if label, err := resolveLabel(path); err == nil && label != "" {
+			collector.info.Label = label
+		}
+	}
 	return collector.info, nil
+}
+
+// isResourceReference reports whether a manifest value looks like an Android
+// resource ID. apkparser may leave these unresolved when the resource table
+// uses a format it cannot decode.
+func isResourceReference(value string) bool {
+	return strings.HasPrefix(strings.ToLower(value), "@")
+}
+
+// resolveLabel resolves the application label through androidbinary's
+// resource table support. This is best-effort because the primary manifest
+// parser supports APKs that androidbinary may not be able to open.
+func resolveLabel(path string) (string, error) {
+	pkg, err := apk.OpenFile(path)
+	if err != nil {
+		return "", fmt.Errorf("open APK for label resolution: %w", err)
+	}
+	defer pkg.Close()
+
+	label, err := pkg.Label(nil)
+	if err != nil {
+		return "", fmt.Errorf("resolve application label: %w", err)
+	}
+	return label, nil
 }
 
 func attribute(start xml.StartElement, name string) string {
