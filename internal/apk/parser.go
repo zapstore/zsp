@@ -50,6 +50,9 @@ type APKInfo struct {
 	// Android permissions (e.g., ["android.permission.INTERNET", "android.permission.CAMERA"])
 	Permissions []string
 
+	// Required device features declared by the manifest.
+	Features []string
+
 	// Certificate SHA-256 fingerprint (hex encoded, lowercase)
 	CertFingerprint string
 
@@ -91,6 +94,7 @@ func Parse(path string) (*APKInfo, error) {
 		TargetSDK:   manifest.TargetSDK,
 		Label:       manifest.Label,
 		Permissions: manifest.Permissions,
+		Features:    manifest.Features,
 		FilePath:    path,
 		FileSize:    fi.Size(),
 		SHA256:      sha256Hash,
@@ -123,6 +127,7 @@ type manifestInfo struct {
 	TargetSDK   int32
 	Label       string
 	Permissions []string
+	Features    []string
 }
 
 // manifestCollector records the fields zsp needs from an Android manifest.
@@ -151,6 +156,10 @@ func (c *manifestCollector) EncodeToken(token xml.Token) error {
 	case "uses-permission", "uses-permission-sdk-23", "uses-permission-sdk-m":
 		if permission := attribute(start, "name"); permission != "" {
 			c.info.Permissions = append(c.info.Permissions, permission)
+		}
+	case "uses-feature":
+		if feature := attribute(start, "name"); feature != "" {
+			c.info.Features = append(c.info.Features, feature)
 		}
 	}
 
@@ -534,6 +543,17 @@ func (a *APKInfo) IsArm64() bool {
 	}
 	// If no native libs, assume it's architecture-independent (pure Java/Kotlin)
 	return len(a.Architectures) == 0
+}
+
+// IsWatch returns true if the APK declares the standard Android watch device
+// feature used by Wear OS applications.
+func (a *APKInfo) IsWatch() bool {
+	for _, feature := range a.Features {
+		if feature == "android.hardware.type.watch" {
+			return true
+		}
+	}
+	return false
 }
 
 // HasGoogleDependency checks if the APK might have Google Play dependencies

@@ -361,6 +361,10 @@ func (p *Publisher) downloadAndParseAPK(ctx context.Context) error {
 		return fmt.Errorf("failed to parse APK: %w", err)
 	}
 
+	if p.apkInfo.IsWatch() {
+		return fmt.Errorf("Wear OS/watch APKs are not supported")
+	}
+
 	// Verify arm64 support
 	if !p.apkInfo.IsArm64() {
 		return fmt.Errorf("APK does not support arm64-v8a architecture (found: %v)", p.apkInfo.Architectures)

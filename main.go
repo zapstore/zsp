@@ -801,6 +801,10 @@ func checkAPK(ctx context.Context, opts *cli.Options) error {
 		return err
 	}
 
+	if apkInfo.IsWatch() {
+		return fmt.Errorf("Wear OS/watch APKs are not supported")
+	}
+
 	if !apkInfo.IsArm64() {
 		return fmt.Errorf("APK does not support arm64-v8a architecture (found: %v)", apkInfo.Architectures)
 	}

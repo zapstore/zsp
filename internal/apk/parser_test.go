@@ -158,6 +158,27 @@ func TestIsArm64(t *testing.T) {
 	}
 }
 
+func TestIsWatch(t *testing.T) {
+	tests := []struct {
+		name     string
+		features []string
+		want     bool
+	}{
+		{"Wear OS watch", []string{"android.hardware.type.watch"}, true},
+		{"phone", []string{"android.hardware.camera"}, false},
+		{"no declared features", nil, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := &APKInfo{Features: tt.features}
+			if got := info.IsWatch(); got != tt.want {
+				t.Errorf("IsWatch() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHashFile(t *testing.T) {
 	// Create a temporary file with known content
 	tmpDir := t.TempDir()
