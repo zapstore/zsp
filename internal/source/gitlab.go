@@ -423,9 +423,9 @@ func getOK(ctx context.Context, client *http.Client, downloadURL string) (*http.
 	if err != nil {
 		return nil, err
 	}
-	resp, err := client.Do(req)
+	resp, err := doAPKDownload(ctx, client, req)
 	if err != nil {
-		return nil, fmt.Errorf("download failed: %w", err)
+		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()

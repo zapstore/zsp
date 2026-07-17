@@ -1,11 +1,110 @@
 package source
 
 import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/zapstore/zsp/internal/config"
 )
+
+func TestDoAPKDownloadTorFallback(t *testing.T) {
+	tests := []struct {
+		name         string
+		directStatus int
+		torStatus    int
+		torClientErr error
+		wantErr      string
+		wantTorCalls int
+		wantTorAuth  string
+	}{
+		{
+			name:         "successful direct request does not use Tor",
+			directStatus: http.StatusOK,
+			wantTorCalls: 0,
+		},
+		{
+			name:         "forbidden request retries unauthenticated through Tor",
+			directStatus: http.StatusForbidden,
+			torStatus:    http.StatusOK,
+			wantTorCalls: 1,
+			wantTorAuth:  "",
+		},
+		{
+			name:         "non-forbidden response does not use Tor",
+			directStatus: http.StatusInternalServerError,
+			wantTorCalls: 0,
+		},
+		{
+			name:         "unavailable Tor reports actionable error",
+			directStatus: http.StatusForbidden,
+			torClientErr: errors.New("connection refused"),
+			wantErr:      "start Tor with SOCKS5 on 127.0.0.1:9050",
+			wantTorCalls: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			torCalls := 0
+			var torAuthorization string
+			originalTorClient := torDownloadClient
+			t.Cleanup(func() {
+				torDownloadClient = originalTorClient
+			})
+			torDownloadClient = func() (*http.Client, error) {
+				if tt.torClientErr != nil {
+					return nil, tt.torClientErr
+				}
+				return &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					torCalls++
+					torAuthorization = req.Header.Get("Authorization")
+					return &http.Response{
+						StatusCode: tt.torStatus,
+						Body:       io.NopCloser(strings.NewReader("APK")),
+						Header:     make(http.Header),
+						Request:    req,
+					}, nil
+				})}, nil
+			}
+
+			directClient := &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: tt.directStatus,
+					Body:       io.NopCloser(strings.NewReader("forbidden")),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			})}
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://example.com/app.apk", nil)
+			if err != nil {
+				t.Fatalf("create request: %v", err)
+			}
+			req.Header.Set("Authorization", "Bearer secret")
+
+			resp, err := doAPKDownload(context.Background(), directClient, req)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("doAPKDownload() error = %v, want substring %q", err, tt.wantErr)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("doAPKDownload() error = %v", err)
+				}
+				resp.Body.Close()
+			}
+			if torCalls != tt.wantTorCalls {
+				t.Errorf("Tor request count = %d, want %d", torCalls, tt.wantTorCalls)
+			}
+			if torAuthorization != tt.wantTorAuth {
+				t.Errorf("Tor Authorization = %q, want %q", torAuthorization, tt.wantTorAuth)
+			}
+		})
+	}
+}
 
 // TestNewSourceFromConfig tests source creation from various config types.
 // These tests verify URL parsing and source factory logic, not network calls.

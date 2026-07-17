@@ -17,6 +17,7 @@ import (
 
 	"github.com/zapstore/zsp/internal/apk"
 	"github.com/zapstore/zsp/internal/config"
+	"golang.org/x/net/proxy"
 )
 
 // newSecureHTTPClient creates an HTTP client with security best practices:
@@ -43,6 +44,7 @@ func newSecureHTTPClient(timeout time.Duration) *http.Client {
 // downloadStallTimeout is the duration after which a download is considered stalled
 // if no data has been received.
 const downloadStallTimeout = 30 * time.Second
+const torSOCKSAddress = "127.0.0.1:9050"
 
 // newDownloadHTTPClient creates an HTTP client for large file downloads.
 // Unlike newSecureHTTPClient, it does NOT set a total request timeout.
@@ -60,6 +62,62 @@ func newDownloadHTTPClient() *http.Client {
 			ResponseHeaderTimeout: 30 * time.Second, // timeout for server to start responding
 		},
 	}
+}
+
+// newTorDownloadHTTPClient creates a download client routed through a locally
+// running Tor SOCKS5 proxy.
+func newTorDownloadHTTPClient() (*http.Client, error) {
+	dialer, err := proxy.SOCKS5("tcp", torSOCKSAddress, nil, proxy.Direct)
+	if err != nil {
+		return nil, fmt.Errorf("create Tor SOCKS5 dialer: %w", err)
+	}
+
+	contextDialer, ok := dialer.(proxy.ContextDialer)
+	if !ok {
+		return nil, fmt.Errorf("Tor SOCKS5 dialer does not support context cancellation")
+	}
+
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext: contextDialer.DialContext,
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			},
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   10,
+			IdleConnTimeout:       90 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+		},
+	}, nil
+}
+
+var torDownloadClient = newTorDownloadHTTPClient
+
+// doAPKDownload sends an APK download request directly. If it receives a 403,
+// it retries once through the local Tor SOCKS5 proxy without credentials.
+func doAPKDownload(ctx context.Context, client *http.Client, req *http.Request) (*http.Response, error) {
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("download failed: %w", err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		return resp, nil
+	}
+	resp.Body.Close()
+
+	torClient, err := torDownloadClient()
+	if err != nil {
+		return nil, fmt.Errorf("download received 403; retry through Tor unavailable (start Tor with SOCKS5 on %s): %w", torSOCKSAddress, err)
+	}
+	torReq, err := http.NewRequestWithContext(ctx, req.Method, req.URL.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("create unauthenticated Tor download request: %w", err)
+	}
+	resp, err = torClient.Do(torReq)
+	if err != nil {
+		return nil, fmt.Errorf("download received 403; retry through Tor at %s failed: %w", torSOCKSAddress, err)
+	}
+	return resp, nil
 }
 
 // checkHTTPStatus validates an HTTP response status code and returns a descriptive error.

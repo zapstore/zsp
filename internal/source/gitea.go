@@ -296,9 +296,9 @@ func (g *Gitea) Download(ctx context.Context, asset *Asset, destDir string, prog
 		req.Header.Set("Authorization", "token "+g.token)
 	}
 
-	resp, err := dlClient.Do(req)
+	resp, err := doAPKDownload(ctx, dlClient, req)
 	if err != nil {
-		return "", fmt.Errorf("download failed: %w", err)
+		return "", err
 	}
 	defer resp.Body.Close()
 

@@ -361,9 +361,9 @@ func (f *FDroid) Download(ctx context.Context, asset *Asset, destDir string, pro
 		return "", err
 	}
 
-	resp, err := dlClient.Do(req)
+	resp, err := doAPKDownload(ctx, dlClient, req)
 	if err != nil {
-		return "", fmt.Errorf("download failed: %w", err)
+		return "", err
 	}
 	defer resp.Body.Close()
 
