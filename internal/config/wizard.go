@@ -265,14 +265,14 @@ repoLoop:
 				return nil, err
 			}
 
-		if source == "" {
-			// Release source is required if no repo
-			if cfg.Repository == "" && cfg.ReleaseSource == nil {
-				fmt.Printf("%s Release source is required when no repository is specified\n", ui.Warning("⚠"))
-				continue
+			if source == "" {
+				// Release source is required if no repo
+				if cfg.Repository == "" && cfg.ReleaseSource == nil {
+					fmt.Printf("%s Release source is required when no repository is specified\n", ui.Warning("⚠"))
+					continue
+				}
+				break
 			}
-			break
-		}
 
 			// Ensure URL has scheme
 			if !strings.Contains(source, "://") {
@@ -344,8 +344,9 @@ repoLoop:
 		// Determine which sources to pre-select
 		var preselected []int
 		for i, s := range availableSources {
-			// Pre-select GitHub if source is GitHub
-			if s.Value == "github" && effectiveSourceType == SourceGitHub {
+			// Pre-select the native repository source; Fastlane is optional.
+			if (s.Value == "github" && effectiveSourceType == SourceGitHub) ||
+				(s.Value == "gitlab" && effectiveSourceType == SourceGitLab) {
 				preselected = append(preselected, i)
 			}
 		}
@@ -641,6 +642,10 @@ func formatSourceList(sources []string) string {
 		switch src {
 		case "github":
 			names[i] = "GitHub"
+		case "gitlab":
+			names[i] = "GitLab"
+		case "fastlane":
+			names[i] = "Fastlane"
 		case "fdroid":
 			names[i] = "F-Droid"
 		case "playstore":
@@ -663,16 +668,21 @@ func formatSourceList(sources []string) string {
 }
 
 // BuildAvailableMetadataSources checks which metadata sources are available for the given package ID.
-// It checks F-Droid and Play Store availability if a package ID is provided.
+// It offers repository Fastlane/native metadata and checks F-Droid and Play Store when possible.
 func BuildAvailableMetadataSources(ctx context.Context, packageID string, sourceType SourceType) []MetadataSourceOption {
 	var sources []MetadataSourceOption
 
-	// GitHub is always available if source is GitHub
+	// Repository sources can optionally use Fastlane metadata or their native API.
 	if sourceType == SourceGitHub {
+		sources = append(sources, MetadataSourceOption{Name: "Fastlane", Value: "fastlane", Available: true})
 		sources = append(sources, MetadataSourceOption{Name: "GitHub", Value: "github", Available: true})
 	}
+	if sourceType == SourceGitLab {
+		sources = append(sources, MetadataSourceOption{Name: "Fastlane", Value: "fastlane", Available: true})
+		sources = append(sources, MetadataSourceOption{Name: "GitLab", Value: "gitlab", Available: true})
+	}
 
-	// If we don't have a package ID, only return GitHub (if applicable)
+	// If we don't have a package ID, only return repository sources.
 	if packageID == "" {
 		return sources
 	}

@@ -4,6 +4,7 @@ package source
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -54,10 +55,9 @@ func NewMetadataFetcherWithPackageID(cfg *config.Config, packageID string) *Meta
 	}
 }
 
-// DefaultMetadataSources returns the metadata sources to use.
-// The base source type (github, gitlab, fdroid) is always included automatically.
-// Any additional sources from metadata_sources config are appended.
-// Returns nil if no metadata source applies.
+// DefaultMetadataSources returns explicitly configured sources, or the
+// Fastlane-first fallback chain for a supported repository. Automatic metadata
+// does not infer F-Droid or Play Store sources.
 func DefaultMetadataSources(cfg *config.Config) []string {
 	var sources []string
 	seen := make(map[string]bool)
@@ -70,52 +70,32 @@ func DefaultMetadataSources(cfg *config.Config) []string {
 		}
 	}
 
-	// Always include the base source type's metadata source
-	sourceType := cfg.GetSourceType()
-	switch sourceType {
-	case config.SourceGitHub:
-		addSource("github")
-	case config.SourceGitLab:
-		addSource("gitlab")
-	case config.SourceFDroid:
-		addSource("fdroid")
-	}
-
-	// Also check repository URL for additional metadata (e.g., when release_source
-	// is F-Droid but repository is GitHub, we want both metadata sources)
-	if cfg.Repository != "" {
-		repoType := config.DetectSourceType(cfg.Repository)
-		switch repoType {
-		case config.SourceGitHub:
-			addSource("github")
-		case config.SourceGitLab:
-			addSource("gitlab")
+	if len(cfg.MetadataSources) > 0 {
+		for _, s := range cfg.MetadataSources {
+			addSource(strings.ToLower(strings.TrimSpace(s)))
 		}
+		sortMetadataSourcesByPriority(sources)
+		return sources
 	}
 
-	// Add any explicitly configured metadata sources
-	for _, s := range cfg.MetadataSources {
-		addSource(strings.ToLower(strings.TrimSpace(s)))
-	}
-
-	if len(sources) == 0 {
+	switch config.DetectSourceType(cfg.Repository) {
+	case config.SourceGitHub:
+		return []string{"fastlane", "github"}
+	case config.SourceGitLab:
+		return []string{"fastlane", "gitlab"}
+	default:
 		return nil
 	}
-
-	// Sort sources by priority: playstore has priority over github
-	// This ensures Play Store metadata (better descriptions/images) takes precedence
-	sortMetadataSourcesByPriority(sources)
-
-	return sources
 }
 
 // metadataSourcePriority defines the priority order for metadata sources.
 // Lower values = higher priority (processed first, wins for empty fields).
 var metadataSourcePriority = map[string]int{
 	"playstore": 1,
-	"fdroid":    2,
-	"gitlab":    3,
-	"github":    4,
+	"fastlane":  2,
+	"fdroid":    3,
+	"gitlab":    4,
+	"github":    5,
 }
 
 // sortMetadataSourcesByPriority sorts metadata sources by priority.
@@ -162,7 +142,7 @@ func (r *MetadataResult) HasErrors() bool {
 }
 
 // FetchMetadata fetches metadata from the specified sources and merges into config.
-// Sources can be: "github", "gitlab", "fdroid", "playstore"
+// Sources can be: "fastlane", "github", "gitlab", "fdroid", "playstore"
 // Only empty fields in config are populated (existing values are preserved).
 // Returns a MetadataResult containing any non-fatal errors from individual sources.
 func (f *MetadataFetcher) FetchMetadata(ctx context.Context, sources []string) error {
@@ -175,26 +155,7 @@ func (f *MetadataFetcher) FetchMetadataWithResult(ctx context.Context, sources [
 
 	for _, source := range sources {
 		source = strings.TrimSpace(strings.ToLower(source))
-		var meta *AppMetadata
-		var err error
-
-		switch source {
-		case "github":
-			meta, err = f.fetchGitHubMetadata(ctx)
-		case "gitlab":
-			meta, err = f.fetchGitLabMetadata(ctx)
-		case "fdroid":
-			meta, err = f.fetchFDroidMetadata(ctx)
-		case "playstore":
-			meta, err = f.fetchPlayStoreMetadata(ctx)
-		default:
-			result.Errors = append(result.Errors, &MetadataError{
-				Source: source,
-				Err:    fmt.Errorf("unknown metadata source"),
-			})
-			continue
-		}
-
+		meta, err := f.fetchMetadataSource(ctx, source)
 		if err != nil {
 			result.Errors = append(result.Errors, &MetadataError{
 				Source: source,
@@ -208,6 +169,46 @@ func (f *MetadataFetcher) FetchMetadataWithResult(ctx context.Context, sources [
 	}
 
 	return result
+}
+
+// FetchAutomaticMetadata uses Fastlane metadata when present. It fetches the
+// native repository source only when the Fastlane directory is absent.
+func (f *MetadataFetcher) FetchAutomaticMetadata(ctx context.Context, fallback string) error {
+	result := &MetadataResult{}
+	meta, err := f.fetchMetadataSource(ctx, "fastlane")
+	if err == nil {
+		f.mergeMetadata(meta)
+		return result.firstFatalError()
+	}
+	if !errors.Is(err, errFastlaneUnavailable) {
+		result.Errors = append(result.Errors, &MetadataError{Source: "fastlane", Err: err})
+		return result.firstFatalError()
+	}
+
+	meta, err = f.fetchMetadataSource(ctx, fallback)
+	if err != nil {
+		result.Errors = append(result.Errors, &MetadataError{Source: fallback, Err: err})
+		return result.firstFatalError()
+	}
+	f.mergeMetadata(meta)
+	return result.firstFatalError()
+}
+
+func (f *MetadataFetcher) fetchMetadataSource(ctx context.Context, source string) (*AppMetadata, error) {
+	switch source {
+	case "fastlane":
+		return f.fetchFastlaneMetadata(ctx)
+	case "github":
+		return f.fetchGitHubMetadata(ctx)
+	case "gitlab":
+		return f.fetchGitLabMetadata(ctx)
+	case "fdroid":
+		return f.fetchFDroidMetadata(ctx)
+	case "playstore":
+		return f.fetchPlayStoreMetadata(ctx)
+	default:
+		return nil, fmt.Errorf("unknown metadata source")
+	}
 }
 
 // firstFatalError returns nil - all metadata errors are non-fatal.
@@ -327,11 +328,11 @@ func (f *MetadataFetcher) fetchGitHubReadme(ctx context.Context, owner, repo str
 
 // fetchGitLabMetadata fetches metadata from GitLab repository.
 func (f *MetadataFetcher) fetchGitLabMetadata(ctx context.Context) (*AppMetadata, error) {
-	repoPath := config.GetGitLabRepo(f.cfg.Repository)
+	baseURL, repoPath := config.GetGitLabRepoWithBase(f.cfg.Repository)
 	if repoPath == "" {
 		// Try release_source if repository doesn't have GitLab
 		if f.cfg.ReleaseSource != nil {
-			repoPath = config.GetGitLabRepo(f.cfg.ReleaseSource.URL)
+			baseURL, repoPath = config.GetGitLabRepoWithBase(f.cfg.ReleaseSource.URL)
 		}
 	}
 	if repoPath == "" {
@@ -342,7 +343,7 @@ func (f *MetadataFetcher) fetchGitLabMetadata(ctx context.Context) (*AppMetadata
 	encodedPath := strings.ReplaceAll(repoPath, "/", "%2F")
 
 	// Fetch project info
-	url := fmt.Sprintf("https://gitlab.com/api/v4/projects/%s", encodedPath)
+	url := fmt.Sprintf("%s/api/v4/projects/%s", baseURL, encodedPath)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -392,7 +393,7 @@ func (f *MetadataFetcher) fetchGitLabMetadata(ctx context.Context) (*AppMetadata
 
 	// Try to fetch README for a longer description if the project description is short
 	if len(projectInfo.Description) < 100 && projectInfo.DefaultBranch != "" {
-		readme, err := f.fetchGitLabReadme(ctx, encodedPath, projectInfo.DefaultBranch)
+		readme, err := f.fetchGitLabReadme(ctx, baseURL, encodedPath, projectInfo.DefaultBranch)
 		if err == nil && readme != "" {
 			firstPara := extractFirstParagraph(readme)
 			if len(firstPara) > len(projectInfo.Description) {
@@ -405,15 +406,15 @@ func (f *MetadataFetcher) fetchGitLabMetadata(ctx context.Context) (*AppMetadata
 }
 
 // fetchGitLabReadme fetches the README content from GitLab.
-func (f *MetadataFetcher) fetchGitLabReadme(ctx context.Context, encodedPath, branch string) (string, error) {
+func (f *MetadataFetcher) fetchGitLabReadme(ctx context.Context, baseURL, encodedPath, branch string) (string, error) {
 	// GitLab API: GET /projects/:id/repository/files/:file_path/raw?ref=:branch
 	// Try common README filenames
 	readmeNames := []string{"README.md", "README", "readme.md", "Readme.md"}
 
 	for _, name := range readmeNames {
 		encodedName := strings.ReplaceAll(name, ".", "%2E")
-		url := fmt.Sprintf("https://gitlab.com/api/v4/projects/%s/repository/files/%s/raw?ref=%s",
-			encodedPath, encodedName, branch)
+		url := fmt.Sprintf("%s/api/v4/projects/%s/repository/files/%s/raw?ref=%s",
+			baseURL, encodedPath, encodedName, branch)
 
 		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {

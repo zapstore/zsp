@@ -68,8 +68,9 @@ type Config struct {
 	Variants map[string]string `yaml:"variants,omitempty"`
 
 	// MetadataSources specifies where to fetch additional metadata from.
-	// Supported values: "github", "gitlab", "fdroid", "playstore"
-	// If not set, defaults are inferred from release_source or repository.
+	// Supported values: "fastlane", "github", "gitlab", "fdroid", "playstore".
+	// If not set, GitHub and GitLab repositories use Fastlane metadata first,
+	// then fall back to their native repository metadata.
 	MetadataSources []string `yaml:"metadata_sources,omitempty"`
 
 	// Pubkey is the npub of the developer who publishes this app.

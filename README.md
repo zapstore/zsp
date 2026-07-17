@@ -6,7 +6,7 @@ A fast CLI tool for publishing Android apps to Nostr relays. Used by [Zapstore](
 
 - **APK acquisition** from GitHub, GitLab, Codeberg, F-Droid, web pages, or local files
 - **APK parsing** to extract package info, version, certificate fingerprint, icon, and permissions
-- **Metadata enrichment** from GitHub, GitLab, F-Droid, or Google Play Store
+- **Metadata enrichment** from Fastlane, GitHub, GitLab, F-Droid, or Google Play Store
 - **Blossom uploads** for icons, screenshots, APKs
 - **Nostr event signing** via private key, NIP-46 bunker, or browser extension (NIP-07)
 - **Relay publishing** of compliant software events
@@ -127,6 +127,7 @@ zsp can fetch app metadata from external sources to enrich your publication.
 
 | Source | Data Retrieved |
 |--------|----------------|
+| `fastlane` | Publisher-maintained title, descriptions, icon, screenshots |
 | `github` | Name, description, topics, license, website, README |
 | `gitlab` | Name, description, topics, license |
 | `fdroid` | Name, description, summary, categories, icon, screenshots |
@@ -138,18 +139,24 @@ When multiple sources are used, metadata is merged with this priority:
 1. YAML config (always wins)
 2. APK metadata (app label)
 3. Play Store
-4. Others
+4. Fastlane
+5. Others
+
+When `metadata_sources` is omitted for a GitHub or GitLab repository, zsp tries
+Fastlane metadata first. If the Fastlane Android metadata directory is absent,
+it falls back to that repository's native API and README metadata. F-Droid and
+Play Store metadata are only fetched when explicitly selected.
 
 ### Usage
 
 ```bash
 # CLI flags (can be repeated)
-zsp publish -m github -m playstore
+zsp publish -m fastlane -m github
 
 # Or in YAML
 metadata_sources:
+  - fastlane
   - playstore
-  - github
 ```
 
 ---
@@ -259,8 +266,8 @@ variants:
 # External sources for metadata enrichment
 # Note: metadata is fetched automatically for new releases (use --skip-metadata to disable)
 metadata_sources:
+  - fastlane
   - playstore
-  - fdroid
 ```
 
 ---

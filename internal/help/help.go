@@ -131,8 +131,8 @@ func PublishHelp() string {
 	b.WriteString("                            " + renderGreyDark("Also fetches releases from here unless -s is specified") + "\n")
 	writeFlag(&b, "-s <url>", "Release/download source URL (F-Droid, web page, etc)")
 	b.WriteString("                            " + renderGreyDark("Use alone (no -r) for closed-source apps") + "\n")
-	writeFlag(&b, "-m <source>", "Fetch metadata from source (repeatable: -m github -m fdroid)")
-	b.WriteString("                            " + renderGreyDark("Fetched automatically for new releases") + "\n")
+	writeFlag(&b, "-m <source>", "Fetch metadata from source (repeatable: -m fastlane -m github)")
+	b.WriteString("                            " + renderGreyDark("Fastlane is tried automatically for GitHub/GitLab repositories") + "\n")
 	writeFlag(&b, "--match <pattern>", "Regex pattern to filter APK assets (rarely needed)")
 	b.WriteString("\n")
 

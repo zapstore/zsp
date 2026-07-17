@@ -513,8 +513,10 @@ func (p *Publisher) gatherMetadata(ctx context.Context) error {
 // fetchExternalMetadata fetches metadata from configured sources.
 func (p *Publisher) fetchExternalMetadata(ctx context.Context) error {
 	metadataSources := p.opts.Publish.Metadata
+	automaticMetadata := false
 	if len(metadataSources) == 0 {
 		metadataSources = source.DefaultMetadataSources(p.cfg)
+		automaticMetadata = len(p.cfg.MetadataSources) == 0
 	}
 
 	if len(metadataSources) == 0 {
@@ -528,6 +530,9 @@ func (p *Publisher) fetchExternalMetadata(ctx context.Context) error {
 	fetcher.APKName = p.apkInfo.Label
 
 	err := WithSpinnerMsg(p.opts, "Fetching metadata from external sources...", func() error {
+		if automaticMetadata && len(metadataSources) == 2 && metadataSources[0] == "fastlane" {
+			return fetcher.FetchAutomaticMetadata(ctx, metadataSources[1])
+		}
 		return fetcher.FetchMetadata(ctx, metadataSources)
 	}, func(err error) string {
 		if err != nil {
