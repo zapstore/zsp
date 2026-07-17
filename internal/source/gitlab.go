@@ -1,6 +1,7 @@
 package source
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -18,6 +19,14 @@ import (
 
 // gitlabArchRegex extracts architecture from GitLab asset names like "APK (arm64-v8a)"
 var gitlabArchRegex = regexp.MustCompile(`\((arm64-v8a|armeabi-v7a|arm|x86_64|x86)\)`)
+
+// gitlabExternalRedirectMarker is present in GitLab's HTML interstitial for
+// externally hosted release assets. GitLab returns HTTP 200 with this page
+// instead of a Location header, so http.Client cannot follow it automatically.
+const gitlabExternalRedirectMarker = "You are being redirected away from GitLab"
+
+// gitlabExternalRedirectHref matches the external target link on that page.
+var gitlabExternalRedirectHref = regexp.MustCompile(`(?i)href=["'](https?://[^"']+)["']`)
 
 // gitlabCache stores the last successfully published release version.
 type gitlabCache struct {
@@ -197,23 +206,37 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	return nil, fmt.Errorf("no releases with valid APKs found in the last %d releases", maxReleasesToCheck)
 }
 
+// pickGitLabAssetURL chooses the download URL for a release asset link.
+//
+// For externally hosted assets (CDN/S3/etc), link.URL is the real file while
+// direct_asset_url is a GitLab interstitial HTML page. Prefer link.URL.
+// Fall back to direct_asset_url for GitLab-hosted uploads where URL may be empty.
+func pickGitLabAssetURL(link gitlabAssetLink) string {
+	if link.URL != "" {
+		return link.URL
+	}
+	return link.DirectAssetURL
+}
+
 // convertRelease converts a GitLab release to our Release type.
 func (g *GitLab) convertRelease(glRelease *gitlabRelease) *Release {
 	// Convert asset links to our Asset type
 	assets := make([]*Asset, 0, len(glRelease.Assets.Links))
 	for _, link := range glRelease.Assets.Links {
-		// Prefer direct_asset_url as it contains the actual filename
-		downloadURL := link.DirectAssetURL
-		if downloadURL == "" {
-			downloadURL = link.URL
+		downloadURL := pickGitLabAssetURL(link)
+
+		// Prefer the URL that carries a real filename when extracting asset names.
+		nameURL := link.DirectAssetURL
+		if nameURL == "" || !strings.Contains(strings.ToLower(nameURL), ".apk") {
+			nameURL = downloadURL
 		}
 
 		// Extract the actual filename from the URL (strip query parameters)
 		assetName := link.Name
-		if downloadURL != "" {
+		if nameURL != "" {
 			// Parse the URL to properly extract the path without query params
-			urlPath := downloadURL
-			if parsedURL, err := url.Parse(downloadURL); err == nil {
+			urlPath := nameURL
+			if parsedURL, err := url.Parse(nameURL); err == nil {
 				urlPath = parsedURL.Path
 			}
 
@@ -308,20 +331,11 @@ func (g *GitLab) Download(ctx context.Context, asset *Asset, destDir string, pro
 	// Use download client (no total timeout — only stall detection)
 	dlClient := newDownloadHTTPClient()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", asset.URL, nil)
+	resp, err := g.doAssetDownload(ctx, dlClient, asset.URL)
 	if err != nil {
 		return "", err
 	}
-
-	resp, err := dlClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("download failed: %w", err)
-	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download failed with status %d: %s", resp.StatusCode, asset.URL)
-	}
 
 	// Use Content-Length from response if available, otherwise use asset size
 	total := resp.ContentLength
@@ -367,6 +381,108 @@ func (g *GitLab) Download(ctx context.Context, asset *Asset, destDir string, pro
 
 	asset.LocalPath = destPath
 	return destPath, nil
+}
+
+// doAssetDownload GETs url and, when GitLab returns its external-redirect
+// interstitial (HTTP 200 HTML, no Location), follows the embedded href once.
+func (g *GitLab) doAssetDownload(ctx context.Context, client *http.Client, downloadURL string) (*http.Response, error) {
+	resp, err := getOK(ctx, client, downloadURL)
+	if err != nil {
+		return nil, err
+	}
+
+	externalURL, ok, err := maybeGitLabExternalRedirect(resp)
+	if err != nil {
+		resp.Body.Close()
+		return nil, fmt.Errorf("download failed: %w", err)
+	}
+	if !ok {
+		return resp, nil
+	}
+
+	resp.Body.Close()
+	resp, err = getOK(ctx, client, externalURL)
+	if err != nil {
+		return nil, fmt.Errorf("follow GitLab external redirect: %w", err)
+	}
+
+	// Refuse a second interstitial — avoid loops if GitLab points at itself.
+	if _, again, err := maybeGitLabExternalRedirect(resp); err != nil {
+		resp.Body.Close()
+		return nil, fmt.Errorf("follow GitLab external redirect: %w", err)
+	} else if again {
+		resp.Body.Close()
+		return nil, fmt.Errorf("GitLab external redirect loop for %s", downloadURL)
+	}
+
+	return resp, nil
+}
+
+func getOK(ctx context.Context, client *http.Client, downloadURL string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("download failed: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("download failed with status %d: %s", resp.StatusCode, downloadURL)
+	}
+	return resp, nil
+}
+
+// maybeGitLabExternalRedirect inspects a response for GitLab's interstitial
+// HTML page. On match it consumes the body and returns the external URL.
+// Non-interstitial bodies are restored so the caller can still read them.
+func maybeGitLabExternalRedirect(resp *http.Response) (string, bool, error) {
+	if resp == nil || resp.Body == nil {
+		return "", false, nil
+	}
+	if !looksLikeGitLabExternalRedirect(resp) {
+		return "", false, nil
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 32*1024))
+	if err != nil {
+		return "", false, fmt.Errorf("read GitLab redirect page: %w", err)
+	}
+
+	if !strings.Contains(string(body), gitlabExternalRedirectMarker) {
+		// Not the interstitial — put the peeked bytes back for the caller.
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		return "", false, nil
+	}
+
+	externalURL, ok := parseGitLabExternalRedirect(body)
+	if !ok {
+		return "", false, fmt.Errorf("GitLab redirect page missing external URL")
+	}
+	return externalURL, true, nil
+}
+
+func looksLikeGitLabExternalRedirect(resp *http.Response) bool {
+	return strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html")
+}
+
+// parseGitLabExternalRedirect extracts the external download URL from GitLab's
+// "redirected away from GitLab" interstitial HTML.
+func parseGitLabExternalRedirect(body []byte) (string, bool) {
+	if !strings.Contains(string(body), gitlabExternalRedirectMarker) {
+		return "", false
+	}
+	match := gitlabExternalRedirectHref.FindSubmatch(body)
+	if len(match) < 2 {
+		return "", false
+	}
+	externalURL := string(match[1])
+	parsed, err := url.Parse(externalURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return "", false
+	}
+	return externalURL, true
 }
 
 // matchesReleaseFilter checks if a tag name matches the configured release_filter.
