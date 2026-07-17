@@ -17,6 +17,7 @@ import (
 	"github.com/zapstore/zsp/internal/blossom"
 	"github.com/zapstore/zsp/internal/cli"
 	"github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/internal/media"
 	"github.com/zapstore/zsp/internal/nostr"
 	"github.com/zapstore/zsp/internal/source"
 	"github.com/zapstore/zsp/internal/ui"
@@ -110,7 +111,7 @@ func PreDownloadImages(ctx context.Context, cfg *config.Config, opts *cli.Option
 				continue
 			}
 
-			data, hash, mimeType, err := downloadRemoteImage(ctx, img)
+			data, hash, mimeType, err := downloadAndPrepareImage(ctx, img, "screenshot", opts)
 			if err != nil {
 				if spinner != nil {
 					spinner.StopWithWarning(fmt.Sprintf("Failed to download screenshot: %v", err))
@@ -147,7 +148,7 @@ func downloadImageWithSpinner(ctx context.Context, url, imageType string, opts *
 		spinner.Start()
 	}
 
-	data, hash, mimeType, err := downloadRemoteImage(ctx, url)
+	data, hash, mimeType, err := downloadAndPrepareImage(ctx, url, imageType, opts)
 	if err != nil {
 		if spinner != nil {
 			spinner.StopWithError(fmt.Sprintf("Failed to download %s", imageType))
@@ -177,7 +178,7 @@ func ResolveURLsWithoutUpload(ctx context.Context, cfg *config.Config, apkInfo *
 	}
 
 	// Process images
-	imageURLs, err = resolveImageURLs(ctx, cfg, blossomURL, preDownloaded)
+	imageURLs, err = resolveImageURLs(ctx, cfg, blossomURL, preDownloaded, opts)
 	if err != nil {
 		return "", nil, err
 	}
@@ -198,7 +199,7 @@ func resolveIconURL(ctx context.Context, cfg *config.Config, apkInfo *apk.APKInf
 				spinner = ui.NewSpinner("Fetching icon (for hash)...")
 				spinner.Start()
 			}
-			_, hashStr, _, err := downloadRemoteImage(ctx, cfg.Icon)
+			_, hashStr, _, err := downloadAndPrepareImage(ctx, cfg.Icon, "icon", opts)
 			if err != nil {
 				if spinner != nil {
 					spinner.StopWithError("Failed to fetch icon")
@@ -217,20 +218,26 @@ func resolveIconURL(ctx context.Context, cfg *config.Config, apkInfo *apk.APKInf
 		if err != nil {
 			return "", fmt.Errorf("failed to read icon file %s: %w", iconPath, err)
 		}
-		hash := sha256.Sum256(iconData)
-		return fmt.Sprintf("%s/%s", blossomURL, hex.EncodeToString(hash[:])), nil
+		result, err := prepareImage(iconData, detectImageMimeType(iconPath), media.IconMaxWidth, "icon", opts)
+		if err != nil {
+			return "", fmt.Errorf("failed to prepare icon file %s: %w", iconPath, err)
+		}
+		return fmt.Sprintf("%s/%s", blossomURL, result.Hash), nil
 	}
 
 	if apkInfo.Icon != nil {
-		hash := sha256.Sum256(apkInfo.Icon)
-		return fmt.Sprintf("%s/%s", blossomURL, hex.EncodeToString(hash[:])), nil
+		result, err := prepareImage(apkInfo.Icon, "image/png", media.IconMaxWidth, "icon", opts)
+		if err != nil {
+			return "", fmt.Errorf("failed to prepare APK icon: %w", err)
+		}
+		return fmt.Sprintf("%s/%s", blossomURL, result.Hash), nil
 	}
 
 	return "", nil
 }
 
 // resolveImageURLs resolves image URLs without uploading.
-func resolveImageURLs(ctx context.Context, cfg *config.Config, blossomURL string, preDownloaded *PreDownloadedImages) ([]string, error) {
+func resolveImageURLs(ctx context.Context, cfg *config.Config, blossomURL string, preDownloaded *PreDownloadedImages, opts *cli.Options) ([]string, error) {
 	var imageURLs []string
 
 	// Process pre-downloaded images first
@@ -248,7 +255,7 @@ func resolveImageURLs(ctx context.Context, cfg *config.Config, blossomURL string
 		}
 
 		if isRemoteURL(img) {
-			_, hashStr, _, err := downloadRemoteImage(ctx, img)
+			_, hashStr, _, err := downloadAndPrepareImage(ctx, img, "screenshot", opts)
 			if err != nil {
 				continue // Log warning but continue
 			}
@@ -259,8 +266,11 @@ func resolveImageURLs(ctx context.Context, cfg *config.Config, blossomURL string
 			if err != nil {
 				return nil, fmt.Errorf("failed to read image file %s: %w", imgPath, err)
 			}
-			hash := sha256.Sum256(imgData)
-			imageURLs = append(imageURLs, fmt.Sprintf("%s/%s", blossomURL, hex.EncodeToString(hash[:])))
+			result, err := prepareImage(imgData, detectImageMimeType(imgPath), media.ScreenshotMaxWidth, "screenshot", opts)
+			if err != nil {
+				return nil, fmt.Errorf("failed to prepare image file %s: %w", imgPath, err)
+			}
+			imageURLs = append(imageURLs, fmt.Sprintf("%s/%s", blossomURL, result.Hash))
 		}
 	}
 
@@ -275,11 +285,17 @@ func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.Ev
 	expiration := time.Now().Add(blossom.AuthExpiration)
 
 	// Collect icon upload
-	iconURL, iconUploads := collectIconUpload(ctx, params, expiration)
+	iconURL, iconUploads, err := collectIconUpload(ctx, params, expiration)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to collect icon upload: %w", err)
+	}
 	uploads = append(uploads, iconUploads...)
 
 	// Collect image uploads
-	imgURLs, imgUploads := collectImageUploads(ctx, params, expiration)
+	imgURLs, imgUploads, err := collectImageUploads(ctx, params, expiration)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to collect image uploads: %w", err)
+	}
 	imageURLs = append(imageURLs, imgURLs...)
 	uploads = append(uploads, imgUploads...)
 
@@ -374,11 +390,17 @@ func UploadWithIndividualSigning(ctx context.Context, params UploadParams) (icon
 	var uploads []uploadItem
 
 	// Collect icon
-	iconURL, iconUploads := collectIconUpload(ctx, params, expiration)
+	iconURL, iconUploads, err := collectIconUpload(ctx, params, expiration)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("failed to collect icon upload: %w", err)
+	}
 	uploads = append(uploads, iconUploads...)
 
 	// Collect images
-	imgURLs, imgUploads := collectImageUploads(ctx, params, expiration)
+	imgURLs, imgUploads, err := collectImageUploads(ctx, params, expiration)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("failed to collect image uploads: %w", err)
+	}
 	imageURLs = append(imageURLs, imgURLs...)
 	uploads = append(uploads, imgUploads...)
 
@@ -485,7 +507,7 @@ func downloadAndUploadIcon(ctx context.Context, client *blossom.Client, signer n
 		spinner.Start()
 	}
 
-	iconData, hashStr, mimeType, err := downloadRemoteImage(ctx, url)
+	iconData, hashStr, mimeType, err := downloadAndPrepareImage(ctx, url, "icon", opts)
 	if err != nil {
 		if spinner != nil {
 			spinner.StopWithError("Failed to fetch icon")
@@ -529,9 +551,13 @@ func uploadLocalIcon(ctx context.Context, client *blossom.Client, signer nostr.S
 		return "", nil
 	}
 
-	hash := sha256.Sum256(iconData)
-	hashStr := hex.EncodeToString(hash[:])
-	mimeType := detectImageMimeType(fullPath)
+	prepared, err := prepareImage(iconData, detectImageMimeType(fullPath), media.IconMaxWidth, "icon", opts)
+	if err != nil {
+		return "", fmt.Errorf("failed to prepare icon %s: %w", iconPath, err)
+	}
+	iconData = prepared.Data
+	hashStr := prepared.Hash
+	mimeType := prepared.MimeType
 
 	var spinner *ui.Spinner
 	if opts.ShouldShowSpinners() {
@@ -565,8 +591,12 @@ func uploadAPKIcon(ctx context.Context, client *blossom.Client, signer nostr.Sig
 		return "", nil
 	}
 
-	hash := sha256.Sum256(iconData)
-	hashStr := hex.EncodeToString(hash[:])
+	prepared, err := prepareImage(iconData, "image/png", media.IconMaxWidth, "icon", opts)
+	if err != nil {
+		return "", fmt.Errorf("failed to prepare APK icon: %w", err)
+	}
+	iconData = prepared.Data
+	hashStr := prepared.Hash
 
 	var spinner *ui.Spinner
 	if opts.ShouldShowSpinners() {
@@ -574,7 +604,7 @@ func uploadAPKIcon(ctx context.Context, client *blossom.Client, signer nostr.Sig
 		spinner.Start()
 	}
 
-	result, err := client.UploadBytes(ctx, iconData, hashStr, "image/png", signer)
+	result, err := client.UploadBytes(ctx, iconData, hashStr, prepared.MimeType, signer)
 	if err != nil {
 		if spinner != nil {
 			spinner.StopWithError("Failed to upload icon")
@@ -673,7 +703,7 @@ func downloadAndUploadImage(ctx context.Context, client *blossom.Client, signer 
 		spinner.Start()
 	}
 
-	imgData, hashStr, mimeType, err := downloadRemoteImage(ctx, url)
+	imgData, hashStr, mimeType, err := downloadAndPrepareImage(ctx, url, "screenshot", opts)
 	if err != nil {
 		if spinner != nil {
 			spinner.StopWithError(fmt.Sprintf("Failed to fetch screenshot %d", index))
@@ -717,9 +747,13 @@ func uploadLocalImage(ctx context.Context, client *blossom.Client, signer nostr.
 		return "", nil
 	}
 
-	hash := sha256.Sum256(imgData)
-	hashStr := hex.EncodeToString(hash[:])
-	mimeType := detectImageMimeType(fullPath)
+	prepared, err := prepareImage(imgData, detectImageMimeType(fullPath), media.ScreenshotMaxWidth, "screenshot", opts)
+	if err != nil {
+		return "", fmt.Errorf("failed to prepare image %s: %w", imgPath, err)
+	}
+	imgData = prepared.Data
+	hashStr := prepared.Hash
+	mimeType := prepared.MimeType
 
 	var spinner *ui.Spinner
 	if opts.ShouldShowSpinners() {
@@ -777,7 +811,7 @@ func uploadAPK(ctx context.Context, params UploadParams) error {
 }
 
 // collectIconUpload collects icon upload data for batch signing.
-func collectIconUpload(ctx context.Context, params UploadParams, expiration time.Time) (string, []uploadItem) {
+func collectIconUpload(ctx context.Context, params UploadParams, expiration time.Time) (string, []uploadItem, error) {
 	var uploads []uploadItem
 	var iconURL string
 	client := params.Client
@@ -791,16 +825,16 @@ func collectIconUpload(ctx context.Context, params UploadParams, expiration time
 			authEvent:  nostr.BuildBlossomAuthEvent(params.PreDownloaded.Icon.Hash, params.Pubkey, expiration),
 			uploadType: "icon",
 		})
-		return iconURL, uploads
+		return iconURL, uploads, nil
 	}
 
 	if params.Cfg.Icon != "" {
 		if isRemoteURL(params.Cfg.Icon) {
 			if isBlossomURL(params.Cfg.Icon, client.ServerURL()) {
-				return params.Cfg.Icon, nil
+				return params.Cfg.Icon, nil, nil
 			}
 			// Download for batch
-			iconData, iconHash, mimeType, err := downloadRemoteImage(ctx, params.Cfg.Icon)
+			iconData, iconHash, mimeType, err := downloadAndPrepareImage(ctx, params.Cfg.Icon, "icon", params.Opts)
 			if err == nil {
 				iconURL = fmt.Sprintf("%s/%s", client.ServerURL(), iconHash)
 				uploads = append(uploads, uploadItem{
@@ -815,39 +849,46 @@ func collectIconUpload(ctx context.Context, params UploadParams, expiration time
 			iconPath := resolvePath(params.Cfg.Icon, params.Cfg.BaseDir)
 			iconData, err := os.ReadFile(iconPath)
 			if err == nil {
-				hash := sha256.Sum256(iconData)
-				iconHash := hex.EncodeToString(hash[:])
+				prepared, prepareErr := prepareImage(iconData, detectImageMimeType(iconPath), media.IconMaxWidth, "icon", params.Opts)
+				if prepareErr != nil {
+					return iconURL, uploads, fmt.Errorf("failed to prepare local icon %s: %w", iconPath, prepareErr)
+				}
+				iconData = prepared.Data
+				iconHash := prepared.Hash
 				iconURL = fmt.Sprintf("%s/%s", client.ServerURL(), iconHash)
 				uploads = append(uploads, uploadItem{
 					data:       iconData,
 					hash:       iconHash,
-					mimeType:   detectImageMimeType(iconPath),
+					mimeType:   prepared.MimeType,
 					authEvent:  nostr.BuildBlossomAuthEvent(iconHash, params.Pubkey, expiration),
 					uploadType: "icon",
 				})
 			}
 		}
-		return iconURL, uploads
+		return iconURL, uploads, nil
 	}
 
 	if params.APKInfo.Icon != nil {
-		hash := sha256.Sum256(params.APKInfo.Icon)
-		iconHash := hex.EncodeToString(hash[:])
+		prepared, err := prepareImage(params.APKInfo.Icon, "image/png", media.IconMaxWidth, "icon", params.Opts)
+		if err != nil {
+			return iconURL, uploads, fmt.Errorf("failed to prepare APK icon: %w", err)
+		}
+		iconHash := prepared.Hash
 		iconURL = fmt.Sprintf("%s/%s", client.ServerURL(), iconHash)
 		uploads = append(uploads, uploadItem{
-			data:       params.APKInfo.Icon,
+			data:       prepared.Data,
 			hash:       iconHash,
-			mimeType:   "image/png",
+			mimeType:   prepared.MimeType,
 			authEvent:  nostr.BuildBlossomAuthEvent(iconHash, params.Pubkey, expiration),
 			uploadType: "icon",
 		})
 	}
 
-	return iconURL, uploads
+	return iconURL, uploads, nil
 }
 
 // collectImageUploads collects image upload data for batch signing.
-func collectImageUploads(ctx context.Context, params UploadParams, expiration time.Time) ([]string, []uploadItem) {
+func collectImageUploads(ctx context.Context, params UploadParams, expiration time.Time) ([]string, []uploadItem, error) {
 	var imageURLs []string
 	var uploads []uploadItem
 	client := params.Client
@@ -877,7 +918,7 @@ func collectImageUploads(ctx context.Context, params UploadParams, expiration ti
 				imageURLs = append(imageURLs, img)
 				continue
 			}
-			imgData, imgHash, mimeType, err := downloadRemoteImage(ctx, img)
+			imgData, imgHash, mimeType, err := downloadAndPrepareImage(ctx, img, "screenshot", params.Opts)
 			if err == nil {
 				imageURLs = append(imageURLs, fmt.Sprintf("%s/%s", client.ServerURL(), imgHash))
 				uploads = append(uploads, uploadItem{
@@ -892,13 +933,17 @@ func collectImageUploads(ctx context.Context, params UploadParams, expiration ti
 			imgPath := resolvePath(img, params.Cfg.BaseDir)
 			imgData, err := os.ReadFile(imgPath)
 			if err == nil {
-				hash := sha256.Sum256(imgData)
-				imgHash := hex.EncodeToString(hash[:])
+				prepared, prepareErr := prepareImage(imgData, detectImageMimeType(imgPath), media.ScreenshotMaxWidth, "screenshot", params.Opts)
+				if prepareErr != nil {
+					return imageURLs, uploads, fmt.Errorf("failed to prepare local screenshot %s: %w", imgPath, prepareErr)
+				}
+				imgData = prepared.Data
+				imgHash := prepared.Hash
 				imageURLs = append(imageURLs, fmt.Sprintf("%s/%s", client.ServerURL(), imgHash))
 				uploads = append(uploads, uploadItem{
 					data:       imgData,
 					hash:       imgHash,
-					mimeType:   detectImageMimeType(imgPath),
+					mimeType:   prepared.MimeType,
 					authEvent:  nostr.BuildBlossomAuthEvent(imgHash, params.Pubkey, expiration),
 					uploadType: "image",
 				})
@@ -906,7 +951,7 @@ func collectImageUploads(ctx context.Context, params UploadParams, expiration ti
 		}
 	}
 
-	return imageURLs, uploads
+	return imageURLs, uploads, nil
 }
 
 // checkUploadsExist checks which uploads already exist on the server.
@@ -1072,6 +1117,27 @@ func detectImageMimeType(path string) string {
 	}
 }
 
+func prepareImage(data []byte, mimeType string, maxWidth int, label string, opts *cli.Options) (media.Result, error) {
+	result, err := media.Process(data, mimeType, maxWidth, opts == nil || !opts.Publish.NoCompress)
+	if err != nil {
+		return media.Result{}, fmt.Errorf("processing %s: %w", label, err)
+	}
+	if opts != nil && opts.ShouldShowSpinners() && result.Changed && result.OriginalSize > len(result.Data) {
+		fmt.Fprintf(os.Stderr, "  Compressed %s: %s → %s\n", label, formatImageBytes(result.OriginalSize), formatImageBytes(len(result.Data)))
+	}
+	return result, nil
+}
+
+func formatImageBytes(size int) string {
+	if size < 1024 {
+		return fmt.Sprintf("%d B", size)
+	}
+	if size < 1024*1024 {
+		return fmt.Sprintf("%.1f KB", float64(size)/1024)
+	}
+	return fmt.Sprintf("%.1f MB", float64(size)/(1024*1024))
+}
+
 // maxImageDownloadSize is the maximum size for remote image downloads (20MB)
 const maxImageDownloadSize = 20 * 1024 * 1024
 
@@ -1123,6 +1189,22 @@ func downloadRemoteImage(ctx context.Context, url string) (data []byte, hashStr 
 	}
 
 	return data, hashStr, mimeType, nil
+}
+
+func downloadAndPrepareImage(ctx context.Context, url, label string, opts *cli.Options) ([]byte, string, string, error) {
+	data, _, mimeType, err := downloadRemoteImage(ctx, url)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("failed to download %s: %w", label, err)
+	}
+	maxWidth := media.ScreenshotMaxWidth
+	if label == "icon" {
+		maxWidth = media.IconMaxWidth
+	}
+	result, err := prepareImage(data, mimeType, maxWidth, label, opts)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("failed to prepare downloaded %s: %w", label, err)
+	}
+	return result.Data, result.Hash, result.MimeType, nil
 }
 
 func detectMimeTypeFromData(data []byte) string {

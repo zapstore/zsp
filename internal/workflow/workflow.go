@@ -22,6 +22,7 @@ import (
 	"github.com/zapstore/zsp/internal/cli"
 	"github.com/zapstore/zsp/internal/config"
 	"github.com/zapstore/zsp/internal/identity"
+	"github.com/zapstore/zsp/internal/media"
 	"github.com/zapstore/zsp/internal/nostr"
 	"github.com/zapstore/zsp/internal/picker"
 	"github.com/zapstore/zsp/internal/source"
@@ -639,9 +640,16 @@ func (p *Publisher) showPreview(ctx context.Context) error {
 				}
 				continue
 			}
+			processed, err := media.Process(data, detectImageMimeType(imgPath), media.ScreenshotMaxWidth, !p.opts.Publish.NoCompress)
+			if err != nil {
+				if p.opts.Global.Verbose {
+					fmt.Printf("  Warning: failed to process local screenshot %s: %v\n", imgPath, err)
+				}
+				continue
+			}
 			previewData.ImageData = append(previewData.ImageData, nostr.PreviewImageData{
-				Data:     data,
-				MimeType: detectImageMimeType(imgPath),
+				Data:     processed.Data,
+				MimeType: processed.MimeType,
 			})
 		}
 	}

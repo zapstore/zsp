@@ -150,6 +150,7 @@ func PublishHelp() string {
 	writeFlag(&b, "--wizard", "Run interactive wizard (uses existing config as defaults)")
 	writeFlag(&b, "--skip-preview", "Skip the browser preview prompt")
 	writeFlag(&b, "--port <port>", "Custom port for browser preview/signing")
+	writeFlag(&b, "--no-compress", "Preserve original icon and screenshot bytes")
 	writeFlag(&b, "--app-created-at-release", "Use release date for kind 32267 created_at")
 	writeFlag(&b, "--skip-app-event", "Publish only release events, skip kind 32267 app metadata")
 	b.WriteString("                            " + renderGreyDark("Used by indexer after copying developer's 32267") + "\n")
