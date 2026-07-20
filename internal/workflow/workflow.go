@@ -530,11 +530,14 @@ func (p *Publisher) fetchExternalMetadata(ctx context.Context) error {
 	fetcher := source.NewMetadataFetcherWithPackageID(p.cfg, p.apkInfo.PackageID)
 	fetcher.APKName = p.apkInfo.Label
 
+	var result *source.MetadataResult
 	err := WithSpinnerMsg(p.opts, "Fetching metadata from external sources...", func() error {
 		if automaticMetadata && len(metadataSources) == 2 && metadataSources[0] == "fastlane" {
-			return fetcher.FetchAutomaticMetadata(ctx, metadataSources[1])
+			result = fetcher.FetchAutomaticMetadataWithResult(ctx, metadataSources[1])
+			return nil
 		}
-		return fetcher.FetchMetadata(ctx, metadataSources)
+		result = fetcher.FetchMetadataWithResult(ctx, metadataSources)
+		return nil
 	}, func(err error) string {
 		if err != nil {
 			return "Metadata fetch failed (continuing)"
@@ -542,8 +545,16 @@ func (p *Publisher) fetchExternalMetadata(ctx context.Context) error {
 		return fmt.Sprintf("Fetched metadata from %s", strings.Join(metadataSources, ", "))
 	})
 
-	if err != nil && p.opts.Global.Verbose {
-		fmt.Printf("    %v\n", err)
+	if p.opts.ShouldShowSpinners() {
+		if err != nil {
+			ui.PrintWarning(fmt.Sprintf("Metadata fetch failed: %s; continuing", ui.SanitizeErrorMessage(err)))
+		}
+		if result != nil && result.HasErrors() {
+			for _, metadataErr := range result.Errors {
+				ui.PrintWarning(fmt.Sprintf("Metadata source %s failed: %s; continuing",
+					metadataErr.Source, ui.SanitizeErrorMessage(metadataErr.Err)))
+			}
+		}
 	}
 
 	if p.opts.Global.Verbose && err == nil {

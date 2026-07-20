@@ -194,24 +194,31 @@ func (f *MetadataFetcher) FetchMetadataWithResult(ctx context.Context, sources [
 // FetchAutomaticMetadata uses Fastlane metadata when present. It fetches the
 // native repository source only when the Fastlane directory is absent.
 func (f *MetadataFetcher) FetchAutomaticMetadata(ctx context.Context, fallback string) error {
+	f.FetchAutomaticMetadataWithResult(ctx, fallback)
+	return nil
+}
+
+// FetchAutomaticMetadataWithResult uses Fastlane metadata when present and
+// returns individual source failures without making them fatal.
+func (f *MetadataFetcher) FetchAutomaticMetadataWithResult(ctx context.Context, fallback string) *MetadataResult {
 	result := &MetadataResult{}
 	meta, err := f.fetchMetadataSource(ctx, "fastlane")
 	if err == nil {
 		f.mergeMetadata(meta)
-		return result.firstFatalError()
+		return result
 	}
 	if !errors.Is(err, errFastlaneUnavailable) {
 		result.Errors = append(result.Errors, &MetadataError{Source: "fastlane", Err: err})
-		return result.firstFatalError()
+		return result
 	}
 
 	meta, err = f.fetchMetadataSource(ctx, fallback)
 	if err != nil {
 		result.Errors = append(result.Errors, &MetadataError{Source: fallback, Err: err})
-		return result.firstFatalError()
+		return result
 	}
 	f.mergeMetadata(meta)
-	return result.firstFatalError()
+	return result
 }
 
 func (f *MetadataFetcher) fetchMetadataSource(ctx context.Context, source string) (*AppMetadata, error) {
