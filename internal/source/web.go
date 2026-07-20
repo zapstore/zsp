@@ -671,7 +671,7 @@ func (w *Web) Download(ctx context.Context, asset *Asset, destDir string, progre
 		return "", err
 	}
 
-	resp, err := doAPKDownload(ctx, dlClient, req)
+	resp, err := DoWithTorFallback(ctx, dlClient, req)
 	if err != nil {
 		return "", err
 	}

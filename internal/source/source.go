@@ -6,8 +6,10 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,20 +26,21 @@ import (
 // - TLS 1.2 minimum version
 // - Connection pooling limits to prevent resource exhaustion
 // - Reasonable timeouts
+// - One Tor SOCKS5 retry on HTTP 403
 //
 // Uses a total request timeout — suitable for metadata/API calls with small responses.
 // For large file downloads, use newDownloadHTTPClient instead.
 func newSecureHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout: timeout,
-		Transport: &http.Transport{
+		Transport: withTorFallback(&http.Transport{
 			TLSClientConfig: &tls.Config{
 				MinVersion: tls.VersionTLS12,
 			},
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 10,
 			IdleConnTimeout:     90 * time.Second,
-		},
+		}),
 	}
 }
 
@@ -46,13 +49,20 @@ func newSecureHTTPClient(timeout time.Duration) *http.Client {
 const downloadStallTimeout = 30 * time.Second
 const torSOCKSAddress = "127.0.0.1:9050"
 
+// downloadMaxAttempts is how many times DownloadHTTP retries transient failures
+// (unexpected EOF, connection reset) before giving up.
+const downloadMaxAttempts = 3
+
+// downloadRetryBackoff is the base delay between download attempts.
+const downloadRetryBackoff = 1 * time.Second
+
 // newDownloadHTTPClient creates an HTTP client for large file downloads.
 // Unlike newSecureHTTPClient, it does NOT set a total request timeout.
 // Instead, the caller should wrap the response body with a StallTimeoutReader
-// to detect stalled downloads.
+// to detect stalled downloads. Retries once through Tor on HTTP 403.
 func newDownloadHTTPClient() *http.Client {
 	return &http.Client{
-		Transport: &http.Transport{
+		Transport: withTorFallback(&http.Transport{
 			TLSClientConfig: &tls.Config{
 				MinVersion: tls.VersionTLS12,
 			},
@@ -60,13 +70,13 @@ func newDownloadHTTPClient() *http.Client {
 			MaxIdleConnsPerHost:   10,
 			IdleConnTimeout:       90 * time.Second,
 			ResponseHeaderTimeout: 30 * time.Second, // timeout for server to start responding
-		},
+		}),
 	}
 }
 
-// newTorDownloadHTTPClient creates a download client routed through a locally
-// running Tor SOCKS5 proxy.
-func newTorDownloadHTTPClient() (*http.Client, error) {
+// newTorHTTPClient creates an HTTP client routed through a locally running
+// Tor SOCKS5 proxy. The transport is not wrapped with Tor fallback.
+func newTorHTTPClient() (*http.Client, error) {
 	dialer, err := proxy.SOCKS5("tcp", torSOCKSAddress, nil, proxy.Direct)
 	if err != nil {
 		return nil, fmt.Errorf("create Tor SOCKS5 dialer: %w", err)
@@ -91,31 +101,70 @@ func newTorDownloadHTTPClient() (*http.Client, error) {
 	}, nil
 }
 
-var torDownloadClient = newTorDownloadHTTPClient
+var torHTTPClient = newTorHTTPClient
 
-// doAPKDownload sends an APK download request directly. If it receives a 403,
-// it retries once through the local Tor SOCKS5 proxy without credentials.
-func doAPKDownload(ctx context.Context, client *http.Client, req *http.Request) (*http.Response, error) {
-	resp, err := client.Do(req)
+// SetTorHTTPClientForTest replaces the Tor HTTP client factory used on 403
+// fallback. The returned function restores the previous factory.
+func SetTorHTTPClientForTest(fn func() (*http.Client, error)) func() {
+	prev := torHTTPClient
+	torHTTPClient = fn
+	return func() { torHTTPClient = prev }
+}
+
+// torFallbackTransport retries a request once through Tor when the direct
+// response is HTTP 403. The Tor retry is unauthenticated.
+type torFallbackTransport struct {
+	base http.RoundTripper
+}
+
+func withTorFallback(base http.RoundTripper) http.RoundTripper {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return &torFallbackTransport{base: base}
+}
+
+func (t *torFallbackTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
 	if err != nil {
-		return nil, fmt.Errorf("download failed: %w", err)
+		return nil, err
 	}
 	if resp.StatusCode != http.StatusForbidden {
 		return resp, nil
 	}
 	resp.Body.Close()
 
-	torClient, err := torDownloadClient()
+	torClient, err := torHTTPClient()
 	if err != nil {
-		return nil, fmt.Errorf("download received 403; retry through Tor unavailable (start Tor with SOCKS5 on %s): %w", torSOCKSAddress, err)
+		return nil, fmt.Errorf("request received 403; retry through Tor unavailable (start Tor with SOCKS5 on %s): %w", torSOCKSAddress, err)
 	}
-	torReq, err := http.NewRequestWithContext(ctx, req.Method, req.URL.String(), nil)
+	torReq, err := http.NewRequestWithContext(req.Context(), req.Method, req.URL.String(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("create unauthenticated Tor download request: %w", err)
+		return nil, fmt.Errorf("create unauthenticated Tor request: %w", err)
 	}
 	resp, err = torClient.Do(torReq)
 	if err != nil {
-		return nil, fmt.Errorf("download received 403; retry through Tor at %s failed: %w", torSOCKSAddress, err)
+		return nil, fmt.Errorf("request received 403; retry through Tor at %s failed: %w", torSOCKSAddress, err)
+	}
+	return resp, nil
+}
+
+// DoWithTorFallback sends an HTTP request. If the client transport does not
+// already provide Tor fallback and the response is 403, it retries once
+// through the local Tor SOCKS5 proxy without credentials.
+func DoWithTorFallback(ctx context.Context, client *http.Client, req *http.Request) (*http.Response, error) {
+	if client == nil {
+		client = &http.Client{Transport: withTorFallback(nil)}
+	} else if _, ok := client.Transport.(*torFallbackTransport); !ok {
+		// Clone the client so callers keep their timeout/settings while gaining
+		// a single Tor retry on 403 (e.g. workflow image downloads).
+		cloned := *client
+		cloned.Transport = withTorFallback(client.Transport)
+		client = &cloned
+	}
+	resp, err := client.Do(req.WithContext(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	return resp, nil
 }
@@ -381,8 +430,39 @@ func (pr *ProgressReader) Read(p []byte) (int, error) {
 // DownloadHTTP downloads a file from a URL with optional progress reporting.
 // This is a shared helper for all HTTP-based sources.
 // Uses stall-based timeout: fails only if no data received for 30s, not after a fixed total time.
+// Transient failures (unexpected EOF, connection reset) are retried up to downloadMaxAttempts.
 func DownloadHTTP(ctx context.Context, client *http.Client, url, destPath string, expectedSize int64, progress DownloadProgress) error {
-	// Use download client without total timeout
+	_ = client // kept for API compatibility with callers that pass a configured client
+
+	var lastErr error
+	for attempt := 1; attempt <= downloadMaxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if attempt > 1 {
+			backoff := downloadRetryBackoff * time.Duration(attempt-1)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+		}
+
+		err := downloadHTTPOnce(ctx, url, destPath, expectedSize, progress)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isTransientDownloadError(err) || attempt == downloadMaxAttempts {
+			return err
+		}
+		os.Remove(destPath)
+	}
+	return lastErr
+}
+
+// downloadHTTPOnce performs a single download attempt.
+func downloadHTTPOnce(ctx context.Context, url, destPath string, expectedSize int64, progress DownloadProgress) error {
 	dlClient := newDownloadHTTPClient()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -390,12 +470,7 @@ func DownloadHTTP(ctx context.Context, client *http.Client, url, destPath string
 		return err
 	}
 
-	// Copy auth headers from the original client's request if any
-	// (the passed client is unused for the request itself, but callers
-	// may set headers on the request before calling this function)
-	_ = client // kept for API compatibility
-
-	resp, err := dlClient.Do(req)
+	resp, err := DoWithTorFallback(ctx, dlClient, req)
 	if err != nil {
 		return fmt.Errorf("download failed: %w", err)
 	}
@@ -415,20 +490,17 @@ func DownloadHTTP(ctx context.Context, client *http.Client, url, destPath string
 		return fmt.Errorf("download size %d bytes exceeds limit of %d bytes", total, MaxDownloadSize)
 	}
 
-	// Create destination file
 	f, err := os.Create(destPath)
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
 	defer f.Close()
 
-	// Wrap body with stall timeout — fails only if no data received for 30s
 	var reader io.Reader = &StallTimeoutReader{
 		Reader:  resp.Body,
 		Timeout: downloadStallTimeout,
 	}
 
-	// Wrap with progress tracking if callback provided
 	if progress != nil {
 		reader = &ProgressReader{
 			Reader:     reader,
@@ -454,7 +526,43 @@ func DownloadHTTP(ctx context.Context, client *http.Client, url, destPath string
 		return fmt.Errorf("download exceeded limit of %d bytes", MaxDownloadSize)
 	}
 
+	// Detect truncated responses when the server advertised a Content-Length.
+	if resp.ContentLength > 0 && written != resp.ContentLength {
+		os.Remove(destPath)
+		return fmt.Errorf("failed to write file: %w", io.ErrUnexpectedEOF)
+	}
+
 	return nil
+}
+
+// isTransientDownloadError reports whether err is worth retrying.
+func isTransientDownloadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	msg := err.Error()
+	for _, substr := range []string{
+		"unexpected EOF",
+		"connection reset",
+		"broken pipe",
+		"connection refused",
+		"i/o timeout",
+		"TLS handshake timeout",
+		"server closed idle connection",
+		"download stalled",
+	} {
+		if strings.Contains(msg, substr) {
+			return true
+		}
+	}
+	return false
 }
 
 // FilterUnsupportedArchitectures removes APK assets that explicitly indicate

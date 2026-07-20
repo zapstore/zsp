@@ -757,8 +757,7 @@ func FetchReleaseNotes(ctx context.Context, pathOrURL string, version string, ba
 			return "", fmt.Errorf("failed to create request: %w", err)
 		}
 
-		client := &http.Client{Timeout: 30 * time.Second}
-		resp, err := client.Do(req)
+		resp, err := DoWithTorFallback(ctx, newSecureHTTPClient(30*time.Second), req)
 		if err != nil {
 			return "", fmt.Errorf("failed to fetch release notes: %w", err)
 		}

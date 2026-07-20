@@ -423,7 +423,7 @@ func getOK(ctx context.Context, client *http.Client, downloadURL string) (*http.
 	if err != nil {
 		return nil, err
 	}
-	resp, err := doAPKDownload(ctx, client, req)
+	resp, err := DoWithTorFallback(ctx, client, req)
 	if err != nil {
 		return nil, err
 	}

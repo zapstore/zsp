@@ -3,15 +3,21 @@ package source
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/zapstore/zsp/internal/config"
 )
 
-func TestDoAPKDownloadTorFallback(t *testing.T) {
+func TestDoWithTorFallback(t *testing.T) {
 	tests := []struct {
 		name         string
 		directStatus int
@@ -51,11 +57,7 @@ func TestDoAPKDownloadTorFallback(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			torCalls := 0
 			var torAuthorization string
-			originalTorClient := torDownloadClient
-			t.Cleanup(func() {
-				torDownloadClient = originalTorClient
-			})
-			torDownloadClient = func() (*http.Client, error) {
+			restoreTor := SetTorHTTPClientForTest(func() (*http.Client, error) {
 				if tt.torClientErr != nil {
 					return nil, tt.torClientErr
 				}
@@ -64,12 +66,13 @@ func TestDoAPKDownloadTorFallback(t *testing.T) {
 					torAuthorization = req.Header.Get("Authorization")
 					return &http.Response{
 						StatusCode: tt.torStatus,
-						Body:       io.NopCloser(strings.NewReader("APK")),
+						Body:       io.NopCloser(strings.NewReader("ok")),
 						Header:     make(http.Header),
 						Request:    req,
 					}, nil
 				})}, nil
-			}
+			})
+			t.Cleanup(restoreTor)
 
 			directClient := &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 				return &http.Response{
@@ -85,14 +88,14 @@ func TestDoAPKDownloadTorFallback(t *testing.T) {
 			}
 			req.Header.Set("Authorization", "Bearer secret")
 
-			resp, err := doAPKDownload(context.Background(), directClient, req)
+			resp, err := DoWithTorFallback(context.Background(), directClient, req)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("doAPKDownload() error = %v, want substring %q", err, tt.wantErr)
+					t.Fatalf("DoWithTorFallback() error = %v, want substring %q", err, tt.wantErr)
 				}
 			} else {
 				if err != nil {
-					t.Fatalf("doAPKDownload() error = %v", err)
+					t.Fatalf("DoWithTorFallback() error = %v", err)
 				}
 				resp.Body.Close()
 			}
@@ -504,5 +507,64 @@ func TestFilterUnsupportedArchitectures(t *testing.T) {
 	}
 	if names["app-x86.apk"] {
 		t.Error("Expected app-x86.apk to be filtered out")
+	}
+}
+
+func TestIsTransientDownloadError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "unexpected EOF", err: io.ErrUnexpectedEOF, want: true},
+		{name: "wrapped unexpected EOF", err: fmt.Errorf("failed to write file: %w", io.ErrUnexpectedEOF), want: true},
+		{name: "connection reset string", err: errors.New("read: connection reset by peer"), want: true},
+		{name: "download stalled", err: errors.New("download stalled: no data received for 30s"), want: true},
+		{name: "permanent 404", err: errors.New("download failed with status 404: https://example.com/a.apk"), want: false},
+		{name: "net timeout", err: &net.DNSError{Err: "i/o timeout", IsTimeout: true}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isTransientDownloadError(tt.err); got != tt.want {
+				t.Errorf("isTransientDownloadError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDownloadHTTPRetriesTransientEOF(t *testing.T) {
+	var hits atomic.Int32
+	payload := []byte("apk-bytes-ok")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := hits.Add(1)
+		if n == 1 {
+			// Advertise full length but close early — triggers unexpected EOF.
+			w.Header().Set("Content-Length", "100")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("truncated"))
+			return
+		}
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(payload)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(srv.Close)
+
+	dest := filepath.Join(t.TempDir(), "app.apk")
+	err := DownloadHTTP(context.Background(), nil, srv.URL, dest, 0, nil)
+	if err != nil {
+		t.Fatalf("DownloadHTTP() error = %v", err)
+	}
+	if hits.Load() < 2 {
+		t.Fatalf("expected retry after truncated response, hits=%d", hits.Load())
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read dest: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("downloaded %q, want %q", got, payload)
 	}
 }

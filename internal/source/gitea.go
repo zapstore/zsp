@@ -296,7 +296,7 @@ func (g *Gitea) Download(ctx context.Context, asset *Asset, destDir string, prog
 		req.Header.Set("Authorization", "token "+g.token)
 	}
 
-	resp, err := doAPKDownload(ctx, dlClient, req)
+	resp, err := DoWithTorFallback(ctx, dlClient, req)
 	if err != nil {
 		return "", err
 	}

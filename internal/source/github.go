@@ -421,7 +421,7 @@ func (g *GitHub) Download(ctx context.Context, asset *Asset, destDir string, pro
 		req.Header.Set("Authorization", "Bearer "+g.token)
 	}
 
-	resp, err := doAPKDownload(ctx, dlClient, req)
+	resp, err := DoWithTorFallback(ctx, dlClient, req)
 	if err != nil {
 		return "", err
 	}
