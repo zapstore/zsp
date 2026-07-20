@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	urlpkg "net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -91,9 +92,15 @@ func PreDownloadImages(ctx context.Context, cfg *config.Config, opts *cli.Option
 	if cfg.Icon != "" && isRemoteURL(cfg.Icon) {
 		img, err := downloadImageWithSpinner(ctx, cfg.Icon, "icon", opts)
 		if err != nil {
-			return nil, fmt.Errorf("failed to download icon from %s: %w", cfg.Icon, err)
+			if opts.ShouldShowSpinners() {
+				ui.PrintWarning(fmt.Sprintf("Failed to download metadata icon from %s: %s; continuing", cfg.Icon, ui.SanitizeErrorMessage(err)))
+			}
+			// Do not retry the failed remote metadata icon during upload. The
+			// APK icon, when available, remains the fallback.
+			cfg.Icon = ""
+		} else {
+			result.Icon = img
 		}
-		result.Icon = img
 	}
 
 	// Download screenshots if they are remote URLs
@@ -1142,33 +1149,70 @@ func formatImageBytes(size int) string {
 const maxImageDownloadSize = 20 * 1024 * 1024
 
 func downloadRemoteImage(ctx context.Context, url string) (data []byte, hashStr string, mimeType string, err error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, "", "", fmt.Errorf("failed to create request: %w", err)
-	}
+	return downloadRemoteImageWithClient(ctx, url, &http.Client{Timeout: 60 * time.Second})
+}
 
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+func downloadRemoteImageWithClient(ctx context.Context, url string, client *http.Client) (data []byte, hashStr string, mimeType string, err error) {
+	currentURL := url
+	for attempt := 0; attempt < 2; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, "GET", currentURL, nil)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("failed to create request: %w", err)
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, "", "", fmt.Errorf("failed to download: %w", err)
-	}
-	defer resp.Body.Close()
+		resp, err := source.DoWithTorFallback(ctx, client, req)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("failed to download: %w", err)
+		}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, "", "", fmt.Errorf("download failed with status %d: %s", resp.StatusCode, url)
-	}
+		// GitHub's raw endpoint can return a non-standard redirect pointer in
+		// the response body. Depending on the cache path, it is either a 304
+		// or a 200 text/plain response, and the pointer may be relative.
+		contentType := strings.TrimSpace(strings.SplitN(resp.Header.Get("Content-Type"), ";", 2)[0])
+		if attempt == 0 &&
+			strings.HasPrefix(currentURL, "https://raw.githubusercontent.com/") &&
+			(resp.StatusCode == http.StatusNotModified || contentType == "text/plain") {
+			redirectBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
+			resp.Body.Close()
+			if readErr != nil {
+				return nil, "", "", fmt.Errorf("failed to read GitHub redirect: %w", readErr)
+			}
+			redirectTarget := strings.TrimSpace(string(redirectBody))
+			baseURL, baseErr := urlpkg.Parse(currentURL)
+			targetURL, targetErr := urlpkg.Parse(redirectTarget)
+			if baseErr == nil && targetErr == nil {
+				resolved := baseURL.ResolveReference(targetURL)
+				if resolved.Host != "" && (resolved.Scheme == "http" || resolved.Scheme == "https") {
+					currentURL = resolved.String()
+					continue
+				}
+			}
+			if resp.StatusCode == http.StatusNotModified {
+				return nil, "", "", fmt.Errorf("GitHub redirect body contained invalid URL")
+			}
+			data = redirectBody
+			mimeType = resp.Header.Get("Content-Type")
+			break
+		}
+		defer resp.Body.Close()
 
-	// Security: Check Content-Length header before reading
-	if resp.ContentLength > maxImageDownloadSize {
-		return nil, "", "", fmt.Errorf("image too large: %d bytes (max %d)", resp.ContentLength, maxImageDownloadSize)
-	}
+		if resp.StatusCode != http.StatusOK {
+			return nil, "", "", fmt.Errorf("download failed with status %d: %s", resp.StatusCode, currentURL)
+		}
 
-	// Security: Limit read size to prevent memory exhaustion
-	data, err = io.ReadAll(io.LimitReader(resp.Body, maxImageDownloadSize+1))
-	if err != nil {
-		return nil, "", "", fmt.Errorf("failed to read response: %w", err)
+		// Security: Check Content-Length header before reading
+		if resp.ContentLength > maxImageDownloadSize {
+			return nil, "", "", fmt.Errorf("image too large: %d bytes (max %d)", resp.ContentLength, maxImageDownloadSize)
+		}
+
+		// Security: Limit read size to prevent memory exhaustion
+		data, err = io.ReadAll(io.LimitReader(resp.Body, maxImageDownloadSize+1))
+		if err != nil {
+			return nil, "", "", fmt.Errorf("failed to read response: %w", err)
+		}
+		mimeType = resp.Header.Get("Content-Type")
+		break
 	}
 
 	// Check if we hit the limit (read more than allowed)
@@ -1183,7 +1227,6 @@ func downloadRemoteImage(ctx context.Context, url string) (data []byte, hashStr 
 	hash := sha256.Sum256(data)
 	hashStr = hex.EncodeToString(hash[:])
 
-	mimeType = resp.Header.Get("Content-Type")
 	if mimeType == "" || mimeType == "application/octet-stream" {
 		mimeType = detectMimeTypeFromData(data)
 	}
