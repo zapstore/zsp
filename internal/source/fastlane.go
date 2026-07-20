@@ -30,15 +30,18 @@ type fastlaneEntry struct {
 }
 
 // fetchFastlaneMetadata fetches Android store metadata maintained alongside the
-// source repository. GitHub and GitLab are supported.
+// source repository. GitHub, GitLab, and Gitea-compatible forges (Codeberg,
+// Forgejo, self-hosted Gitea) are supported.
 func (f *MetadataFetcher) fetchFastlaneMetadata(ctx context.Context) (*AppMetadata, error) {
-	switch config.DetectSourceType(f.cfg.Repository) {
+	switch repositoryMetadataHost(f.cfg) {
 	case config.SourceGitHub:
 		return f.fetchGitHubFastlaneMetadata(ctx)
 	case config.SourceGitLab:
 		return f.fetchGitLabFastlaneMetadata(ctx)
+	case config.SourceGitea:
+		return f.fetchGiteaFastlaneMetadata(ctx)
 	default:
-		return nil, fmt.Errorf("%w: repository must be GitHub or GitLab", errFastlaneUnavailable)
+		return nil, fmt.Errorf("%w: repository must be GitHub, GitLab, or Gitea/Codeberg", errFastlaneUnavailable)
 	}
 }
 
@@ -105,6 +108,80 @@ func (f *MetadataFetcher) githubContents(ctx context.Context, repoPath, path str
 	var entries []fastlaneEntry
 	if err := json.NewDecoder(io.LimitReader(resp.Body, MaxRemoteDownloadSize)).Decode(&entries); err != nil {
 		return nil, fmt.Errorf("parsing GitHub Fastlane directory: %w", err)
+	}
+	return entries, nil
+}
+
+func (f *MetadataFetcher) fetchGiteaFastlaneMetadata(ctx context.Context) (*AppMetadata, error) {
+	baseURL, repoPath := config.GetGiteaRepo(f.cfg.Repository)
+	if repoPath == "" {
+		return nil, fmt.Errorf("%w: no Gitea/Codeberg repository configured", errFastlaneUnavailable)
+	}
+	parts := strings.Split(repoPath, "/")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("%w: invalid Gitea repo path: %s", errFastlaneUnavailable, repoPath)
+	}
+	owner, repo := parts[0], parts[1]
+
+	root, err := f.giteaContents(ctx, baseURL, owner, repo, fastlaneMetadataPath)
+	if err != nil {
+		return nil, err
+	}
+	locale, err := selectFastlaneLocale(root)
+	if err != nil {
+		return nil, err
+	}
+	basePath := fastlaneMetadataPath + "/" + locale
+
+	entries, err := f.giteaContents(ctx, baseURL, owner, repo, basePath)
+	if err != nil {
+		return nil, fmt.Errorf("fetching Fastlane locale: %w", err)
+	}
+	textURL := func(name string) string {
+		for _, entry := range entries {
+			if entry.Name == name && entry.Type == "file" {
+				return entry.DownloadURL
+			}
+		}
+		return ""
+	}
+	listDirectory := func(path string) ([]fastlaneEntry, error) {
+		return f.giteaContents(ctx, baseURL, owner, repo, path)
+	}
+	mediaURL := func(entry fastlaneEntry) string { return entry.DownloadURL }
+
+	return f.buildFastlaneMetadata(ctx, basePath, textURL, listDirectory, mediaURL)
+}
+
+// giteaContents lists a directory via the Gitea/Forgejo contents API.
+// The response shape matches GitHub's contents API (name, path, type, download_url).
+func (f *MetadataFetcher) giteaContents(ctx context.Context, baseURL, owner, repo, path string) ([]fastlaneEntry, error) {
+	requestURL := fmt.Sprintf("%s/api/v1/repos/%s/%s/contents/%s", baseURL, owner, repo, path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating Gitea Fastlane request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if token := os.Getenv("GITEA_TOKEN"); token != "" {
+		req.Header.Set("Authorization", "token "+token)
+	}
+
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetching Gitea Fastlane directory: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("%w: %s", errFastlaneUnavailable, path)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Gitea Fastlane API error: %d", resp.StatusCode)
+	}
+
+	var entries []fastlaneEntry
+	if err := json.NewDecoder(io.LimitReader(resp.Body, MaxRemoteDownloadSize)).Decode(&entries); err != nil {
+		return nil, fmt.Errorf("parsing Gitea Fastlane directory: %w", err)
 	}
 	return entries, nil
 }

@@ -36,6 +36,26 @@ func TestDefaultMetadataSources(t *testing.T) {
 			wantFirst: "fastlane",
 		},
 		{
+			name: "codeberg source tries fastlane only",
+			cfg: &config.Config{
+				Repository: "https://codeberg.org/Freeyourgadget/Gadgetbridge",
+			},
+			wantLen:   1,
+			wantFirst: "fastlane",
+		},
+		{
+			name: "self-hosted gitea with explicit type tries fastlane",
+			cfg: &config.Config{
+				Repository: "https://git.example.com/owner/app",
+				ReleaseSource: &config.ReleaseSource{
+					URL:  "https://git.example.com/owner/app",
+					Type: "gitea",
+				},
+			},
+			wantLen:   1,
+			wantFirst: "fastlane",
+		},
+		{
 			name: "fdroid source has no automatic metadata source",
 			cfg: &config.Config{
 				ReleaseSource: &config.ReleaseSource{
@@ -333,6 +353,41 @@ func TestFetchFastlaneMetadata(t *testing.T) {
 			wantName:   "Flux",
 			wantLocale: "Résumé",
 			wantImages: 0,
+		},
+		{
+			name:       "Codeberg/Gitea imports preferred en-US locale",
+			repository: "https://codeberg.org/owner/app",
+			transport: func(req *http.Request) (*http.Response, error) {
+				switch req.URL.Host + req.URL.Path {
+				case "codeberg.org/api/v1/repos/owner/app/contents/fastlane/metadata/android":
+					return testResponse(http.StatusOK, `[{"name":"de-DE","type":"dir"},{"name":"en-US","type":"dir"}]`), nil
+				case "codeberg.org/api/v1/repos/owner/app/contents/fastlane/metadata/android/en-US":
+					return testResponse(http.StatusOK, `[
+						{"name":"title.txt","type":"file","download_url":"https://raw.test/title"},
+						{"name":"short_description.txt","type":"file","download_url":"https://raw.test/short"},
+						{"name":"full_description.txt","type":"file","download_url":"https://raw.test/full"}
+					]`), nil
+				case "codeberg.org/api/v1/repos/owner/app/contents/fastlane/metadata/android/en-US/images":
+					return testResponse(http.StatusOK, `[{"name":"icon.png","type":"file","download_url":"https://raw.test/icon"}]`), nil
+				case "codeberg.org/api/v1/repos/owner/app/contents/fastlane/metadata/android/en-US/images/phoneScreenshots":
+					return testResponse(http.StatusOK, `[
+						{"name":"02.png","type":"file","download_url":"https://raw.test/02"},
+						{"name":"01.png","type":"file","download_url":"https://raw.test/01"}
+					]`), nil
+				case "raw.test/title":
+					return testResponse(http.StatusOK, " Gadget \n"), nil
+				case "raw.test/short":
+					return testResponse(http.StatusOK, "A short description\n"), nil
+				case "raw.test/full":
+					return testResponse(http.StatusOK, "A full description\n"), nil
+				default:
+					return testResponse(http.StatusNotFound, ""), nil
+				}
+			},
+			wantName:   "Gadget",
+			wantLocale: "A short description",
+			wantIcon:   "https://raw.test/icon",
+			wantImages: 2,
 		},
 	}
 

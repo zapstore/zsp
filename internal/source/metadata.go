@@ -55,6 +55,22 @@ func NewMetadataFetcherWithPackageID(cfg *config.Config, packageID string) *Meta
 	}
 }
 
+// repositoryMetadataHost returns the forge that hosts cfg.Repository for
+// metadata purposes. Self-hosted Gitea/Forgejo may not be detectable from the
+// hostname alone; in that case an explicit release_source type of gitea is used.
+func repositoryMetadataHost(cfg *config.Config) config.SourceType {
+	if cfg == nil || cfg.Repository == "" {
+		return config.SourceUnknown
+	}
+	if t := config.DetectSourceType(cfg.Repository); t != config.SourceUnknown {
+		return t
+	}
+	if cfg.GetSourceType() == config.SourceGitea {
+		return config.SourceGitea
+	}
+	return config.SourceUnknown
+}
+
 // DefaultMetadataSources returns explicitly configured sources, or the
 // Fastlane-first fallback chain for a supported repository. Automatic metadata
 // does not infer F-Droid or Play Store sources.
@@ -78,11 +94,14 @@ func DefaultMetadataSources(cfg *config.Config) []string {
 		return sources
 	}
 
-	switch config.DetectSourceType(cfg.Repository) {
+	switch repositoryMetadataHost(cfg) {
 	case config.SourceGitHub:
 		return []string{"fastlane", "github"}
 	case config.SourceGitLab:
 		return []string{"fastlane", "gitlab"}
+	case config.SourceGitea:
+		// No native Gitea repo-metadata source yet — Fastlane only.
+		return []string{"fastlane"}
 	default:
 		return nil
 	}
@@ -142,7 +161,8 @@ func (r *MetadataResult) HasErrors() bool {
 }
 
 // FetchMetadata fetches metadata from the specified sources and merges into config.
-// Sources can be: "fastlane", "github", "gitlab", "fdroid", "playstore"
+// Sources can be: "fastlane", "github", "gitlab", "fdroid", "playstore".
+// Fastlane works for GitHub, GitLab, and Gitea-compatible repositories.
 // Only empty fields in config are populated (existing values are preserved).
 // Returns a MetadataResult containing any non-fatal errors from individual sources.
 func (f *MetadataFetcher) FetchMetadata(ctx context.Context, sources []string) error {

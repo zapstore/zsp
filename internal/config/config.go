@@ -675,7 +675,8 @@ func DetectSourceType(rawURL string) SourceType {
 	if strings.Contains(lower, "gitlab.com") || containsGitLab(lower) {
 		return SourceGitLab
 	}
-	if strings.Contains(lower, "codeberg.org") {
+	// Gitea-compatible forges: Codeberg, and hosts with gitea/forgejo in the domain
+	if strings.Contains(lower, "codeberg.org") || containsGitea(lower) {
 		return SourceGitea
 	}
 	// F-Droid compatible repositories
@@ -699,6 +700,17 @@ func containsGitLab(rawURL string) bool {
 	}
 	host := strings.ToLower(parsed.Hostname())
 	return strings.Contains(host, "gitlab")
+}
+
+// containsGitea checks if a URL's domain contains "gitea" or "forgejo"
+// (for self-hosted Gitea/Forgejo instances).
+func containsGitea(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return strings.Contains(host, "gitea") || strings.Contains(host, "forgejo")
 }
 
 // FDroidRepoInfo contains information about an F-Droid compatible repository.

@@ -5,8 +5,8 @@
 
 ## Tasks
 
-- [x] 1. Add Fastlane metadata retrieval for GitHub and GitLab repositories.
-  - Files: `internal/source/metadata.go`
+- [x] 1. Add Fastlane metadata retrieval for GitHub, GitLab, and Gitea/Codeberg repositories.
+  - Files: `internal/source/metadata.go`, `internal/source/fastlane.go`
   - Read the Android Fastlane metadata layout and expose text and image fields.
 - [x] 2. Make automatic metadata selection Fastlane-first.
   - Files: `internal/source/metadata.go`
@@ -20,6 +20,7 @@
 |----------|----------|--------|
 | GitHub Fastlane metadata | Text, icon, and screenshots are imported | [x] |
 | GitLab Fastlane metadata | Text, icon, and screenshots are imported | [x] |
+| Codeberg/Gitea Fastlane metadata | Text, icon, and screenshots are imported | [x] |
 | Missing `en-US` locale | Deterministic locale fallback is used | [x] |
 | Absent Fastlane directory | Native repository metadata is used | [x] |
 | Missing optional Fastlane files | Available fields still import | [x] |
@@ -38,6 +39,12 @@
 **Context:** Fastlane is stored inside the source repository.
 **Decision:** Support GitHub and GitLab initially.
 **Rationale:** They are existing repository metadata hosts and cover the requested repository-backed use case.
+
+### 2026-07-17 — Gitea/Codeberg host coverage
+
+**Context:** Codeberg (and other Gitea/Forgejo forges) already ship APKs via `SourceGitea`; Fastlane lives in the same tree.
+**Decision:** Reuse the shared Fastlane layout parser with the Gitea contents API (`/api/v1/repos/{owner}/{repo}/contents/...`). Auto-detect Codeberg plus hostnames containing `gitea` or `forgejo`; allow explicit `release_source.type: gitea` for opaque self-hosted hosts. Automatic metadata is Fastlane-only (no native Gitea repo-metadata source yet).
+**Rationale:** Gitea's contents response matches GitHub's shape, so one adapter covers Codeberg and self-hosted Gitea/Forgejo.
 
 ## Spec Issues
 

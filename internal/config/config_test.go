@@ -317,6 +317,10 @@ func TestDetectSourceType(t *testing.T) {
 		{"https://my-gitlab.company.com/user/repo", SourceGitLab},
 		{"https://codeberg.org/user/repo", SourceGitea},
 		{"https://CODEBERG.ORG/User/Repo", SourceGitea},
+		// Self-hosted Gitea/Forgejo instances with gitea/forgejo in the domain
+		{"https://gitea.example.com/user/repo", SourceGitea},
+		{"https://forgejo.company.org/user/repo", SourceGitea},
+		{"https://my-gitea.company.com/user/repo", SourceGitea},
 		{"https://f-droid.org/packages/com.example", SourceFDroid},
 		{"https://f-droid.org/en/packages/com.example", SourceFDroid},
 		// IzzyOnDroid (F-Droid compatible)
