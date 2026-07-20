@@ -229,6 +229,7 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 
 	var version string
 	var assetURL string
+	var nameURL string // optional override for filename (e.g. resolved redirect target)
 	var newCache *webCache
 
 	if repo.HasAssetExtractor() {
@@ -289,17 +290,18 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		// Mode 2/3: Direct URL (versionless), use HTTP caching
 		assetURL = repo.AssetURL
 
-		// Follow redirects to get the final URL (e.g., for GitHub release redirects)
+		// Resolve redirects for filename + HTTP cache validation only.
+		// Keep downloading from the original URL so tokenized CDN targets
+		// (e.g. telegram.org → telesco.pe?token=...) are minted at GET time.
 		finalURL, err := w.resolveRedirects(ctx, assetURL)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve URL: %w", err)
 		}
-		assetURL = finalURL
 
 		// Check for changes using HTTP caching headers (on the final URL)
 		cache := w.loadCache()
 		if !w.SkipCache && cache != nil {
-			modified, etag, lastMod, contentLen, err := w.checkHTTPCacheHeaders(ctx, assetURL, cache.ETag, cache.LastModified, cache.ContentLength)
+			modified, etag, lastMod, contentLen, err := w.checkHTTPCacheHeaders(ctx, finalURL, cache.ETag, cache.LastModified, cache.ContentLength)
 			if err != nil {
 				return nil, fmt.Errorf("failed to check for updates: %w", err)
 			}
@@ -314,7 +316,7 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 			}
 		} else {
 			// No cache, fetch headers for future use
-			_, etag, lastMod, contentLen, err := w.checkHTTPCacheHeaders(ctx, assetURL, "", "", 0)
+			_, etag, lastMod, contentLen, err := w.checkHTTPCacheHeaders(ctx, finalURL, "", "", 0)
 			if err != nil {
 				// Non-fatal - we can still download without caching
 				newCache = &webCache{}
@@ -326,6 +328,9 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 				}
 			}
 		}
+
+		// Filename from redirect target (e.g. Telegram.apk); download still uses assetURL
+		nameURL = finalURL
 
 		// Version will be extracted from APK after download
 		version = ""
@@ -343,9 +348,13 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	// - No {version} placeholder in asset_url: URL is static, only Blossom URL should be used
 	excludeURL := repo.HasAssetExtractor() || !repo.HasVersionPlaceholder()
 
-	// Extract filename from URL path (without query parameters)
-	assetName := filepath.Base(assetURL)
-	if parsed, err := url.Parse(assetURL); err == nil {
+	// Extract filename from URL path (without query parameters).
+	// nameURL may be the redirect target when the download URL itself is generic.
+	if nameURL == "" {
+		nameURL = assetURL
+	}
+	assetName := filepath.Base(nameURL)
+	if parsed, err := url.Parse(nameURL); err == nil {
 		assetName = filepath.Base(parsed.Path)
 	}
 
@@ -663,57 +672,8 @@ func (w *Web) Download(ctx context.Context, asset *Asset, destDir string, progre
 		return "", fmt.Errorf("invalid destination path: path traversal detected")
 	}
 
-	// Use download client (no total timeout — only stall detection)
-	dlClient := newDownloadHTTPClient()
-
-	req, err := http.NewRequestWithContext(ctx, "GET", asset.URL, nil)
-	if err != nil {
+	if err := DownloadHTTP(ctx, w.client, asset.URL, destPath, asset.Size, progress); err != nil {
 		return "", err
-	}
-
-	resp, err := DoWithTorFallback(ctx, dlClient, req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	// Validate HTTP status
-	if err := checkHTTPStatus(resp, "Web download"); err != nil {
-		return "", err
-	}
-
-	// Use Content-Length from response if available, otherwise use asset size
-	total := resp.ContentLength
-	if total <= 0 {
-		total = asset.Size
-	}
-
-	// Create destination file
-	file, err := os.Create(destPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to create file: %w", err)
-	}
-	defer file.Close()
-
-	// Wrap body with stall timeout — fails only if no data received for 30s
-	var reader io.Reader = &StallTimeoutReader{
-		Reader:  resp.Body,
-		Timeout: downloadStallTimeout,
-	}
-
-	// Wrap with progress tracking if callback provided
-	if progress != nil && total > 0 {
-		reader = &ProgressReader{
-			Reader:     reader,
-			Total:      total,
-			OnProgress: progress,
-		}
-	}
-
-	_, err = io.Copy(file, reader)
-	if err != nil {
-		os.Remove(destPath)
-		return "", fmt.Errorf("failed to write file: %w", err)
 	}
 
 	// Save to download cache (best-effort, ignore errors) unless skipped
