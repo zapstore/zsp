@@ -20,6 +20,11 @@ import (
 // gitlabArchRegex extracts architecture from GitLab asset names like "APK (arm64-v8a)"
 var gitlabArchRegex = regexp.MustCompile(`\((arm64-v8a|armeabi-v7a|arm|x86_64|x86)\)`)
 
+// gitlabMarkdownLinkRegex matches markdown links in release descriptions.
+// Used to find APKs attached via GitLab uploads (e.g. [app.apk](/uploads/.../app.apk))
+// rather than formal release asset links.
+var gitlabMarkdownLinkRegex = regexp.MustCompile(`\[([^\]]*)\]\(([^)]+)\)`)
+
 // gitlabExternalRedirectMarker is present in GitLab's HTML interstitial for
 // externally hosted release assets. GitLab returns HTTP 200 with this page
 // instead of a Location header, so http.Client cannot follow it automatically.
@@ -39,6 +44,7 @@ type GitLab struct {
 	cfg               *config.Config
 	baseURL           string // e.g., "https://gitlab.com" or self-hosted URL
 	projectID         string // URL-encoded project path (e.g., "user%2Frepo")
+	numericProjectID  int    // GitLab numeric project id (needed for /-/project/:id/uploads/ URLs)
 	client            *http.Client
 	cacheDir          string
 	pendingVersion    string
@@ -158,6 +164,11 @@ type gitlabAssetLink struct {
 // Iterates through up to 10 releases to find one with APK assets (for repos that
 // publish desktop and mobile releases separately).
 func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
+	// Numeric id is required to resolve markdown /uploads/ attachments.
+	if err := g.ensureNumericProjectID(ctx); err != nil {
+		return nil, err
+	}
+
 	// GitLab API: GET /projects/:id/releases
 	// Returns releases sorted by released_at descending
 	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/releases?per_page=%d", g.baseURL, g.projectID, maxReleasesToCheck)
@@ -204,6 +215,47 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	}
 
 	return nil, fmt.Errorf("no releases with valid APKs found in the last %d releases", maxReleasesToCheck)
+}
+
+// ensureNumericProjectID loads the project's numeric id from the GitLab API once.
+// Markdown upload links resolve to /-/project/:id/uploads/..., not /group/repo/uploads/...
+func (g *GitLab) ensureNumericProjectID(ctx context.Context) error {
+	if g.numericProjectID > 0 {
+		return nil
+	}
+
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%s", g.baseURL, g.projectID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := g.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to fetch GitLab project: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("GitLab project not found or not accessible")
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("GitLab API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var project struct {
+		ID int `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&project); err != nil {
+		return fmt.Errorf("failed to parse GitLab project: %w", err)
+	}
+	if project.ID <= 0 {
+		return fmt.Errorf("GitLab project response missing id")
+	}
+
+	g.numericProjectID = project.ID
+	return nil
 }
 
 // pickGitLabAssetURL chooses the download URL for a release asset link.
@@ -268,6 +320,10 @@ func (g *GitLab) convertRelease(glRelease *gitlabRelease) *Release {
 			URL:  downloadURL,
 		})
 	}
+
+	// Some projects (e.g. AuroraStore since 4.8.1) attach APKs only as markdown
+	// uploads in the description, with no formal assets.links entries.
+	assets = mergeGitLabAssets(assets, g.descriptionAPKAssets(glRelease.Description))
 
 	// Filter out APKs with unsupported architectures (x86, x86_64, etc.)
 	assets = FilterUnsupportedArchitectures(assets)
@@ -496,4 +552,149 @@ func (g *GitLab) matchesReleaseFilter(tagName string) bool {
 		return false
 	}
 	return matched
+}
+
+// descriptionAPKAssets extracts APK assets from markdown links in a release description.
+// GitLab projects often attach binaries via /uploads/... links instead of assets.links.
+func (g *GitLab) descriptionAPKAssets(description string) []*Asset {
+	if description == "" {
+		return nil
+	}
+
+	var assets []*Asset
+	seen := make(map[string]bool)
+
+	for _, match := range gitlabMarkdownLinkRegex.FindAllStringSubmatch(description, -1) {
+		if len(match) < 3 {
+			continue
+		}
+		linkText := strings.TrimSpace(match[1])
+		rawURL := strings.TrimSpace(match[2])
+		if rawURL == "" {
+			continue
+		}
+
+		downloadURL, ok := resolveGitLabDescriptionURL(g.baseURL, g.numericProjectID, rawURL)
+		if !ok {
+			continue
+		}
+
+		name := apkAssetName(linkText, downloadURL)
+		if !IsAPKAsset(name, downloadURL) {
+			continue
+		}
+
+		key := strings.ToLower(urlPathBase(name))
+		if key == "" || key == "." || seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		assets = append(assets, &Asset{
+			Name: name,
+			URL:  downloadURL,
+		})
+	}
+
+	return assets
+}
+
+// resolveGitLabDescriptionURL turns a markdown href into an absolute download URL.
+// Relative /uploads/... paths become /-/project/:id/uploads/... (GitLab's public upload URL).
+func resolveGitLabDescriptionURL(baseURL string, numericProjectID int, rawURL string) (string, bool) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return "", false
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "", false
+	}
+
+	switch {
+	case parsed.Scheme == "http" || parsed.Scheme == "https":
+		if parsed.Host == "" {
+			return "", false
+		}
+		return parsed.String(), true
+	case parsed.Scheme != "":
+		// Reject javascript:, data:, etc.
+		return "", false
+	}
+
+	// Relative path — typically /uploads/<hash>/<file>.apk
+	path := parsed.Path
+	if path == "" {
+		path = rawURL
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	if baseURL == "" || numericProjectID <= 0 {
+		return "", false
+	}
+	if !strings.HasPrefix(path, "/uploads/") {
+		// Only auto-resolve GitLab upload attachments; other relative links are ambiguous.
+		return "", false
+	}
+
+	// Namespace-path uploads (/{group}/{repo}/uploads/...) 404 on gitlab.com;
+	// the working form is /-/project/:id/uploads/...
+	return fmt.Sprintf("%s/-/project/%d%s", strings.TrimRight(baseURL, "/"), numericProjectID, path), true
+}
+
+// apkAssetName prefers a .apk link label, otherwise the URL basename.
+func apkAssetName(linkText, downloadURL string) string {
+	if strings.HasSuffix(strings.ToLower(linkText), ".apk") {
+		return urlPathBase(linkText)
+	}
+	if parsed, err := url.Parse(downloadURL); err == nil {
+		if base := urlPathBase(parsed.Path); base != "" && base != "." {
+			return base
+		}
+	}
+	if linkText != "" {
+		return linkText
+	}
+	return urlPathBase(downloadURL)
+}
+
+// urlPathBase returns the final path segment using '/' separators (URL-safe).
+func urlPathBase(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(path, "/"); idx >= 0 {
+		return path[idx+1:]
+	}
+	return path
+}
+
+// mergeGitLabAssets appends extras whose basenames are not already present in existing.
+// Formal assets.links win over description uploads when both exist.
+func mergeGitLabAssets(existing, extras []*Asset) []*Asset {
+	if len(extras) == 0 {
+		return existing
+	}
+	seen := make(map[string]bool, len(existing))
+	for _, a := range existing {
+		if a == nil {
+			continue
+		}
+		seen[strings.ToLower(urlPathBase(a.Name))] = true
+	}
+	for _, a := range extras {
+		if a == nil {
+			continue
+		}
+		key := strings.ToLower(urlPathBase(a.Name))
+		if key == "" || key == "." || seen[key] {
+			continue
+		}
+		seen[key] = true
+		existing = append(existing, a)
+	}
+	return existing
 }
