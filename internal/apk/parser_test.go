@@ -1,6 +1,8 @@
 package apk
 
 import (
+	"bytes"
+	"image"
 	"os"
 	"path/filepath"
 	"testing"
@@ -132,6 +134,33 @@ func TestParseBraveAPI37Manifest(t *testing.T) {
 	}
 	if !info.IsArm64() {
 		t.Errorf("IsArm64() = false, want true; architectures = %v", info.Architectures)
+	}
+}
+
+func TestParseAmberAdaptiveIcon(t *testing.T) {
+	path := filepath.Join("..", "..", "testdata", "apks", "amber-arm64-v8a-v6.3.0.apk")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		t.Skipf("test APK not found: %s", path)
+	}
+
+	info, err := Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if info.Label != "Amber" {
+		t.Errorf("Label = %q, want %q", info.Label, "Amber")
+	}
+
+	icon, _, err := image.Decode(bytes.NewReader(info.Icon))
+	if err != nil {
+		t.Fatalf("decode icon: %v", err)
+	}
+	if got, want := icon.Bounds().Dx(), 512; got != want {
+		t.Errorf("icon width = %d, want %d", got, want)
+	}
+	red, green, blue, _ := icon.At(256, 256).RGBA()
+	if red <= green || green <= blue {
+		t.Errorf("icon center color = (%d, %d, %d), want Amber's yellow foreground", red, green, blue)
 	}
 }
 
