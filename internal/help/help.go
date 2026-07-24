@@ -73,7 +73,7 @@ func RootHelp() string {
 	b.WriteString(renderBold("COMMANDS") + "\n")
 	b.WriteString("  " + renderAccent("publish") + "     " + renderWhite("Publish APK releases to Nostr relays") + "\n")
 	b.WriteString("  " + renderAccent("identity") + "    " + renderWhite("Manage cryptographic identity proofs (NIP-C1)") + "\n")
-	b.WriteString("  " + renderAccent("utils") + "       " + renderWhite("Operational utilities (extract-apk)") + "\n\n")
+	b.WriteString("  " + renderAccent("utils") + "       " + renderWhite("Operational utilities (extract-apk, has-new-release)") + "\n\n")
 
 	b.WriteString(renderBold("EXAMPLES") + "\n")
 	writeExample(&b, "zsp publish --wizard", "Interactive wizard (recommended for first-time setup)")
@@ -146,7 +146,7 @@ func PublishHelp() string {
 	b.WriteString(renderBold("BEHAVIOR FLAGS") + "\n")
 	writeFlag(&b, "--offline", "Sign events without uploading/publishing (outputs JSON)")
 	b.WriteString("                            " + renderGreyDark("Events go to stdout, upload manifest to stderr") + "\n")
-	writeFlag(&b, "--quiet", "No prompts, no spinners, auto-yes to all confirmations")
+	writeFlag(&b, "-q, --quiet", "No prompts, no spinners, auto-yes to all confirmations")
 	writeFlag(&b, "--wizard", "Run interactive wizard (uses existing config as defaults)")
 	writeFlag(&b, "--skip-preview", "Skip the browser preview prompt")
 	writeFlag(&b, "--port <port>", "Custom port for browser preview/signing")
@@ -368,9 +368,11 @@ func UtilsHelp() string {
 	b.WriteString("  " + renderAccent("zsp utils has-new-release zapstore.yaml") + "\n\n")
 
 	b.WriteString(renderBold("FLAGS") + "\n")
+	writeFlag(&b, "--pre-release", "Include pre-releases when checking for a new release")
 	writeFlag(&b, "--json", "Machine-readable output (errors as JSON to stderr)")
 	writeFlag(&b, "--verbose", "Debug output")
 	writeFlag(&b, "--no-color", "Disable colored output")
+	writeFlag(&b, "-h, --help", "Show this help")
 	b.WriteString("\n")
 
 	b.WriteString(renderBold("EXIT CODES") + "\n")
