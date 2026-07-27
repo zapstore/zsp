@@ -32,3 +32,17 @@ func TestParseCommand_UnknownSubcommandSetsHelpAndMarker(t *testing.T) {
 		t.Fatalf("UnknownSubcommand = %q, want typo", opts.UnknownSubcommand)
 	}
 }
+
+func TestParseCommand_IdentityKeyAlias(t *testing.T) {
+	oldArgs := os.Args
+	t.Cleanup(func() { os.Args = oldArgs })
+	os.Args = []string{"zsp", "identity", "--link-key", "release.jks", "--key-alias", "release"}
+
+	opts := ParseCommand()
+	if opts.FlagParseError != nil {
+		t.Fatalf("ParseCommand() error: %v", opts.FlagParseError)
+	}
+	if opts.Identity.KeyAlias != "release" {
+		t.Fatalf("KeyAlias = %q, want release", opts.Identity.KeyAlias)
+	}
+}

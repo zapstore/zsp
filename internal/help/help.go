@@ -272,6 +272,8 @@ func IdentityHelp() string {
 	b.WriteString(renderBold("OPTIONS") + "\n")
 	writeFlag(&b, "--link-key-expiry <duration>", "Validity period (default: 1y)")
 	b.WriteString("                            " + renderGreyDark("Examples: 1y, 6mo, 30d, 720h") + "\n")
+	writeFlag(&b, "--key-alias <alias>", "Private-key alias for JKS keystores")
+	b.WriteString("                            " + renderGreyDark("Required when a JKS contains multiple private keys") + "\n")
 	writeFlag(&b, "--relays <url>", "Relays for identity proofs (repeatable)")
 	b.WriteString("                            " + renderGreyDark("Defaults: relay.primal.net, relay.damus.io, relay.zapstore.dev") + "\n")
 	b.WriteString("\n")
@@ -313,18 +315,15 @@ func IdentityHelp() string {
 	// Certificate formats
 	b.WriteString(renderBold("CERTIFICATE FORMATS") + "\n")
 	b.WriteString("  " + renderAccent("PKCS12 (.p12, .pfx)") + "   " + renderWhite("Android keystore format (requires password)") + "\n")
-	b.WriteString("  " + renderAccent("JKS (.jks, .keystore)") + " " + renderWhite("Java KeyStore — will show keytool conversion command") + "\n")
+	b.WriteString("  " + renderAccent("JKS (.jks, .keystore)") + " " + renderWhite("Android Java KeyStore (loaded directly; no Java required)") + "\n")
 	b.WriteString("  " + renderAccent("PEM (.pem, .crt)") + "      " + renderWhite("Certificate + separate key file") + "\n\n")
 
 	// Environment variables
 	b.WriteString(renderBold("ENVIRONMENT") + "\n")
 	b.WriteString(renderGreyDark("  Variables can be set in environment or .env file") + "\n\n")
 	b.WriteString("  " + renderAccent("SIGN_WITH") + "           " + renderWhite("Signing method (nsec1..., npub1..., bunker://..., browser)") + "\n")
-	b.WriteString("  " + renderAccent("KEYSTORE_PASSWORD") + "   " + renderWhite("PKCS12 keystore password (avoids prompt, required for piping)") + "\n\n")
-
-	b.WriteString(renderGreyDark("  Note: JKS format is not directly supported. Convert with:") + "\n")
-	b.WriteString("  " + renderAccent("keytool -importkeystore -srckeystore key.jks -destkeystore key.p12 \\") + "\n")
-	b.WriteString("    " + renderAccent("-srcstoretype JKS -deststoretype PKCS12") + "\n\n")
+	b.WriteString("  " + renderAccent("KEYSTORE_PASSWORD") + "   " + renderWhite("PKCS12 or JKS store password (avoids prompt, required for piping)") + "\n")
+	b.WriteString("  " + renderAccent("KEYSTORE_KEY_PASSWORD") + " " + renderWhite("Optional JKS private-key password (defaults to store password)") + "\n\n")
 
 	// How it works
 	b.WriteString(renderBold("HOW IT WORKS") + "\n")

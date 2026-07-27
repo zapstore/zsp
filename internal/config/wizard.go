@@ -870,6 +870,11 @@ func GetKeystorePassword() string {
 	return GetEnv("KEYSTORE_PASSWORD")
 }
 
+// GetKeystoreKeyPassword returns KEYSTORE_KEY_PASSWORD from environment or .env file.
+func GetKeystoreKeyPassword() string {
+	return GetEnv("KEYSTORE_KEY_PASSWORD")
+}
+
 // warnIfNsecInEnv prints a security warning if an nsec is stored in an insecure location.
 func warnIfNsecInEnv(value, source string) {
 	if strings.HasPrefix(value, "nsec1") {

@@ -16,12 +16,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
+	keystore "github.com/pavlo-v-chernykh/keystore-go/v4"
 	"software.sslmate.com/src/go-pkcs12"
 )
 
@@ -33,6 +33,9 @@ var jksMagic = []byte{0xFE, 0xED, 0xFE, 0xED}
 
 // ErrJKSFormat is returned when a Java KeyStore is detected.
 var ErrJKSFormat = errors.New("java keystore (JKS) format detected")
+
+// ErrJKSKeyAliasRequired is returned when a JKS contains multiple private keys.
+var ErrJKSKeyAliasRequired = errors.New("JKS contains multiple private-key entries; specify a key alias")
 
 // ErrKeyCertMismatch is returned when a private key does not correspond to a certificate.
 var ErrKeyCertMismatch = errors.New("private key does not match certificate")
@@ -328,6 +331,11 @@ func detectJKS(data []byte) bool {
 	return len(data) >= 4 && bytes.Equal(data[:4], jksMagic)
 }
 
+// IsJKS reports whether data has the Java KeyStore magic bytes.
+func IsJKS(data []byte) bool {
+	return detectJKS(data)
+}
+
 // LoadPKCS12 loads a private key and certificate from PKCS12 data.
 // Security: The password is zeroed after use to minimize exposure in memory.
 func LoadPKCS12(data []byte, password string) (crypto.PrivateKey, *x509.Certificate, error) {
@@ -378,6 +386,90 @@ func LoadPKCS12File(path, password string) (crypto.PrivateKey, *x509.Certificate
 	// Convert to bytes and use secure version that zeros after use
 	passwordBytes := []byte(password)
 	return LoadPKCS12WithSecurePassword(data, passwordBytes)
+}
+
+// JKSKeyAliasRequiredError identifies the private-key aliases available in a JKS.
+type JKSKeyAliasRequiredError struct {
+	Aliases []string
+}
+
+func (e *JKSKeyAliasRequiredError) Error() string {
+	return fmt.Sprintf("%v: %s", ErrJKSKeyAliasRequired, strings.Join(e.Aliases, ", "))
+}
+
+func (e *JKSKeyAliasRequiredError) Unwrap() error {
+	return ErrJKSKeyAliasRequired
+}
+
+// LoadJKS loads a private key and its leaf certificate from JKS data.
+// When keyPassword is empty, storePassword is used for the private-key entry.
+// If alias is empty, the only private-key entry is selected; otherwise callers
+// must provide an alias.
+func LoadJKS(data, storePassword, keyPassword []byte, alias string) (crypto.PrivateKey, *x509.Certificate, error) {
+	defer zeroBytes(storePassword)
+	defer zeroBytes(keyPassword)
+
+	store := keystore.New(keystore.WithOrderedAliases())
+	if err := store.Load(bytes.NewReader(data), storePassword); err != nil {
+		return nil, nil, fmt.Errorf("load JKS: %w", err)
+	}
+
+	var aliases []string
+	for _, candidate := range store.Aliases() {
+		if store.IsPrivateKeyEntry(candidate) {
+			aliases = append(aliases, candidate)
+		}
+	}
+	if len(aliases) == 0 {
+		return nil, nil, fmt.Errorf("JKS contains no private-key entries")
+	}
+	if alias == "" {
+		if len(aliases) > 1 {
+			return nil, nil, &JKSKeyAliasRequiredError{Aliases: aliases}
+		}
+		alias = aliases[0]
+	}
+	if !store.IsPrivateKeyEntry(alias) {
+		for _, candidate := range store.Aliases() {
+			if candidate == alias {
+				return nil, nil, fmt.Errorf("JKS key alias %q is not a private-key entry", alias)
+			}
+		}
+		return nil, nil, fmt.Errorf("JKS key alias %q: %w", alias, keystore.ErrEntryNotFound)
+	}
+
+	if len(keyPassword) == 0 {
+		keyPassword = storePassword
+	}
+	entry, err := store.GetPrivateKeyEntry(alias, keyPassword)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load private key for JKS alias %q: %w", alias, err)
+	}
+	if len(entry.CertificateChain) == 0 {
+		return nil, nil, fmt.Errorf("JKS key alias %q has no certificate chain", alias)
+	}
+
+	privateKey, err := x509.ParsePKCS8PrivateKey(entry.PrivateKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse private key for JKS alias %q: %w", alias, err)
+	}
+	cert, err := x509.ParseCertificate(entry.CertificateChain[0].Content)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse certificate for JKS alias %q: %w", alias, err)
+	}
+	if err := ValidateKeyCertPair(privateKey, cert); err != nil {
+		return nil, nil, err
+	}
+	return privateKey, cert, nil
+}
+
+// LoadJKSFile loads a private key and leaf certificate from a JKS file.
+func LoadJKSFile(path, storePassword, keyPassword, alias string) (crypto.PrivateKey, *x509.Certificate, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read JKS file: %w", err)
+	}
+	return LoadJKS(data, []byte(storePassword), []byte(keyPassword), alias)
 }
 
 // LoadPEM loads a private key and certificate from PEM files.
@@ -440,23 +532,4 @@ func LoadPEM(keyPath, certPath string) (crypto.PrivateKey, *x509.Certificate, er
 	}
 
 	return privateKey, cert, nil
-}
-
-// JKSConversionHelp returns help text for converting JKS to PKCS12.
-func JKSConversionHelp(jksPath string) string {
-	// Derive p12 path in same directory with .p12 extension
-	dir := filepath.Dir(jksPath)
-	base := filepath.Base(jksPath)
-	p12Name := strings.TrimSuffix(strings.TrimSuffix(base, ".jks"), ".keystore") + ".p12"
-	p12Path := filepath.Join(dir, p12Name)
-
-	return fmt.Sprintf(`Java KeyStore (JKS) format is not supported directly.
-Convert to PKCS12 first with keytool:
-
-  keytool -importkeystore -srckeystore %s -destkeystore %s -deststoretype PKCS12
-
-Then run:
-
-  zsp identity --link-key %s
-`, jksPath, p12Path, p12Path)
 }

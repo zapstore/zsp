@@ -214,14 +214,6 @@ func runIdentityCommand(ctx context.Context, opts *cli.Options) int {
 			if errors.Is(err, ui.ErrInterrupted) || errors.Is(err, context.Canceled) {
 				return 130
 			}
-			if errors.Is(err, identity.ErrJKSFormat) {
-				if opts.Global.JSON {
-					ui.PrintJSONError(fmt.Errorf("JKS format not supported; convert with keytool first"))
-				} else {
-					fmt.Fprint(os.Stderr, identity.JKSConversionHelp(opts.Identity.LinkKey))
-				}
-				return 1
-			}
 			if opts.Global.JSON {
 				ui.PrintJSONError(err)
 			} else {
@@ -236,14 +228,6 @@ func runIdentityCommand(ctx context.Context, opts *cli.Options) int {
 		if err := runVerifyIdentity(ctx, opts); err != nil {
 			if errors.Is(err, ui.ErrInterrupted) || errors.Is(err, context.Canceled) {
 				return 130
-			}
-			if errors.Is(err, identity.ErrJKSFormat) {
-				if opts.Global.JSON {
-					ui.PrintJSONError(fmt.Errorf("JKS format not supported; convert with keytool first"))
-				} else {
-					fmt.Fprint(os.Stderr, identity.JKSConversionHelp(opts.Identity.Verify))
-				}
-				return 1
 			}
 			if opts.Global.JSON {
 				ui.PrintJSONError(err)
@@ -830,7 +814,7 @@ func runLinkKey(ctx context.Context, opts *cli.Options) error {
 	}
 
 	// 1. Load x509 key and certificate based on file type
-	privateKey, cert, err := loadX509FromFile(filePath)
+	privateKey, cert, err := loadX509FromFile(filePath, opts.Identity.KeyAlias)
 	if err != nil {
 		return err
 	}
@@ -1071,7 +1055,7 @@ func runVerifyIdentity(ctx context.Context, opts *cli.Options) error {
 		fmt.Printf("  File: %s\n", filepath.Base(filePath))
 	} else {
 		// Load x509 certificate from file
-		_, cert, err = loadX509FromFile(filePath)
+		_, cert, err = loadX509FromFile(filePath, "")
 		if err != nil {
 			return err
 		}
@@ -1286,15 +1270,15 @@ func getKeystorePassword() (string, error) {
 	return ui.PromptPassword("Keystore password")
 }
 
-// loadX509FromFile loads x509 private key and certificate from a file.
+// loadX509FromFile loads an X.509 private key and certificate from a file.
 // Detects file type by extension and prompts for additional info as needed.
-// For PKCS12 files, set KEYSTORE_PASSWORD env var to avoid interactive prompt.
-func loadX509FromFile(filePath string) (crypto.PrivateKey, *x509.Certificate, error) {
+// For keystores, set KEYSTORE_PASSWORD to avoid an interactive prompt.
+func loadX509FromFile(filePath, keyAlias string) (crypto.PrivateKey, *x509.Certificate, error) {
 	lower := strings.ToLower(filePath)
 
-	// Check for JKS files first (by extension or content)
+	// JKS keystore (.jks, .keystore)
 	if strings.HasSuffix(lower, ".jks") || strings.HasSuffix(lower, ".keystore") {
-		return nil, nil, identity.ErrJKSFormat
+		return loadJKSFromFile(filePath, keyAlias)
 	}
 
 	// PKCS12 keystore (.p12, .pfx)
@@ -1322,7 +1306,36 @@ func loadX509FromFile(filePath string) (crypto.PrivateKey, *x509.Certificate, er
 	}
 
 	// Unknown extension - try to detect from content
-	return nil, nil, fmt.Errorf("unsupported file type: %s (use .p12, .pfx, .pem, or .crt)", filePath)
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read keystore file: %w", err)
+	}
+	if identity.IsJKS(data) {
+		return loadJKSFromFile(filePath, keyAlias)
+	}
+	return nil, nil, fmt.Errorf("unsupported file type: %s (use .p12, .pfx, .jks, .keystore, .pem, or .crt)", filePath)
+}
+
+func loadJKSFromFile(filePath, keyAlias string) (crypto.PrivateKey, *x509.Certificate, error) {
+	password, err := getKeystorePassword()
+	if err != nil {
+		return nil, nil, fmt.Errorf("read JKS password: %w", err)
+	}
+
+	keyPassword := config.GetKeystoreKeyPassword()
+	privateKey, cert, err := identity.LoadJKSFile(filePath, password, keyPassword, keyAlias)
+	var aliasErr *identity.JKSKeyAliasRequiredError
+	if err != nil && keyAlias == "" && errors.As(err, &aliasErr) {
+		idx, selectErr := ui.SelectOption("Select JKS key alias:", aliasErr.Aliases, 0)
+		if selectErr != nil {
+			return nil, nil, fmt.Errorf("select JKS key alias: %w", selectErr)
+		}
+		privateKey, cert, err = identity.LoadJKSFile(filePath, password, keyPassword, aliasErr.Aliases[idx])
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("load JKS keystore: %w", err)
+	}
+	return privateKey, cert, nil
 }
 
 // peekStdin sets stdin to non-blocking mode, attempts a 1-byte read, then

@@ -4,12 +4,10 @@ package workflow
 import (
 	"context"
 	"crypto"
-	"crypto/rand"
 	"crypto/x509"
-	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -831,10 +829,6 @@ func (p *Publisher) checkAndLinkCertificate(ctx context.Context) error {
 	if loadErr != nil {
 		return fmt.Errorf("failed to load keystore: %w", loadErr)
 	}
-	if privateKey == nil {
-		// keytool unavailable — non-fatal, publish continues.
-		return nil
-	}
 
 	// Keystore cert must be the APK signing cert — otherwise the proof's d-tag
 	// would not match apk_certificate_hash and clients could never use it.
@@ -906,24 +900,8 @@ func (p *Publisher) existingProofVerifies(proof *identity.IdentityProof, event *
 	return result.Valid && result.CertHashMatch && !result.Revoked
 }
 
-// loadFromJKS handles the Android Keystore (.jks / .keystore) path.
-// Detects keytool in PATH; if absent, prints the manual command and returns nil (non-fatal).
-// On success, converts to a short-lived PKCS12 with a random password and loads it.
+// loadFromJKS loads a private key and certificate from an Android JKS keystore.
 func (p *Publisher) loadFromJKS() (crypto.PrivateKey, *x509.Certificate, error) {
-	keytoolPath, err := exec.LookPath("keytool")
-	if err != nil {
-		// keytool not available — print manual command and skip non-fatally.
-		fmt.Println()
-		fmt.Println(ui.Dim("keytool not found in PATH. Install it, then link manually:"))
-		fmt.Println()
-		fmt.Println("  keytool -importkeystore -srckeystore <your.jks> \\")
-		fmt.Println("    -destkeystore <your.p12> -deststoretype PKCS12")
-		fmt.Println()
-		fmt.Println("  zsp identity --link-key <your.p12>")
-		fmt.Println()
-		return nil, nil, nil
-	}
-
 	jksPath, err := ui.Prompt("Path to your keystore (.jks / .keystore): ")
 	if err != nil {
 		return nil, nil, err
@@ -944,40 +922,19 @@ func (p *Publisher) loadFromJKS() (crypto.PrivateKey, *x509.Certificate, error) 
 		}
 	}
 
-	// Generate a random password for the short-lived temp PKCS12.
-	randBytes := make([]byte, 16)
-	if _, err := rand.Read(randBytes); err != nil {
-		return nil, nil, fmt.Errorf("failed to generate temp password: %w", err)
+	privateKey, cert, err := identity.LoadJKSFile(jksPath, srcPassword, config.GetKeystoreKeyPassword(), alias)
+	var aliasErr *identity.JKSKeyAliasRequiredError
+	if err != nil && alias == "" && errors.As(err, &aliasErr) {
+		idx, selectErr := ui.SelectOption("Select JKS key alias:", aliasErr.Aliases, 0)
+		if selectErr != nil {
+			return nil, nil, fmt.Errorf("select JKS key alias: %w", selectErr)
+		}
+		privateKey, cert, err = identity.LoadJKSFile(jksPath, srcPassword, config.GetKeystoreKeyPassword(), aliasErr.Aliases[idx])
 	}
-	tempPassword := hex.EncodeToString(randBytes)
-
-	tmpDir, err := os.MkdirTemp("", "zsp-keystore-*")
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create temp dir: %w", err)
+		return nil, nil, fmt.Errorf("load JKS keystore: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
-
-	tmpP12 := filepath.Join(tmpDir, "signing.p12")
-
-	args := []string{
-		"-importkeystore",
-		"-srckeystore", jksPath,
-		"-destkeystore", tmpP12,
-		"-deststoretype", "PKCS12",
-		"-srcstorepass", srcPassword,
-		"-deststorepass", tempPassword,
-		"-noprompt",
-	}
-	if alias != "" {
-		args = append(args, "-srcalias", alias, "-destalias", alias)
-	}
-
-	cmd := exec.Command(keytoolPath, args...)
-	if out, runErr := cmd.CombinedOutput(); runErr != nil {
-		return nil, nil, fmt.Errorf("keytool conversion failed: %w\n%s", runErr, strings.TrimSpace(string(out)))
-	}
-
-	return identity.LoadPKCS12File(tmpP12, tempPassword)
+	return privateKey, cert, nil
 }
 
 // isOffline returns true if running in offline mode.

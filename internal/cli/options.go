@@ -68,6 +68,7 @@ type UtilsOptions struct {
 type IdentityOptions struct {
 	LinkKey       string   // Path to certificate file (.p12, .pfx, .pem, .crt)
 	LinkKeyExpiry string   // Validity period for identity proof (e.g., "1y", "6mo", "30d")
+	KeyAlias      string   // Private-key alias for JKS keystores
 	Verify        string   // Verify identity proof (path to certificate or APK)
 	Relays        []string // Relays for identity proof operations
 	Offline       bool     // Output event JSON to stdout instead of publishing
@@ -250,6 +251,7 @@ func parseIdentityFlags(opts *Options, args []string) {
 
 	fs.StringVar(&opts.Identity.LinkKey, "link-key", "", "Link signing certificate to your Nostr identity")
 	fs.StringVar(&opts.Identity.LinkKeyExpiry, "link-key-expiry", "1y", "Validity period for identity proof (e.g., 1y, 6mo, 30d)")
+	fs.StringVar(&opts.Identity.KeyAlias, "key-alias", "", "Private-key alias for JKS keystores")
 	fs.StringVar(&opts.Identity.Verify, "verify", "", "Verify identity proof against certificate or APK")
 	fs.Var(&relaysFlag, "relays", "Relays for identity proofs (repeatable, overrides defaults)")
 	fs.BoolVar(&opts.Identity.Offline, "offline", false, "Output event JSON to stdout instead of publishing")
@@ -264,7 +266,7 @@ func parseIdentityFlags(opts *Options, args []string) {
 
 	// Reorder args
 	reorderedArgs := reorderArgsForFlagSet(args, map[string]bool{
-		"--link-key": true, "--link-key-expiry": true, "--verify": true, "--relays": true,
+		"--link-key": true, "--link-key-expiry": true, "--key-alias": true, "--verify": true, "--relays": true,
 	})
 
 	if err := fs.Parse(reorderedArgs); err != nil {

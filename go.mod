@@ -13,6 +13,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.4
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/nbd-wtf/go-nostr v0.52.3
+	github.com/pavlo-v-chernykh/keystore-go/v4 v4.5.0
 	github.com/shogo82148/androidbinary v1.0.5
 	github.com/srwiley/oksvg v0.0.0-20221011165216-be6e8873101c
 	github.com/srwiley/rasterx v0.0.0-20210519020934-456a8d69b780
