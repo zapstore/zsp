@@ -34,6 +34,9 @@ var jksMagic = []byte{0xFE, 0xED, 0xFE, 0xED}
 // ErrJKSFormat is returned when a Java KeyStore is detected.
 var ErrJKSFormat = errors.New("java keystore (JKS) format detected")
 
+// ErrKeyCertMismatch is returned when a private key does not correspond to a certificate.
+var ErrKeyCertMismatch = errors.New("private key does not match certificate")
+
 // IdentityProof contains the NIP-C1 cryptographic identity components.
 type IdentityProof struct {
 	CertHash  string // SHA-256 hash of DER-encoded certificate, lowercase hex
@@ -48,9 +51,18 @@ type IdentityProofOptions struct {
 }
 
 // GenerateIdentityProof creates a NIP-C1 cryptographic identity proof.
-// certHash is the SHA-256 hash of the DER-encoded certificate (lowercase hex).
+// The private key must correspond to cert; the cert hash is derived from cert.
 // The pubkeyHex must be the 64-character lowercase hex Nostr public key.
-func GenerateIdentityProof(privateKey crypto.PrivateKey, certHash, pubkeyHex string, opts *IdentityProofOptions) (*IdentityProof, error) {
+// Before returning, the signature is verified against cert so a mismatched
+// key/cert pair can never produce a publishable proof.
+func GenerateIdentityProof(privateKey crypto.PrivateKey, cert *x509.Certificate, pubkeyHex string, opts *IdentityProofOptions) (*IdentityProof, error) {
+	if cert == nil {
+		return nil, fmt.Errorf("certificate is required")
+	}
+	if err := ValidateKeyCertPair(privateKey, cert); err != nil {
+		return nil, err
+	}
+
 	if opts == nil {
 		opts = &IdentityProofOptions{}
 	}
@@ -58,6 +70,7 @@ func GenerateIdentityProof(privateKey crypto.PrivateKey, certHash, pubkeyHex str
 		opts.Expiry = DefaultExpiry
 	}
 
+	certHash := ComputeCertHash(cert)
 	createdAt := time.Now().Unix()
 	expiry := createdAt + int64(opts.Expiry.Seconds())
 
@@ -81,12 +94,57 @@ func GenerateIdentityProof(privateKey crypto.PrivateKey, certHash, pubkeyHex str
 		return nil, fmt.Errorf("failed to sign: %w", err)
 	}
 
-	return &IdentityProof{
+	proof := &IdentityProof{
 		CertHash:  certHash,
 		Signature: base64.StdEncoding.EncodeToString(signature),
 		CreatedAt: createdAt,
 		Expiry:    expiry,
-	}, nil
+	}
+
+	// Defense in depth: refuse to return a proof the client cannot verify.
+	result := VerifyIdentityProofWithCert(proof, nil, pubkeyHex, cert)
+	if !result.Valid {
+		if result.Error != nil {
+			return nil, fmt.Errorf("generated identity proof failed self-verification: %w", result.Error)
+		}
+		return nil, fmt.Errorf("generated identity proof failed self-verification: signature does not verify against certificate")
+	}
+
+	return proof, nil
+}
+
+// ValidateKeyCertPair checks that privateKey is the private half of cert's public key.
+func ValidateKeyCertPair(privateKey crypto.PrivateKey, cert *x509.Certificate) error {
+	if privateKey == nil {
+		return fmt.Errorf("private key is required")
+	}
+	if cert == nil {
+		return fmt.Errorf("certificate is required")
+	}
+	signer, ok := privateKey.(crypto.Signer)
+	if !ok {
+		return fmt.Errorf("unsupported private key type: %T", privateKey)
+	}
+	if !publicKeysEqual(signer.Public(), cert.PublicKey) {
+		return fmt.Errorf("%w: wrong keystore alias or mixed-up PEM files", ErrKeyCertMismatch)
+	}
+	return nil
+}
+
+func publicKeysEqual(a, b crypto.PublicKey) bool {
+	switch ak := a.(type) {
+	case *rsa.PublicKey:
+		bk, ok := b.(*rsa.PublicKey)
+		return ok && ak.Equal(bk)
+	case *ecdsa.PublicKey:
+		bk, ok := b.(*ecdsa.PublicKey)
+		return ok && ak.Equal(bk)
+	case ed25519.PublicKey:
+		bk, ok := b.(ed25519.PublicKey)
+		return ok && ak.Equal(bk)
+	default:
+		return false
+	}
 }
 
 // ToEventTags returns the NIP-C1 tags for a kind 30509 event.
@@ -115,14 +173,14 @@ func (p *IdentityProof) IsExpired() bool {
 
 // VerificationResult contains the result of verifying an identity proof.
 type VerificationResult struct {
-	Valid        bool      // Whether the signature is valid
-	Expired      bool      // Whether the proof has expired
-	Revoked      bool      // Whether the proof has been revoked
-	RevokeReason string    // Revocation reason if revoked
-	CertHashMatch bool     // Whether cert hash matches certificate (only set with cert verification)
-	CertHash     string    // Certificate hash from proof
-	ExpiryTime   time.Time // When the proof expires
-	Error        error     // Any error encountered
+	Valid         bool      // Whether the signature is valid
+	Expired       bool      // Whether the proof has expired
+	Revoked       bool      // Whether the proof has been revoked
+	RevokeReason  string    // Revocation reason if revoked
+	CertHashMatch bool      // Whether cert hash matches certificate (only set with cert verification)
+	CertHash      string    // Certificate hash from proof
+	ExpiryTime    time.Time // When the proof expires
+	Error         error     // Any error encountered
 }
 
 // ParseIdentityProofFromEvent parses a kind 30509 event into an IdentityProof.
@@ -375,6 +433,10 @@ func LoadPEM(keyPath, certPath string) (crypto.PrivateKey, *x509.Certificate, er
 	cert, err := x509.ParseCertificate(certBlock.Bytes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse certificate: %w", err)
+	}
+
+	if err := ValidateKeyCertPair(privateKey, cert); err != nil {
+		return nil, nil, err
 	}
 
 	return privateKey, cert, nil

@@ -835,6 +835,10 @@ func runLinkKey(ctx context.Context, opts *cli.Options) error {
 		return err
 	}
 
+	if err := identity.ValidateKeyCertPair(privateKey, cert); err != nil {
+		return err
+	}
+
 	certHash := identity.ComputeCertHash(cert)
 
 	if !opts.Identity.Offline {
@@ -905,8 +909,8 @@ func runLinkKey(ctx context.Context, opts *cli.Options) error {
 		}
 	}
 
-	// 6. Generate identity proof
-	proof, err := identity.GenerateIdentityProof(privateKey, certHash, pubkeyHex, &identity.IdentityProofOptions{
+	// 6. Generate identity proof (validates key/cert pair and self-verifies)
+	proof, err := identity.GenerateIdentityProof(privateKey, cert, pubkeyHex, &identity.IdentityProofOptions{
 		Expiry: expiry,
 	})
 	if err != nil {

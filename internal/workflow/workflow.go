@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	gonostr "github.com/nbd-wtf/go-nostr"
 	"github.com/zapstore/zsp/internal/apk"
 	"github.com/zapstore/zsp/internal/blossom"
 	"github.com/zapstore/zsp/internal/cli"
@@ -799,10 +800,16 @@ func (p *Publisher) checkAndLinkCertificate(ctx context.Context) error {
 		if event != nil {
 			proof, parseErr := identity.ParseIdentityProofFromEvent(event)
 			if parseErr == nil && !proof.IsExpired() {
-				if p.opts.ShouldShowSpinners() {
-					ui.PrintSuccess(fmt.Sprintf("APK signing certificate linked to your Nostr identity ✓ (valid until %s)", proof.ExpiryTime().Format("2 Jan 2006")))
+				if p.existingProofVerifies(proof, event, pubkey, certHash) {
+					if p.opts.ShouldShowSpinners() {
+						ui.PrintSuccess(fmt.Sprintf("APK signing certificate linked to your Nostr identity ✓ (valid until %s)", proof.ExpiryTime().Format("2 Jan 2006")))
+					}
+					return nil
 				}
-				return nil
+				// Stale/broken proof (e.g. signed with a mismatched key). Fall through to re-link.
+				if p.opts.ShouldShowSpinners() {
+					ui.PrintWarning("Existing identity proof does not verify against the APK certificate — re-linking is required")
+				}
 			}
 		}
 	}
@@ -828,9 +835,14 @@ func (p *Publisher) checkAndLinkCertificate(ctx context.Context) error {
 		// keytool unavailable — non-fatal, publish continues.
 		return nil
 	}
-	_ = cert
 
-	proof, genErr := identity.GenerateIdentityProof(privateKey, certHash, pubkey, nil)
+	// Keystore cert must be the APK signing cert — otherwise the proof's d-tag
+	// would not match apk_certificate_hash and clients could never use it.
+	if got := identity.ComputeCertHash(cert); got != certHash {
+		return fmt.Errorf("keystore certificate hash %s does not match APK signing certificate %s (wrong keystore or alias?)", got, certHash)
+	}
+
+	proof, genErr := identity.GenerateIdentityProof(privateKey, cert, pubkey, nil)
 	if genErr != nil {
 		return fmt.Errorf("failed to generate identity proof: %w", genErr)
 	}
@@ -871,6 +883,27 @@ func (p *Publisher) checkAndLinkCertificate(ctx context.Context) error {
 		ui.PrintSuccess("Certificate linked to identity")
 	}
 	return nil
+}
+
+// existingProofVerifies checks a relay 30509 proof against the APK signing certificate.
+// When the APK certificate cannot be extracted, returns true so a transient local
+// failure does not force re-linking; only cryptographic failure returns false.
+func (p *Publisher) existingProofVerifies(proof *identity.IdentityProof, event *gonostr.Event, pubkey, certHash string) bool {
+	if p.apkPath == "" {
+		return true
+	}
+	cert, err := apk.ExtractCertificate(p.apkPath)
+	if err != nil {
+		if p.opts.ShouldShowSpinners() {
+			ui.PrintWarning(fmt.Sprintf("Could not verify existing identity proof against APK: %v", err))
+		}
+		return true
+	}
+	if identity.ComputeCertHash(cert) != certHash {
+		return false
+	}
+	result := identity.VerifyIdentityProofWithCert(proof, event, pubkey, cert)
+	return result.Valid && result.CertHashMatch && !result.Revoked
 }
 
 // loadFromJKS handles the Android Keystore (.jks / .keystore) path.
