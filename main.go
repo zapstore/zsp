@@ -125,6 +125,16 @@ func runPublishCommand(ctx context.Context, opts *cli.Options) int {
 		ui.SetNoColor(true)
 	}
 
+	// --indexer-mode only supports a complete online publish.
+	if err := opts.Publish.ValidateIndexerMode(); err != nil {
+		if opts.Global.JSON {
+			ui.PrintJSONError(err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
+		}
+		return 1
+	}
+
 	// Handle --check flag (validates config without publishing)
 	if opts.Publish.Check {
 		if err := checkAPK(ctx, opts); err != nil {

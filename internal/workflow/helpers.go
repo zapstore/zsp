@@ -229,6 +229,16 @@ func OutputEventsToStdout(events *nostr.EventSet) {
 	}
 }
 
+// OutputIndexerAppID writes the --indexer-mode success payload:
+// {"app_id":"<package>"} on stdout.
+func OutputIndexerAppID(appID string) {
+	data, err := json.Marshal(map[string]string{"app_id": appID})
+	if err != nil {
+		return
+	}
+	fmt.Println(string(data))
+}
+
 // outputEventLine outputs a single event as JSON on one line to stdout.
 func outputEventLine(event any) {
 	data, err := json.Marshal(event)
@@ -281,4 +291,3 @@ func printColorizedJSON(v any) {
 	}
 	fmt.Println(ui.ColorizeJSON(string(data)))
 }
-

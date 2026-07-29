@@ -147,6 +147,9 @@ func PublishHelp() string {
 	writeFlag(&b, "--offline", "Sign events without uploading/publishing (outputs JSON)")
 	b.WriteString("                            " + renderGreyDark("Events go to stdout, upload manifest to stderr") + "\n")
 	writeFlag(&b, "-q, --quiet", "No prompts, no spinners, auto-yes to all confirmations")
+	writeFlag(&b, "--indexer-mode", "Indexer mode: quiet, skip cert linking, machine-readable I/O")
+	b.WriteString("                            " + renderGreyDark("Success: {\"app_id\":\"...\"} to stdout; errors: {\"error\":\"...\"} to stderr") + "\n")
+	b.WriteString("                            " + renderGreyDark("Nothing to do: silent exit 0") + "\n")
 	writeFlag(&b, "--wizard", "Run interactive wizard (uses existing config as defaults)")
 	writeFlag(&b, "--skip-preview", "Skip the browser preview prompt")
 	writeFlag(&b, "--port <port>", "Custom port for browser preview/signing")
@@ -208,8 +211,8 @@ func PublishHelp() string {
 	b.WriteString(renderGreyDark("  # Pipe signed events directly to nak for publishing (use -q for clean output)") + "\n")
 	b.WriteString("  " + renderAccent("zsp publish -q zapstore.yaml --offline | nak event wss://relay.zapstore.dev") + "\n\n")
 
-	b.WriteString(renderGreyDark("  # CI/CD mode - no prompts, auto-confirm") + "\n")
-	b.WriteString("  " + renderAccent("zsp publish --quiet zapstore.yaml") + "\n\n")
+	b.WriteString(renderGreyDark("  # Indexer mode - quiet, skip cert linking, {\"app_id\"} on success") + "\n")
+	b.WriteString("  " + renderAccent("zsp publish --indexer-mode zapstore.yaml") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Force re-publish even if unchanged") + "\n")
 	b.WriteString("  " + renderAccent("zsp publish zapstore.yaml --overwrite-release") + "\n\n")
@@ -217,7 +220,7 @@ func PublishHelp() string {
 	b.WriteString(renderGreyDark("  # Validate config fetches correct APK (CI/CD)") + "\n")
 	b.WriteString("  " + renderAccent("zsp publish --check zapstore.yaml") + "\n\n")
 
-	b.WriteString(renderGreyDark("  # Machine-readable mode (for agents / CI pipelines)") + "\n")
+	b.WriteString(renderGreyDark("  # Full event JSONL (for agents / piping to nak)") + "\n")
 	b.WriteString("  " + renderAccent("zsp --json publish --quiet zapstore.yaml") + "\n\n")
 
 	// Config section

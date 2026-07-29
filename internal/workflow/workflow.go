@@ -207,7 +207,12 @@ func (p *Publisher) Execute(ctx context.Context) error {
 	if steps != nil {
 		steps.StartStep("Upload")
 	}
-	return p.uploadBlobs(ctx)
+	if err := p.uploadBlobs(ctx); err != nil {
+		return err
+	}
+
+	p.outputPublishResult()
+	return nil
 }
 
 // fetchAssets fetches and selects the APK to publish.
@@ -712,6 +717,9 @@ func (p *Publisher) signAndUpload(ctx context.Context) error {
 	if err := p.createSigner(ctx); err != nil {
 		return err
 	}
+	if err := p.validateIndexerModeSigner(); err != nil {
+		return err
+	}
 
 	// Check if this publisher's asset already exists on relays (scoped to their pubkey)
 	if err := p.checkExistingAsset(ctx, p.signer.PublicKey()); err != nil {
@@ -742,6 +750,13 @@ func (p *Publisher) signAndUpload(ctx context.Context) error {
 	}
 
 	return p.uploadAndBuildEvents(ctx)
+}
+
+func (p *Publisher) validateIndexerModeSigner() error {
+	if p.opts.Publish.IndexerMode && p.signer.Type() == nostr.SignerNpub {
+		return fmt.Errorf("--indexer-mode cannot be used with an npub signer")
+	}
+	return nil
 }
 
 // createSigner creates the appropriate signer based on configuration.
@@ -1328,8 +1343,10 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 		}
 	}
 
-	for _, msg := range messages {
-		fmt.Println(msg)
+	if !p.opts.Global.JSON {
+		for _, msg := range messages {
+			fmt.Println(msg)
+		}
 	}
 
 	// Commit or clear cache
@@ -1357,11 +1374,6 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 		p.showZapstoreURL(results)
 	}
 
-	// In JSON mode, emit the signed events as JSONL (same format as --offline)
-	if p.opts.Global.JSON {
-		OutputEventsToStdout(p.events)
-	}
-
 	// If any event was rejected by every relay, publishing did not succeed.
 	// Returning an error ensures zsp exits non-zero so CI pipelines (GitHub
 	// Actions, etc.) surface the failure instead of silently passing.
@@ -1371,6 +1383,18 @@ func (p *Publisher) publishToRelays(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// outputPublishResult writes machine-readable success output after the complete
+// online publish, including deferred Blossom uploads, has succeeded.
+func (p *Publisher) outputPublishResult() {
+	if p.opts.Publish.IndexerMode {
+		OutputIndexerAppID(p.apkInfo.PackageID)
+		return
+	}
+	if p.opts.Global.JSON {
+		OutputEventsToStdout(p.events)
+	}
 }
 
 // uploadBlobs executes pending Blossom uploads after events have been published to relays.

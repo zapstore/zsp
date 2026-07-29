@@ -46,3 +46,63 @@ func TestParseCommand_IdentityKeyAlias(t *testing.T) {
 		t.Fatalf("KeyAlias = %q, want release", opts.Identity.KeyAlias)
 	}
 }
+
+func TestParseCommand_IndexerModeImpliesQuietJSONSkipCert(t *testing.T) {
+	oldArgs := os.Args
+	t.Cleanup(func() { os.Args = oldArgs })
+	os.Args = []string{"zsp", "publish", "--indexer-mode", "--verbose", "app.yaml"}
+
+	opts := ParseCommand()
+	if opts.FlagParseError != nil {
+		t.Fatalf("ParseCommand() error: %v", opts.FlagParseError)
+	}
+	if !opts.Publish.IndexerMode {
+		t.Fatal("expected Publish.IndexerMode")
+	}
+	if !opts.Publish.Quiet {
+		t.Error("--indexer-mode should imply --quiet")
+	}
+	if !opts.Publish.SkipCertificateLinking {
+		t.Error("--indexer-mode should imply --skip-certificate-linking")
+	}
+	if !opts.Global.JSON {
+		t.Error("--indexer-mode should enable JSON error reporting")
+	}
+	if !opts.Global.NoColor {
+		t.Error("--indexer-mode should imply --no-color")
+	}
+	if opts.IsInteractive() {
+		t.Error("--indexer-mode should not be interactive")
+	}
+	if opts.ShouldShowSpinners() {
+		t.Error("--indexer-mode should not show spinners")
+	}
+	if opts.Global.Verbose {
+		t.Error("--indexer-mode should suppress verbose diagnostics")
+	}
+	if len(opts.Args) != 1 || opts.Args[0] != "app.yaml" {
+		t.Fatalf("Args = %v, want [app.yaml]", opts.Args)
+	}
+}
+
+func TestPublishOptionsValidateIndexerMode(t *testing.T) {
+	tests := []struct {
+		name    string
+		options PublishOptions
+		wantErr bool
+	}{
+		{name: "not CI"},
+		{name: "online publish", options: PublishOptions{IndexerMode: true}},
+		{name: "check", options: PublishOptions{IndexerMode: true, Check: true}, wantErr: true},
+		{name: "offline", options: PublishOptions{IndexerMode: true, Offline: true}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.options.ValidateIndexerMode()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ValidateIndexerMode() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}

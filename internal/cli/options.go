@@ -44,6 +44,7 @@ type PublishOptions struct {
 	// Behavior flags
 	Offline                bool // Sign events without uploading/publishing (outputs to stdout)
 	Quiet                  bool // No prompts, no spinners, auto-yes to all confirmations
+	IndexerMode            bool // Indexer mode: quiet + skip cert linking + JSON errors + {"app_id"} on success
 	SkipPreview            bool
 	OverwriteRelease       bool
 	IncludePreReleases     bool
@@ -203,6 +204,7 @@ func parsePublishFlags(opts *Options, args []string) {
 	fs.BoolVar(&opts.Publish.Offline, "offline", false, "Sign events without uploading/publishing (outputs JSON to stdout)")
 	fs.BoolVar(&opts.Publish.Quiet, "quiet", false, "No prompts, no spinners, auto-yes to all confirmations")
 	fs.BoolVar(&opts.Publish.Quiet, "q", false, "Alias for --quiet")
+	fs.BoolVar(&opts.Publish.IndexerMode, "indexer-mode", false, "Indexer mode: quiet, skip cert linking, JSON errors, stdout {\"app_id\":\"...\"}")
 	fs.BoolVar(&opts.Global.Verbose, "verbose", false, "Debug output")
 	fs.BoolVar(&opts.Global.NoColor, "no-color", false, "Disable colored output")
 	fs.BoolVar(&opts.Publish.SkipPreview, "skip-preview", false, "Skip the browser preview prompt")
@@ -240,6 +242,22 @@ func parsePublishFlags(opts *Options, args []string) {
 
 	opts.Publish.Metadata = metadataFlags
 	opts.Args = fs.Args()
+	applyIndexerMode(opts)
+}
+
+// applyIndexerMode sets the implications of --indexer-mode: quiet, no verbose
+// diagnostics, skip certificate linking, no color, and JSON error reporting.
+// Success stdout is handled separately in the publish workflow
+// ({"app_id":"..."}, not full event JSONL).
+func applyIndexerMode(opts *Options) {
+	if !opts.Publish.IndexerMode {
+		return
+	}
+	opts.Publish.Quiet = true
+	opts.Publish.SkipCertificateLinking = true
+	opts.Global.Verbose = false
+	opts.Global.NoColor = true
+	opts.Global.JSON = true
 }
 
 // parseIdentityFlags parses flags for the identity subcommand.
@@ -364,6 +382,20 @@ func (o *PublishOptions) ValidateChannel() error {
 	validChannels := map[string]bool{"main": true, "beta": true, "nightly": true, "dev": true}
 	if !validChannels[o.Channel] {
 		return fmt.Errorf("invalid --channel %q: must be one of main, beta, nightly, dev", o.Channel)
+	}
+	return nil
+}
+
+// ValidateIndexerMode rejects modes that do not perform a complete online publish.
+func (o *PublishOptions) ValidateIndexerMode() error {
+	if !o.IndexerMode {
+		return nil
+	}
+	if o.Check {
+		return fmt.Errorf("--indexer-mode cannot be used with --check")
+	}
+	if o.Offline {
+		return fmt.Errorf("--indexer-mode cannot be used with --offline")
 	}
 	return nil
 }
