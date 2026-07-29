@@ -410,6 +410,28 @@ type PublishedVersionReader interface {
 	GetPublishedVersion() string
 }
 
+// IsAlreadyPublished reports whether the local source cache indicates this
+// release was already published successfully. Used by `zsp utils has-new-release`
+// and as an early gate in `zsp publish` (skipped with --overwrite-release).
+//
+// Returns true when FetchLatestRelease returned ErrNotModified, or when
+// release.Version matches GetPublishedVersion(). Real fetch errors are not
+// treated as already-published — the caller should handle those separately.
+func IsAlreadyPublished(src Source, release *Release, fetchErr error) bool {
+	if fetchErr == ErrNotModified {
+		return true
+	}
+	if fetchErr != nil || release == nil {
+		return false
+	}
+	reader, ok := src.(PublishedVersionReader)
+	if !ok {
+		return false
+	}
+	cached := reader.GetPublishedVersion()
+	return cached != "" && cached == release.Version
+}
+
 // Downloader wraps an io.Reader to track download progress.
 type ProgressReader struct {
 	Reader     io.Reader

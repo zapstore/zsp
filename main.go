@@ -298,8 +298,9 @@ func runUtilsCommand(ctx context.Context, opts *cli.Options) int {
 }
 
 // hasNewRelease checks whether there is a new release since the last successful publish.
-// It is a read-only, local-cache-based check: it uses ETag and the stored
-// latest_published_release_version. It does NOT download the APK or query the relay.
+// It is a read-only, local-cache-based check (source.IsAlreadyPublished): ETag 304 and
+// the stored latest_published_release_version. It does NOT download the APK or query
+// the relay. The same gate runs at the start of `zsp publish` unless --overwrite-release.
 func hasNewRelease(ctx context.Context, arg string, opts *cli.Options) error {
 	var cfg *config.Config
 
@@ -338,33 +339,17 @@ func hasNewRelease(ctx context.Context, arg string, opts *cli.Options) error {
 	}
 
 	release, err := src.FetchLatestRelease(ctx)
-	if err == source.ErrNotModified {
-		result := map[string]any{"has_new_release": false}
-		if reader, ok := src.(source.PublishedVersionReader); ok {
-			if v := reader.GetPublishedVersion(); v != "" {
-				result["release_version"] = v
-			}
-		}
-		data, _ := json.Marshal(result)
-		fmt.Println(string(data))
-		return nil
-	}
-	if err != nil {
+	if err != nil && err != source.ErrNotModified {
 		return fmt.Errorf("failed to fetch release: %w", err)
 	}
 
-	// Compare with last published version
-	if reader, ok := src.(source.PublishedVersionReader); ok {
-		if cached := reader.GetPublishedVersion(); cached != "" && cached == release.Version {
-			data, _ := json.Marshal(map[string]any{"has_new_release": false, "release_version": release.Version})
-			fmt.Println(string(data))
-			return nil
-		}
-	}
-
-	result := map[string]any{"has_new_release": true}
-	if release.Version != "" {
+	result := map[string]any{"has_new_release": !source.IsAlreadyPublished(src, release, err)}
+	if release != nil && release.Version != "" {
 		result["release_version"] = release.Version
+	} else if reader, ok := src.(source.PublishedVersionReader); ok {
+		if v := reader.GetPublishedVersion(); v != "" {
+			result["release_version"] = v
+		}
 	}
 	data, _ := json.Marshal(result)
 	fmt.Println(string(data))

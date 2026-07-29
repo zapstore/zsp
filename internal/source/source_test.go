@@ -568,3 +568,90 @@ func TestDownloadHTTPRetriesTransientEOF(t *testing.T) {
 		t.Fatalf("downloaded %q, want %q", got, payload)
 	}
 }
+
+type stubPublishedSource struct {
+	version string
+}
+
+func (s stubPublishedSource) Type() config.SourceType { return config.SourceGitHub }
+func (s stubPublishedSource) FetchLatestRelease(context.Context) (*Release, error) {
+	return nil, nil
+}
+func (s stubPublishedSource) Download(context.Context, *Asset, string, DownloadProgress) (string, error) {
+	return "", nil
+}
+func (s stubPublishedSource) GetPublishedVersion() string { return s.version }
+
+type stubPlainSource struct{}
+
+func (stubPlainSource) Type() config.SourceType { return config.SourceLocal }
+func (stubPlainSource) FetchLatestRelease(context.Context) (*Release, error) {
+	return nil, nil
+}
+func (stubPlainSource) Download(context.Context, *Asset, string, DownloadProgress) (string, error) {
+	return "", nil
+}
+
+func TestIsAlreadyPublished(t *testing.T) {
+	src := stubPublishedSource{version: "1.2.3"}
+
+	tests := []struct {
+		name     string
+		src      Source
+		release  *Release
+		fetchErr error
+		want     bool
+	}{
+		{
+			name:     "ErrNotModified means already published",
+			src:      src,
+			fetchErr: ErrNotModified,
+			want:     true,
+		},
+		{
+			name:    "matching published version",
+			src:     src,
+			release: &Release{Version: "1.2.3"},
+			want:    true,
+		},
+		{
+			name:    "different published version",
+			src:     src,
+			release: &Release{Version: "1.2.4"},
+			want:    false,
+		},
+		{
+			name:    "empty published version cache",
+			src:     stubPublishedSource{version: ""},
+			release: &Release{Version: "1.2.3"},
+			want:    false,
+		},
+		{
+			name:    "source without PublishedVersionReader",
+			src:     stubPlainSource{},
+			release: &Release{Version: "1.2.3"},
+			want:    false,
+		},
+		{
+			name:     "real fetch error is not already published",
+			src:      src,
+			fetchErr: errors.New("network down"),
+			want:     false,
+		},
+		{
+			name:    "nil release without ErrNotModified",
+			src:     src,
+			release: nil,
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsAlreadyPublished(tt.src, tt.release, tt.fetchErr)
+			if got != tt.want {
+				t.Fatalf("IsAlreadyPublished() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

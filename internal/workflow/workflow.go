@@ -244,6 +244,26 @@ func (p *Publisher) fetchRelease(ctx context.Context) (*source.Release, error) {
 		return p.src.FetchLatestRelease(ctx)
 	})
 
+	// Same criteria as `zsp utils has-new-release`: skip the APK download when
+	// the local cache says this release was already published. --overwrite-release
+	// bypasses the gate (and sets SkipCache so ETag 304 is unlikely).
+	if !p.opts.Publish.OverwriteRelease && source.IsAlreadyPublished(p.src, release, err) {
+		if p.opts.ShouldShowSpinners() {
+			version := ""
+			if release != nil {
+				version = release.Version
+			} else if reader, ok := p.src.(source.PublishedVersionReader); ok {
+				version = reader.GetPublishedVersion()
+			}
+			if version != "" {
+				ui.PrintWarning(fmt.Sprintf("Release %s already published (local cache). Use --overwrite-release to publish anyway.", version))
+			} else {
+				ui.PrintWarning("Release already published (local cache). Use --overwrite-release to publish anyway.")
+			}
+		}
+		return nil, ErrNothingToDo
+	}
+
 	if err == source.ErrNotModified {
 		if provider, ok := p.src.(source.CachedReleaseProvider); ok {
 			if cached := provider.GetCachedRelease(); cached != nil {
