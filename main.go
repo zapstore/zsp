@@ -167,6 +167,23 @@ func runPublishCommand(ctx context.Context, opts *cli.Options) int {
 		return 1
 	}
 
+	// Indexer mode: prefer zapstore.yaml from the repository root when present
+	// on a supported forge. Full replace — no field merge.
+	if opts.Publish.IndexerMode {
+		cfg, err = source.ResolveIndexerConfig(ctx, cfg)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return 130
+			}
+			if opts.Global.JSON {
+				ui.PrintJSONError(err)
+			} else {
+				fmt.Fprintf(os.Stderr, "Error: %s\n", ui.SanitizeErrorMessage(err))
+			}
+			return 1
+		}
+	}
+
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
 		if opts.Global.JSON {

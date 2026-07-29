@@ -148,6 +148,7 @@ func PublishHelp() string {
 	b.WriteString("                            " + renderGreyDark("Events go to stdout, upload manifest to stderr") + "\n")
 	writeFlag(&b, "-q, --quiet", "No prompts, no spinners, auto-yes to all confirmations")
 	writeFlag(&b, "--indexer-mode", "Indexer mode: quiet, skip cert linking, machine-readable I/O")
+	b.WriteString("                            " + renderGreyDark("Uses repo-root zapstore.yaml when present (full replace over passed YAML)") + "\n")
 	b.WriteString("                            " + renderGreyDark("Success: {\"app_id\":\"...\"} to stdout; errors: {\"error\":\"...\"} to stderr") + "\n")
 	b.WriteString("                            " + renderGreyDark("Nothing to do: silent exit 0") + "\n")
 	writeFlag(&b, "--wizard", "Run interactive wizard (uses existing config as defaults)")
