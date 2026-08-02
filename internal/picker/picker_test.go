@@ -76,7 +76,6 @@ func TestModelScore(t *testing.T) {
 		"app-x86.apk",
 		"app-google.apk",
 		"app-universal-google.apk",
-		"app-release-unsigned.apk",
 	}
 
 	for _, good := range goodAPKs {
@@ -102,7 +101,6 @@ func TestScoreWithWeights(t *testing.T) {
 		{"app-x86.apk", false},
 		{"app-google.apk", false},
 		{"app-alpha.apk", false},
-		{"app-release-unsigned.apk", false},
 	}
 
 	for _, tt := range tests {
@@ -535,6 +533,21 @@ func TestFilterAPKsEdgeCases(t *testing.T) {
 			},
 			want: 1,
 		},
+		{
+			name: "excludes unsigned by feature weight",
+			assets: []*source.Asset{
+				{Name: "app-release-unsigned.apk"},
+				{Name: "app-release.apk"},
+			},
+			want: 1,
+		},
+		{
+			name: "only unsigned APKs",
+			assets: []*source.Asset{
+				{Name: "app-release-unsigned.apk"},
+			},
+			want: 0,
+		},
 	}
 
 	for _, tt := range tests {
@@ -547,29 +560,39 @@ func TestFilterAPKsEdgeCases(t *testing.T) {
 	}
 }
 
-func TestUnsignedRanksBelowSigned(t *testing.T) {
-	cases := []struct {
-		better, worse string
-	}{
-		{"app-release.apk", "app-release-unsigned.apk"},
-		{"app-arm64-v8a.apk", "app-arm64-v8a-unsigned.apk"},
-		{"app.apk", "app-unsigned.apk"},
-		{"app-arm64-v8a-release.apk", "app-release-unsigned.apk"},
+func TestFilterAPKsExcludesUnsigned(t *testing.T) {
+	assets := []*source.Asset{
+		{Name: "app-release-unsigned.apk"},
+		{Name: "Calyx-v1.3.0-signed.apk"},
+		{Name: "app-UNSIGNED.apk"},
+		{Name: "app-release.apk"},
 	}
-	for _, tt := range cases {
-		better := DefaultModel.Score(tt.better)
-		worse := DefaultModel.Score(tt.worse)
-		if better <= worse {
-			t.Errorf("expected %q (%.3f) > %q (%.3f)", tt.better, better, tt.worse, worse)
-		}
-		t.Logf("%q=%.3f > %q=%.3f", tt.better, better, tt.worse, worse)
+	filtered := FilterAPKs(assets)
+	if len(filtered) != 2 {
+		t.Fatalf("FilterAPKs returned %d assets, want 2", len(filtered))
+	}
+	if filtered[0].Name != "Calyx-v1.3.0-signed.apk" || filtered[1].Name != "app-release.apk" {
+		t.Errorf("FilterAPKs kept %q, %q", filtered[0].Name, filtered[1].Name)
 	}
 
-	best := DefaultModel.PickBest([]*source.Asset{
+	// Calyx-style release: only the signed APK remains for ranking.
+	best := DefaultModel.PickBest(FilterAPKs([]*source.Asset{
 		{Name: "app-release-unsigned.apk"},
-		{Name: "app-release.apk"},
-	})
-	if best.Name != "app-release.apk" {
-		t.Errorf("PickBest = %q, want app-release.apk", best.Name)
+		{Name: "Calyx-v1.3.0-signed.apk"},
+	}))
+	if best == nil || best.Name != "Calyx-v1.3.0-signed.apk" {
+		t.Errorf("PickBest after FilterAPKs = %v, want Calyx-v1.3.0-signed.apk", best)
+	}
+}
+
+func TestHasExcludedFeature(t *testing.T) {
+	if !hasExcludedFeature("app-release-unsigned.apk") {
+		t.Error("expected unsigned filename to be excluded")
+	}
+	if hasExcludedFeature("Calyx-v1.3.0-signed.apk") {
+		t.Error("expected signed filename not to be excluded")
+	}
+	if hasExcludedFeature("app-debug.apk") {
+		t.Error("debug is ranked low, not hard-excluded")
 	}
 }

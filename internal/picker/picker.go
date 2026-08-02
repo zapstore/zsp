@@ -65,28 +65,33 @@ var featurePatterns = map[Feature]*regexp.Regexp{
 	FeatureUnsigned:   regexp.MustCompile(`(?i)unsigned`),
 }
 
+// excludeWeight marks a feature as a hard exclude. APKs matching any such
+// feature are dropped by FilterAPKs instead of merely ranked lower.
+var excludeWeight = math.Inf(-1)
+
 // featureWeights assigns weights to features based on their importance.
 // Positive weights favor selection, negative weights disfavor.
+// excludeWeight means the feature disqualifies the APK entirely.
 var featureWeights = map[Feature]float64{
-	FeatureArm64:      2.0,  // Strong positive: we want arm64
-	FeatureFDroid:     1.5,  // Positive: F-Droid builds are preferred
-	FeatureFoss:       1.5,  // Positive: FOSS builds are preferred
-	FeatureLibre:      1.5,  // Positive: Libre builds are preferred
-	FeatureOss:        1.5,  // Positive: OSS builds are preferred
-	FeatureRelease:    1.0,  // Positive: release builds are good
-	FeatureUniversal:  -0.5, // Slight negative: prefer split APKs
-	FeatureGoogle:     -2.0, // Strong negative: avoid Google builds
-	FeaturePlaystore:  -2.0, // Strong negative: avoid Play Store builds
-	FeatureGms:        -2.0, // Strong negative: avoid GMS builds
-	FeatureDebug:      -3.0, // Very negative: never want debug
-	FeatureBeta:       -1.5, // Negative: avoid pre-release
-	FeatureAlpha:      -2.0, // Strong negative: avoid alpha
-	FeatureRC:         -1.0, // Negative: avoid release candidates
-	FeatureX86:        -2.0, // Strong negative: wrong architecture
-	FeatureX86_64:     -2.0, // Strong negative: wrong architecture
-	FeatureArmeabi:    -1.5, // Negative: old architecture
-	FeatureArmeabiV7a: -1.0, // Slight negative: prefer 64-bit
-	FeatureUnsigned:   -4.0, // Lowest: unsigned APKs are not installable
+	FeatureArm64:      2.0,           // Strong positive: we want arm64
+	FeatureFDroid:     1.5,           // Positive: F-Droid builds are preferred
+	FeatureFoss:       1.5,           // Positive: FOSS builds are preferred
+	FeatureLibre:      1.5,           // Positive: Libre builds are preferred
+	FeatureOss:        1.5,           // Positive: OSS builds are preferred
+	FeatureRelease:    1.0,           // Positive: release builds are good
+	FeatureUniversal:  -0.5,          // Slight negative: prefer split APKs
+	FeatureGoogle:     -2.0,          // Strong negative: avoid Google builds
+	FeaturePlaystore:  -2.0,          // Strong negative: avoid Play Store builds
+	FeatureGms:        -2.0,          // Strong negative: avoid GMS builds
+	FeatureDebug:      -3.0,          // Very negative: never want debug
+	FeatureBeta:       -1.5,          // Negative: avoid pre-release
+	FeatureAlpha:      -2.0,          // Strong negative: avoid alpha
+	FeatureRC:         -1.0,          // Negative: avoid release candidates
+	FeatureX86:        -2.0,          // Strong negative: wrong architecture
+	FeatureX86_64:     -2.0,          // Strong negative: wrong architecture
+	FeatureArmeabi:    -1.5,          // Negative: old architecture
+	FeatureArmeabiV7a: -1.0,          // Slight negative: prefer 64-bit
+	FeatureUnsigned:   excludeWeight, // Not installable — remove from candidates
 }
 
 // Sample represents a training sample with features and label.
@@ -268,11 +273,27 @@ func (m *Model) PickBest(assets []*source.Asset) *source.Asset {
 	return ranked[0].Asset
 }
 
-// FilterAPKs filters assets to only include .apk files.
-// Checks both the asset name and URL for .apk extension.
+// hasExcludedFeature reports whether filename matches a feature whose weight
+// is excludeWeight (a hard disqualification, not just a ranking penalty).
+func hasExcludedFeature(filename string) bool {
+	features := ExtractFeatures(filename)
+	for f := Feature(0); f < NumFeatures; f++ {
+		if features[f] == 1 && math.IsInf(featureWeights[f], -1) {
+			return true
+		}
+	}
+	return false
+}
+
+// FilterAPKs filters assets to only include selectable .apk files.
+// Checks both the asset name and URL for .apk extension, and drops APKs that
+// match any feature weighted with excludeWeight (currently: unsigned).
 func FilterAPKs(assets []*source.Asset) []*source.Asset {
 	var apks []*source.Asset
 	for _, asset := range assets {
+		if hasExcludedFeature(asset.Name) || hasExcludedFeature(asset.URL) {
+			continue
+		}
 		name := strings.ToLower(asset.Name)
 		url := strings.ToLower(asset.URL)
 		if strings.HasSuffix(name, ".apk") || strings.HasSuffix(url, ".apk") {
