@@ -33,6 +33,13 @@ func TestExtractFeatures(t *testing.T) {
 			},
 		},
 		{
+			filename: "app-release-unsigned.apk",
+			expected: map[Feature]bool{
+				FeatureRelease:  true,
+				FeatureUnsigned: true,
+			},
+		},
+		{
 			filename: "app-release-arm64-v8a-foss.apk",
 			expected: map[Feature]bool{
 				FeatureArm64:   true,
@@ -69,6 +76,7 @@ func TestModelScore(t *testing.T) {
 		"app-x86.apk",
 		"app-google.apk",
 		"app-universal-google.apk",
+		"app-release-unsigned.apk",
 	}
 
 	for _, good := range goodAPKs {
@@ -94,6 +102,7 @@ func TestScoreWithWeights(t *testing.T) {
 		{"app-x86.apk", false},
 		{"app-google.apk", false},
 		{"app-alpha.apk", false},
+		{"app-release-unsigned.apk", false},
 	}
 
 	for _, tt := range tests {
@@ -538,3 +547,29 @@ func TestFilterAPKsEdgeCases(t *testing.T) {
 	}
 }
 
+func TestUnsignedRanksBelowSigned(t *testing.T) {
+	cases := []struct {
+		better, worse string
+	}{
+		{"app-release.apk", "app-release-unsigned.apk"},
+		{"app-arm64-v8a.apk", "app-arm64-v8a-unsigned.apk"},
+		{"app.apk", "app-unsigned.apk"},
+		{"app-arm64-v8a-release.apk", "app-release-unsigned.apk"},
+	}
+	for _, tt := range cases {
+		better := DefaultModel.Score(tt.better)
+		worse := DefaultModel.Score(tt.worse)
+		if better <= worse {
+			t.Errorf("expected %q (%.3f) > %q (%.3f)", tt.better, better, tt.worse, worse)
+		}
+		t.Logf("%q=%.3f > %q=%.3f", tt.better, better, tt.worse, worse)
+	}
+
+	best := DefaultModel.PickBest([]*source.Asset{
+		{Name: "app-release-unsigned.apk"},
+		{Name: "app-release.apk"},
+	})
+	if best.Name != "app-release.apk" {
+		t.Errorf("PickBest = %q, want app-release.apk", best.Name)
+	}
+}

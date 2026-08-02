@@ -29,4 +29,7 @@ app-alpha.apk,-1
 app-rc.apk,-1
 app-debug-arm64-v8a.apk,-1
 app-x86-release.apk,-1
+app-unsigned.apk,-1
+app-release-unsigned.apk,-1
+app-arm64-v8a-unsigned.apk,-1
 

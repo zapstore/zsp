@@ -38,6 +38,7 @@ const (
 	FeatureX86_64
 	FeatureArmeabi
 	FeatureArmeabiV7a
+	FeatureUnsigned
 	NumFeatures
 )
 
@@ -61,6 +62,7 @@ var featurePatterns = map[Feature]*regexp.Regexp{
 	FeatureX86_64:     regexp.MustCompile(`(?i)x86_64`),
 	FeatureArmeabi:    regexp.MustCompile(`(?i)\barmeabi\b`),
 	FeatureArmeabiV7a: regexp.MustCompile(`(?i)armeabi-v7a`),
+	FeatureUnsigned:   regexp.MustCompile(`(?i)unsigned`),
 }
 
 // featureWeights assigns weights to features based on their importance.
@@ -84,6 +86,7 @@ var featureWeights = map[Feature]float64{
 	FeatureX86_64:     -2.0, // Strong negative: wrong architecture
 	FeatureArmeabi:    -1.5, // Negative: old architecture
 	FeatureArmeabiV7a: -1.0, // Slight negative: prefer 64-bit
+	FeatureUnsigned:   -4.0, // Lowest: unsigned APKs are not installable
 }
 
 // Sample represents a training sample with features and label.
@@ -294,4 +297,3 @@ func FilterByMatch(assets []*source.Asset, pattern string) ([]*source.Asset, err
 	}
 	return matched, nil
 }
-
