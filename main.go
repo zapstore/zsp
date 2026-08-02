@@ -742,6 +742,24 @@ func checkAPK(ctx context.Context, opts *cli.Options) error {
 		return err
 	}
 
+	err = checkAPKFromRelease(ctx, opts, cfg, src, release)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+
+	// Forge release failed selection/download/parse — try F-Droid/Izzy/web fallback.
+	fallback, ferr := source.FallbackRelease(ctx, src)
+	if ferr != nil {
+		return err
+	}
+	return checkAPKFromRelease(ctx, opts, cfg, src, fallback)
+}
+
+// checkAPKFromRelease selects, downloads, and parses an APK from a release for --check.
+func checkAPKFromRelease(ctx context.Context, opts *cli.Options, cfg *config.Config, src source.Source, release *source.Release) error {
 	apkAssets := picker.FilterAPKs(release.Assets)
 	if len(apkAssets) == 0 {
 		if opts.Global.Verbose {
@@ -765,6 +783,7 @@ func checkAPK(ctx context.Context, opts *cli.Options) error {
 	}
 
 	if cfg.Match != "" {
+		var err error
 		apkAssets, err = picker.FilterByMatch(apkAssets, cfg.Match)
 		if err != nil {
 			return err
@@ -786,6 +805,7 @@ func checkAPK(ctx context.Context, opts *cli.Options) error {
 	if selectedAsset.LocalPath != "" {
 		apkPath = selectedAsset.LocalPath
 	} else {
+		var err error
 		apkPath, err = src.Download(ctx, selectedAsset, "", nil)
 		if err != nil {
 			return err
@@ -794,7 +814,7 @@ func checkAPK(ctx context.Context, opts *cli.Options) error {
 
 	apkInfo, err := apk.Parse(apkPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to parse APK: %w", err)
 	}
 
 	if apkInfo.IsWatch() {

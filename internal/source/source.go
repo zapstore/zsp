@@ -239,6 +239,9 @@ func (r *StallTimeoutReader) Read(p []byte) (int, error) {
 // We only want arm64-v8a. Filter out x86, x86_64 (Intel/AMD) and armeabi/armeabi-v7a (32-bit ARM).
 var unsupportedArchRegex = regexp.MustCompile(`(?i)[-_\.](x86_64|x86|i686|i386|amd64|armeabi-v7a|armeabi)[-_\.]`)
 
+// unsignedAPKRegex matches APK filenames that are explicitly unsigned (not installable).
+var unsignedAPKRegex = regexp.MustCompile(`(?i)unsigned`)
+
 // MaxRemoteDownloadSize is the maximum size for remote downloads (images, metadata, etc.)
 // This prevents memory exhaustion from malicious or unexpectedly large responses.
 const MaxRemoteDownloadSize = 20 * 1024 * 1024 // 20MB
@@ -316,9 +319,25 @@ func New(cfg *config.Config) (Source, error) {
 }
 
 // NewWithOptions creates a new source with options.
+// When release_source is not itself a forge (F-Droid, Izzy, web, …) but
+// repository is GitHub/GitLab/Gitea, forge releases with APKs are preferred.
 func NewWithOptions(cfg *config.Config, opts Options) (Source, error) {
 	sourceType := cfg.GetSourceType()
 
+	src, err := newConcreteSource(cfg, opts, sourceType)
+	if err != nil {
+		return nil, err
+	}
+
+	// Prefer forge repository releases over non-forge release sources.
+	if sourceType != config.SourceLocal && !config.IsForgeReleaseSource(sourceType) {
+		return newPreferRepoSource(cfg, opts, src)
+	}
+	return src, nil
+}
+
+// newConcreteSource constructs the source for sourceType without prefer-repo wrapping.
+func newConcreteSource(cfg *config.Config, opts Options, sourceType config.SourceType) (Source, error) {
 	switch sourceType {
 	case config.SourceLocal:
 		localPath := ""
@@ -636,6 +655,22 @@ func HasValidAPKs(assets []*Asset) bool {
 		if IsAPKAsset(asset.Name, asset.URL) {
 			return true
 		}
+	}
+	return false
+}
+
+// HasSelectableAPKs reports whether assets contain at least one APK that is not
+// explicitly unsigned. Used when deciding if a forge release is usable before
+// falling back to F-Droid/web (picker also hard-excludes unsigned filenames).
+func HasSelectableAPKs(assets []*Asset) bool {
+	for _, asset := range assets {
+		if !IsAPKAsset(asset.Name, asset.URL) {
+			continue
+		}
+		if unsignedAPKRegex.MatchString(asset.Name) || unsignedAPKRegex.MatchString(asset.URL) {
+			continue
+		}
+		return true
 	}
 	return false
 }

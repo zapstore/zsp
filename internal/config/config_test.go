@@ -578,6 +578,29 @@ func TestParseSourceType(t *testing.T) {
 	}
 }
 
+func TestIsForgeReleaseSource(t *testing.T) {
+	tests := []struct {
+		t    SourceType
+		want bool
+	}{
+		{SourceGitHub, true},
+		{SourceGitLab, true},
+		{SourceGitea, true},
+		{SourceFDroid, false},
+		{SourceWeb, false},
+		{SourceLocal, false},
+		{SourcePlayStore, false},
+		{SourceUnknown, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.t.String(), func(t *testing.T) {
+			if got := IsForgeReleaseSource(tt.t); got != tt.want {
+				t.Errorf("IsForgeReleaseSource(%v) = %v, want %v", tt.t, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGetGiteaRepo(t *testing.T) {
 	tests := []struct {
 		url          string
