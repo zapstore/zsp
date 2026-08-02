@@ -112,12 +112,13 @@ match: ".*-arm64.*\\.apk$"
 			wantMatch: `.*-arm64.*\.apk$`,
 		},
 		{
-			name: "malformed repo YAML is fatal",
+			name: "malformed repo YAML keeps indexer config",
 			cfg:  indexerCfg,
 			transport: func(req *http.Request) (*http.Response, error) {
 				return testResponse(http.StatusOK, "name: [unterminated"), nil
 			},
-			wantErr: true,
+			wantSame: true,
+			wantName: "Indexer Name",
 		},
 		{
 			name: "API error is fatal",

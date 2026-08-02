@@ -23,8 +23,7 @@ var errRepoConfigUnavailable = errors.New("repository zapstore.yaml not found")
 
 // ResolveIndexerConfig returns zapstore.yaml from the repository root when the
 // forge is supported and the file exists on the default branch.
-// On absence or unsupported forge it returns indexerCfg unchanged.
-// A present but invalid YAML is a hard error (no silent fallback).
+// On absence, unsupported forge, or unparseable YAML it returns indexerCfg unchanged.
 func ResolveIndexerConfig(ctx context.Context, indexerCfg *config.Config) (*config.Config, error) {
 	return resolveIndexerConfig(ctx, indexerCfg, newSecureHTTPClient(30*time.Second))
 }
@@ -47,7 +46,8 @@ func resolveIndexerConfig(ctx context.Context, indexerCfg *config.Config, client
 
 	cfg, err := config.Parse(bytes.NewReader(data))
 	if err != nil {
-		return nil, fmt.Errorf("parsing repository zapstore.yaml: %w", err)
+		// Malformed repo config must not block the indexer; keep the provided YAML.
+		return indexerCfg, nil
 	}
 	return cfg, nil
 }
