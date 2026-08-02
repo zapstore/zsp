@@ -164,6 +164,29 @@ func TestBuildReleaseEventDefaultChannel(t *testing.T) {
 	}
 }
 
+func TestBuildReleaseEventEmptyVersionFallsBackToVersionCode(t *testing.T) {
+	meta := &ReleaseMetadata{
+		PackageID:     "com.example.app",
+		Version:       "",
+		VersionCode:   456,
+		AssetEventIDs: []string{},
+		Platforms:     []string{"android-arm64-v8a"},
+	}
+
+	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	event := BuildReleaseEvent(meta, pubkey)
+
+	versionTag := event.Tags.GetFirst([]string{"version"})
+	if versionTag == nil || (*versionTag)[1] != "456" {
+		t.Errorf("expected version tag to fall back to version_code, got %v", versionTag)
+	}
+
+	dTag := event.Tags.GetFirst([]string{"d"})
+	if dTag == nil || (*dTag)[1] != "com.example.app@456" {
+		t.Errorf("expected d tag to use version_code fallback, got %v", dTag)
+	}
+}
+
 func TestBuildSoftwareAssetEvent(t *testing.T) {
 	meta := &AssetMetadata{
 		Identifier:      "com.example.app",
@@ -248,6 +271,24 @@ func TestBuildSoftwareAssetEvent(t *testing.T) {
 	fnTag := event.Tags.GetFirst([]string{"filename"})
 	if fnTag == nil || (*fnTag)[1] != "example-v1.2.3-arm64.apk" {
 		t.Error("missing or incorrect filename tag")
+	}
+}
+
+func TestBuildSoftwareAssetEventEmptyVersionFallsBackToVersionCode(t *testing.T) {
+	meta := &AssetMetadata{
+		Identifier:  "com.example.app",
+		Version:     "",
+		VersionCode: 789,
+		SHA256:      "abc123def456",
+		Platforms:   []string{"android-arm64-v8a"},
+	}
+
+	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	event := BuildSoftwareAssetEvent(meta, pubkey)
+
+	versionTag := event.Tags.GetFirst([]string{"version"})
+	if versionTag == nil || (*versionTag)[1] != "789" {
+		t.Errorf("expected version tag to fall back to version_code, got %v", versionTag)
 	}
 }
 

@@ -80,7 +80,7 @@ type EventSet struct {
 	AppMetadata    *nostr.Event
 	Release        *nostr.Event
 	SoftwareAssets []*nostr.Event // Multiple assets (e.g., different APK variants)
-	IdentityProof  *nostr.Event  // Optional NIP-C1 identity proof (kind 30509)
+	IdentityProof  *nostr.Event   // Optional NIP-C1 identity proof (kind 30509)
 }
 
 // BuildAppMetadataEvent creates a Software Application event (kind 32267).
@@ -142,6 +142,15 @@ func BuildAppMetadataEvent(meta *AppMetadata, pubkey string) *nostr.Event {
 	}
 }
 
+// versionOrCode returns version, or the decimal version_code when version is empty.
+// Kinds 30063 and 3063 must always carry a non-empty version tag.
+func versionOrCode(version string, versionCode int64) string {
+	if version != "" {
+		return version
+	}
+	return strconv.FormatInt(versionCode, 10)
+}
+
 // BuildReleaseEvent creates a Software Release event (kind 30063).
 func BuildReleaseEvent(meta *ReleaseMetadata, pubkey string) *nostr.Event {
 	tags := nostr.Tags{}
@@ -152,10 +161,12 @@ func BuildReleaseEvent(meta *ReleaseMetadata, pubkey string) *nostr.Event {
 		channel = "main"
 	}
 
+	version := versionOrCode(meta.Version, meta.VersionCode)
+
 	tags = append(tags,
 		nostr.Tag{"i", meta.PackageID},
-		nostr.Tag{"version", meta.Version},
-		nostr.Tag{"d", meta.PackageID + "@" + meta.Version},
+		nostr.Tag{"version", version},
+		nostr.Tag{"d", meta.PackageID + "@" + version},
 		nostr.Tag{"c", channel},
 	)
 
@@ -189,7 +200,7 @@ func BuildSoftwareAssetEvent(meta *AssetMetadata, pubkey string) *nostr.Event {
 	tags = append(tags,
 		nostr.Tag{"i", meta.Identifier},
 		nostr.Tag{"x", meta.SHA256},
-		nostr.Tag{"version", meta.Version},
+		nostr.Tag{"version", versionOrCode(meta.Version, meta.VersionCode)},
 	)
 
 	// Download URLs
@@ -368,19 +379,19 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 
 	// Software Application event
 	appMeta := &AppMetadata{
-		PackageID:      apkInfo.PackageID,
-		Name:           name,
-		Description:    cfg.Description,
-		Summary:        cfg.Summary,
-		Website:        cfg.Website,
-		License:        cfg.License,
-		Repository:     cfg.Repository,
-		NIP34Repo:      nip34Repo,
-		NIP34Relay:     nip34Relay,
-		Tags:           cfg.Tags,
-		IconURL:        params.IconURL,
-		ImageURLs:      params.ImageURLs,
-		Platforms:      platforms,
+		PackageID:   apkInfo.PackageID,
+		Name:        name,
+		Description: cfg.Description,
+		Summary:     cfg.Summary,
+		Website:     cfg.Website,
+		License:     cfg.License,
+		Repository:  cfg.Repository,
+		NIP34Repo:   nip34Repo,
+		NIP34Relay:  nip34Relay,
+		Tags:        cfg.Tags,
+		IconURL:     params.IconURL,
+		ImageURLs:   params.ImageURLs,
+		Platforms:   platforms,
 		Communities: cfg.Communities,
 	}
 
