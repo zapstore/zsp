@@ -145,6 +145,10 @@ func splitRelays(env string) []string {
 
 // Execute runs the complete publish workflow.
 func (p *Publisher) Execute(ctx context.Context) error {
+	// Always remove downloaded APKs when the run ends (success, error, abort).
+	// Local APKs (empty URL) are never deleted. Metadata/ETag caches are kept.
+	defer p.deleteDownloadedAPK()
+
 	// Determine total steps based on mode
 	totalSteps := 5
 	if p.opts.Publish.Offline {
@@ -1402,11 +1406,7 @@ func (p *Publisher) uploadBlobs(ctx context.Context) error {
 	if p.pendingUploads == nil {
 		return nil
 	}
-	if err := p.pendingUploads.Execute(ctx); err != nil {
-		return err
-	}
-	p.deleteCachedAPK()
-	return nil
+	return p.pendingUploads.Execute(ctx)
 }
 
 // showZapstoreURL prints the zapstore.dev app URL if the app was published to relay.zapstore.dev.
@@ -1457,12 +1457,37 @@ func (p *Publisher) commitCache() {
 	}
 }
 
-// deleteCachedAPK removes the cached APK file after successful publishing.
-func (p *Publisher) deleteCachedAPK() {
+// deleteDownloadedAPK removes a remotely downloaded APK from the download cache
+// and from the staging path under the system temp directory. Local APKs are never removed.
+func (p *Publisher) deleteDownloadedAPK() {
 	if p.selectedAsset == nil || p.selectedAsset.URL == "" {
 		return // Local file or no URL, nothing to delete
 	}
 	_ = source.DeleteCachedDownload(p.selectedAsset.URL, p.selectedAsset.Name)
+
+	// SkipDownloadCache (e.g. --quiet) and failed cache saves leave the APK in TempDir.
+	if path := p.selectedAsset.LocalPath; path != "" && isManagedDownloadPath(path) {
+		_ = os.Remove(path)
+	}
+	if p.apkPath != "" && p.apkPath != p.selectedAsset.LocalPath && isManagedDownloadPath(p.apkPath) {
+		_ = os.Remove(p.apkPath)
+	}
+}
+
+// isManagedDownloadPath reports whether path is under the APK download cache or system temp dir.
+func isManagedDownloadPath(path string) bool {
+	clean := filepath.Clean(path)
+	cacheDir := filepath.Clean(source.DownloadCacheDir())
+	tempDir := filepath.Clean(os.TempDir())
+	return isUnderDir(clean, cacheDir) || isUnderDir(clean, tempDir)
+}
+
+func isUnderDir(path, dir string) bool {
+	if path == dir {
+		return true
+	}
+	prefix := dir + string(filepath.Separator)
+	return strings.HasPrefix(path, prefix)
 }
 
 // Close releases resources.
