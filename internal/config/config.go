@@ -248,17 +248,6 @@ func ParseSourceType(s string) SourceType {
 	}
 }
 
-// IsForgeReleaseSource reports whether t is a forge that can publish release
-// assets via its native API (GitHub, GitLab, Gitea/Forgejo/Codeberg).
-func IsForgeReleaseSource(t SourceType) bool {
-	switch t {
-	case SourceGitHub, SourceGitLab, SourceGitea:
-		return true
-	default:
-		return false
-	}
-}
-
 // Load reads and parses a config file.
 // If the config contains a pubkey field, it is checked against the current SIGN_WITH signer.
 // A mismatch is a hard error to prevent accidental publishing under the wrong identity.

@@ -471,45 +471,6 @@ func TestHasUnsupportedArchitecture(t *testing.T) {
 	}
 }
 
-func TestHasSelectableAPKs(t *testing.T) {
-	tests := []struct {
-		name   string
-		assets []*Asset
-		want   bool
-	}{
-		{
-			name:   "signed apk",
-			assets: []*Asset{{Name: "app-release.apk"}},
-			want:   true,
-		},
-		{
-			name:   "only unsigned",
-			assets: []*Asset{{Name: "app-release-unsigned.apk"}},
-			want:   false,
-		},
-		{
-			name: "unsigned and signed",
-			assets: []*Asset{
-				{Name: "app-release-unsigned.apk"},
-				{Name: "app-arm64-v8a.apk"},
-			},
-			want: true,
-		},
-		{
-			name:   "no apks",
-			assets: []*Asset{{Name: "app.dmg"}},
-			want:   false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := HasSelectableAPKs(tt.assets); got != tt.want {
-				t.Errorf("HasSelectableAPKs() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestFilterUnsupportedArchitectures(t *testing.T) {
 	assets := []*Asset{
 		{Name: "app-arm64-v8a.apk"},
