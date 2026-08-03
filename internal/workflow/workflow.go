@@ -232,38 +232,14 @@ func (p *Publisher) fetchAssets(ctx context.Context) error {
 	}
 	p.release = release
 
-	err = p.selectDownloadAndParse(ctx)
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
-	}
-
-	// Forge release looked usable at fetch time but failed selection/download/parse
-	// (e.g. only unsigned APKs after filtering, corrupt APK, wrong arch). Fall back
-	// to the configured release_source (F-Droid/Izzy/web) when available.
-	fallback, ferr := source.FallbackRelease(ctx, p.src)
-	if ferr != nil {
-		return err
-	}
-	if p.opts.ShouldShowSpinners() {
-		ui.PrintWarning(fmt.Sprintf("Forge release unusable (%v); falling back to %s", err, p.src.Type()))
-	}
-	p.release = fallback
-	p.selectedAsset = nil
-	p.apkPath = ""
-	p.apkInfo = nil
-	return p.selectDownloadAndParse(ctx)
-}
-
-// selectDownloadAndParse selects an APK from the current release, downloads it, and parses it.
-func (p *Publisher) selectDownloadAndParse(ctx context.Context) error {
+	// Select APK
 	asset, err := p.selectAPK(ctx)
 	if err != nil {
 		return err
 	}
 	p.selectedAsset = asset
+
+	// Download and parse APK
 	return p.downloadAndParseAPK(ctx)
 }
 
