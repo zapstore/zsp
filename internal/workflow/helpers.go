@@ -229,7 +229,7 @@ func OutputEventsToStdout(events *nostr.EventSet) {
 	}
 }
 
-// OutputIndexerAppID writes the --indexer-mode success payload:
+// OutputIndexerAppID writes the success payload used by --check and --indexer-mode:
 // {"app_id":"<package>"} on stdout.
 func OutputIndexerAppID(appID string) {
 	data, err := json.Marshal(map[string]string{"app_id": appID})

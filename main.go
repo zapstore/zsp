@@ -805,8 +805,7 @@ func checkAPK(ctx context.Context, opts *cli.Options) error {
 		return fmt.Errorf("APK does not support arm64-v8a architecture (found: %v)", apkInfo.Architectures)
 	}
 
-	data, _ := json.Marshal(map[string]string{"package_id": apkInfo.PackageID})
-	fmt.Println(string(data))
+	workflow.OutputIndexerAppID(apkInfo.PackageID)
 	return nil
 }
 

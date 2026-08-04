@@ -176,7 +176,7 @@ func PublishHelp() string {
 	// Other flags
 	b.WriteString(renderBold("OTHER FLAGS") + "\n")
 	writeFlag(&b, "--check", "Verify config fetches arm64-v8a APK (exit 0=success)")
-	b.WriteString("                            " + renderGreyDark("Outputs {\"package_id\":\"...\"} on success") + "\n")
+	b.WriteString("                            " + renderGreyDark("Outputs {\"app_id\":\"...\"} on success") + "\n")
 	writeFlag(&b, "--json", "Machine-readable output (implies --no-color, no prompts, no spinners)")
 	b.WriteString("                            " + renderGreyDark("Errors: {\"error\":\"...\"} to stderr; events: JSONL to stdout") + "\n")
 	b.WriteString("                            " + renderGreyDark("Nothing to do: silent exit 0") + "\n")
