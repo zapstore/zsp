@@ -516,18 +516,25 @@ func (p *Publisher) gatherMetadata(ctx context.Context) error {
 		ui.PrintInfo("Skipping external metadata fetch (--offline)")
 	}
 
-	// Determine release notes (local file paths work in offline mode too)
-	p.releaseNotes = p.release.Changelog
+	// Determine release notes (local file paths work in offline mode too).
+	// Configured release_notes is optional — fall back to forge changelog on failure.
+	if p.release != nil {
+		p.releaseNotes = p.release.Changelog
+	}
 	if p.cfg.ReleaseNotes != "" {
 		if p.isOffline() && isRemoteURL(p.cfg.ReleaseNotes) {
 			if p.opts.ShouldShowSpinners() {
 				ui.PrintInfo("Skipping remote release notes (--offline)")
 			}
 		} else {
-			var err error
-			p.releaseNotes, err = source.FetchReleaseNotes(ctx, p.cfg.ReleaseNotes, p.apkInfo.VersionName, p.cfg.BaseDir)
+			notes, err := source.FetchReleaseNotes(ctx, p.cfg.ReleaseNotes, p.apkInfo.VersionName, p.cfg.BaseDir)
 			if err != nil {
-				return fmt.Errorf("failed to fetch release notes: %w", err)
+				if p.opts.ShouldShowSpinners() {
+					ui.PrintWarning(fmt.Sprintf("Failed to fetch release notes: %s; continuing",
+						ui.SanitizeErrorMessage(err)))
+				}
+			} else {
+				p.releaseNotes = notes
 			}
 		}
 	}

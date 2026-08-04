@@ -10,7 +10,7 @@
   - Filename exactly `zapstore.yaml` (no variants).
 - [x] 2. Full replace of the passed indexer YAML when the repo file exists — no field merge.
 - [x] 3. Keep indexer YAML when forge unsupported or file absent (404).
-- [x] 4. Keep indexer YAML on present-but-invalid repo YAML; hard-fail on non-404 API errors.
+- [x] 4. Keep indexer YAML on present-but-invalid repo YAML; soft-fail any fetch failure except cancel/deadline.
 - [x] 5. Wire into publish path after `loadConfig`, before `Validate`.
 - [x] 6. Tests with mocked HTTP; help text update.
 - [x] 7. Self-review against INVARIANTS.md; `gofmt`, `go test`, `go vet`.
@@ -21,6 +21,8 @@
 |----------|----------|--------|
 | GitHub repo file present | Full replace with repo config | [x] |
 | GitHub 404 | Keep indexer config | [x] |
+| GitHub 403 / 429 | Keep indexer config | [x] |
+| GitHub 5xx / network error | Keep indexer config | [x] |
 | Unsupported forge | Keep indexer config, no HTTP | [x] |
 | GitLab / Gitea present | Full replace | [x] |
 | Malformed repo YAML | Keep indexer config | [x] |
@@ -50,3 +52,5 @@ _None_
 **2026-07-29:** Implemented `source.ResolveIndexerConfig` and wired into `runPublishCommand`.
 
 **2026-08-02:** Malformed repository `zapstore.yaml` now falls back to the indexer-provided config instead of hard-failing.
+
+**2026-08-03:** GitHub fetch uses `raw.githubusercontent.com` (no API quota). Requests go through `DoWithTorFallback`. Any fetch failure except cancel/deadline soft-fails to indexer YAML. Same soft-fail policy applied to optional `release_notes`/changelog (forge body fallback); metadata was already non-fatal.
