@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -26,6 +27,8 @@ match: ".*-arm64.*\\.apk$"
 		name      string
 		cfg       *config.Config
 		transport roundTripperFunc
+		torStatus int   // if set, Tor fallback returns this status with repoYAML
+		torErr    error // if set, Tor client factory fails
 		wantName  string
 		wantMatch string
 		wantSame  bool // expect returned pointer == indexer cfg
@@ -35,10 +38,7 @@ match: ".*-arm64.*\\.apk$"
 			name: "GitHub repo config replaces indexer config",
 			cfg:  indexerCfg,
 			transport: func(req *http.Request) (*http.Response, error) {
-				if req.URL.Host+req.URL.Path == "api.github.com/repos/owner/app/contents/zapstore.yaml" {
-					if req.Header.Get("Accept") != "application/vnd.github.raw" {
-						t.Errorf("Accept = %q, want application/vnd.github.raw", req.Header.Get("Accept"))
-					}
+				if req.URL.Host+req.URL.Path == "raw.githubusercontent.com/owner/app/HEAD/zapstore.yaml" {
 					return testResponse(http.StatusOK, repoYAML), nil
 				}
 				return testResponse(http.StatusNotFound, ""), nil
@@ -51,6 +51,45 @@ match: ".*-arm64.*\\.apk$"
 			cfg:  indexerCfg,
 			transport: func(req *http.Request) (*http.Response, error) {
 				return testResponse(http.StatusNotFound, ""), nil
+			},
+			wantSame: true,
+			wantName: "Indexer Name",
+		},
+		{
+			name: "GitHub 403 then Tor serves repo config",
+			cfg:  indexerCfg,
+			transport: func(req *http.Request) (*http.Response, error) {
+				return testResponse(http.StatusForbidden, "rate limit"), nil
+			},
+			torStatus: http.StatusOK,
+			wantName:  "Repo App",
+			wantMatch: `.*-arm64.*\.apk$`,
+		},
+		{
+			name: "GitHub 403 Tor unavailable keeps indexer config",
+			cfg:  indexerCfg,
+			transport: func(req *http.Request) (*http.Response, error) {
+				return testResponse(http.StatusForbidden, "rate limit"), nil
+			},
+			torErr:   errors.New("connection refused"),
+			wantSame: true,
+			wantName: "Indexer Name",
+		},
+		{
+			name: "GitHub 403 after Tor keeps indexer config",
+			cfg:  indexerCfg,
+			transport: func(req *http.Request) (*http.Response, error) {
+				return testResponse(http.StatusForbidden, "rate limit"), nil
+			},
+			torStatus: http.StatusForbidden,
+			wantSame:  true,
+			wantName:  "Indexer Name",
+		},
+		{
+			name: "GitHub 429 keeps indexer config",
+			cfg:  indexerCfg,
+			transport: func(req *http.Request) (*http.Response, error) {
+				return testResponse(http.StatusTooManyRequests, "slow down"), nil
 			},
 			wantSame: true,
 			wantName: "Indexer Name",
@@ -121,12 +160,22 @@ match: ".*-arm64.*\\.apk$"
 			wantName: "Indexer Name",
 		},
 		{
-			name: "API error is fatal",
+			name: "API 500 keeps indexer config",
 			cfg:  indexerCfg,
 			transport: func(req *http.Request) (*http.Response, error) {
 				return testResponse(http.StatusInternalServerError, "boom"), nil
 			},
-			wantErr: true,
+			wantSame: true,
+			wantName: "Indexer Name",
+		},
+		{
+			name: "network error keeps indexer config",
+			cfg:  indexerCfg,
+			transport: func(req *http.Request) (*http.Response, error) {
+				return nil, errors.New("connection reset")
+			},
+			wantSame: true,
+			wantName: "Indexer Name",
 		},
 		{
 			name: "cancelled context",
@@ -145,6 +194,19 @@ match: ".*-arm64.*\\.apk$"
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithCancel(context.Background())
 				cancel()
+			}
+
+			if tt.torStatus != 0 || tt.torErr != nil {
+				body := repoYAML
+				restoreTor := SetTorHTTPClientForTest(func() (*http.Client, error) {
+					if tt.torErr != nil {
+						return nil, tt.torErr
+					}
+					return &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+						return testResponse(tt.torStatus, body), nil
+					})}, nil
+				})
+				t.Cleanup(restoreTor)
 			}
 
 			client := &http.Client{Transport: tt.transport}

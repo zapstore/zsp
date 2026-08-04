@@ -23,7 +23,9 @@ var errRepoConfigUnavailable = errors.New("repository zapstore.yaml not found")
 
 // ResolveIndexerConfig returns zapstore.yaml from the repository root when the
 // forge is supported and the file exists on the default branch.
-// On absence, unsupported forge, or unparseable YAML it returns indexerCfg unchanged.
+// Repo config is an optional overlay: on absence, unsupported forge, fetch
+// failure, or unparseable YAML it returns indexerCfg unchanged. Only context
+// cancellation / deadline is fatal.
 func ResolveIndexerConfig(ctx context.Context, indexerCfg *config.Config) (*config.Config, error) {
 	return resolveIndexerConfig(ctx, indexerCfg, newSecureHTTPClient(30*time.Second))
 }
@@ -38,10 +40,11 @@ func resolveIndexerConfig(ctx context.Context, indexerCfg *config.Config, client
 
 	data, err := fetchRepoConfig(ctx, client, indexerCfg)
 	if err != nil {
-		if errors.Is(err, errRepoConfigUnavailable) {
-			return indexerCfg, nil
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
 		}
-		return nil, err
+		// Optional overlay — keep indexer YAML (404, 403/429, 5xx, network, …).
+		return indexerCfg, nil
 	}
 
 	cfg, err := config.Parse(bytes.NewReader(data))
@@ -70,16 +73,18 @@ func fetchGitHubRepoConfig(ctx context.Context, client *http.Client, cfg *config
 	if repoPath == "" {
 		return nil, errRepoConfigUnavailable
 	}
-	requestURL := fmt.Sprintf("https://api.github.com/repos/%s/contents/%s", repoPath, repoConfigPath)
+	// Use raw.githubusercontent.com (not the Contents API) so this optional
+	// check does not consume GitHub API rate limit — indexers hit this for
+	// every app, and unauthenticated API 403s were aborting publishes.
+	requestURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/HEAD/%s", repoPath, repoConfigPath)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating GitHub repo config request: %w", err)
 	}
-	req.Header.Set("Accept", "application/vnd.github.raw")
 	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	return doRepoConfigRequest(client, req, "GitHub")
+	return doRepoConfigRequest(client, req)
 }
 
 func fetchGitLabRepoConfig(ctx context.Context, client *http.Client, cfg *config.Config) ([]byte, error) {
@@ -93,7 +98,7 @@ func fetchGitLabRepoConfig(ctx context.Context, client *http.Client, cfg *config
 	if err != nil {
 		return nil, fmt.Errorf("creating GitLab repo config request: %w", err)
 	}
-	return doRepoConfigRequest(client, req, "GitLab")
+	return doRepoConfigRequest(client, req)
 }
 
 func fetchGiteaRepoConfig(ctx context.Context, client *http.Client, cfg *config.Config) ([]byte, error) {
@@ -113,26 +118,27 @@ func fetchGiteaRepoConfig(ctx context.Context, client *http.Client, cfg *config.
 	if token := os.Getenv("GITEA_TOKEN"); token != "" {
 		req.Header.Set("Authorization", "token "+token)
 	}
-	return doRepoConfigRequest(client, req, "Gitea")
+	return doRepoConfigRequest(client, req)
 }
 
-func doRepoConfigRequest(client *http.Client, req *http.Request, forge string) ([]byte, error) {
-	resp, err := client.Do(req)
+func doRepoConfigRequest(client *http.Client, req *http.Request) ([]byte, error) {
+	resp, err := DoWithTorFallback(req.Context(), client, req)
 	if err != nil {
-		return nil, fmt.Errorf("fetching %s repo config: %w", forge, err)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		// Optional overlay: any fetch failure keeps indexer YAML.
+		return nil, errRepoConfigUnavailable
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, errRepoConfigUnavailable
-	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s repo config API error: %d", forge, resp.StatusCode)
+		return nil, errRepoConfigUnavailable
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxRemoteDownloadSize))
 	if err != nil {
-		return nil, fmt.Errorf("reading %s repo config: %w", forge, err)
+		return nil, errRepoConfigUnavailable
 	}
 	if len(bytes.TrimSpace(body)) == 0 {
 		return nil, errRepoConfigUnavailable

@@ -314,13 +314,21 @@ func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.Ev
 		authEvent: nostr.BuildBlossomAuthEvent(params.APKInfo.SHA256, params.Pubkey, expiration),
 	})
 
-	// Build main events
-	releaseNotes := params.Release.Changelog
+	// Build main events. Configured release_notes is optional — fall back to
+	// forge changelog (same soft-fail as gatherMetadata).
+	releaseNotes := ""
+	if params.Release != nil {
+		releaseNotes = params.Release.Changelog
+	}
 	if params.Cfg.ReleaseNotes != "" {
-		var err error
-		releaseNotes, err = source.FetchReleaseNotes(ctx, params.Cfg.ReleaseNotes, params.APKInfo.VersionName, params.Cfg.BaseDir)
+		notes, err := source.FetchReleaseNotes(ctx, params.Cfg.ReleaseNotes, params.APKInfo.VersionName, params.Cfg.BaseDir)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to fetch release notes: %w", err)
+			if params.Opts != nil && params.Opts.ShouldShowSpinners() {
+				ui.PrintWarning(fmt.Sprintf("Failed to fetch release notes: %s; continuing",
+					ui.SanitizeErrorMessage(err)))
+			}
+		} else {
+			releaseNotes = notes
 		}
 	}
 
