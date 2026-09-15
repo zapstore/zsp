@@ -9,62 +9,62 @@ import (
 
 // Config contains source resolution and publication metadata.
 type Config struct {
-	FetchConfig
-	PublishConfig
+	FetchConfig   `json:"fetch_config"`
+	PublishConfig `json:"publish_config"`
 }
 
 // FetchConfig identifies and filters an APK release source.
 type FetchConfig struct {
-	Repository        string
-	ReleaseSource     *ReleaseSource
-	ReleaseFilter     string
-	Match             string
-	PrereleaseChannel string
+	Repository        string         `json:"repository"`
+	ReleaseSource     *ReleaseSource `json:"release_source"`
+	ReleaseFilter     string         `json:"release_filter"`
+	Match             string         `json:"match"`
+	PrereleaseChannel string         `json:"prerelease_channel"`
 }
 
 // PublishConfig contains application metadata used to build NIP-82 events.
 type PublishConfig struct {
-	Channel               string
-	Name                  string
-	Summary               string
-	Description           string
-	Tags                  []string
-	License               string
-	Website               string
-	Icon                  string
-	Images                []string
-	ReleaseNotes          string
-	SupportedNIPs         []string
-	MinAllowedVersion     string
-	MinAllowedVersionCode int64
+	Channel               string   `json:"channel"`
+	Name                  string   `json:"name"`
+	Summary               string   `json:"summary"`
+	Description           string   `json:"description"`
+	Tags                  []string `json:"tags"`
+	License               string   `json:"license"`
+	Website               string   `json:"website"`
+	Icon                  string   `json:"icon"`
+	Images                []string `json:"images"`
+	ReleaseNotes          string   `json:"release_notes"`
+	SupportedNIPs         []string `json:"supported_nips"`
+	MinAllowedVersion     string   `json:"min_allowed_version"`
+	MinAllowedVersionCode int64    `json:"min_allowed_version_code"`
 	// MetadataSources is nil for automatic source selection, empty to disable
 	// metadata fetching, or non-empty to select explicit sources.
-	MetadataSources []string
+	MetadataSources []string `json:"metadata_sources"`
 }
 
 // ReleaseSource describes a local, forge, F-Droid, or web release source.
 type ReleaseSource struct {
-	URL              string
-	LocalPath        string
-	Type             string
-	AssetURL         string
-	VersionExtractor *Extractor
-	AssetExtractor   *Extractor
+	URL              string     `json:"url"`
+	LocalPath        string     `json:"local_path"`
+	Type             string     `json:"type"`
+	AssetURL         string     `json:"asset_url"`
+	VersionExtractor *Extractor `json:"version_extractor"`
+	AssetExtractor   *Extractor `json:"asset_extractor"`
 }
 
 // Extractor describes how to obtain a value from HTML, JSON, or headers.
 type Extractor struct {
-	URL       string
-	Selector  string
-	Attribute string
-	Path      string
-	Header    string
-	Match     string
+	URL       string `json:"url"`
+	Selector  string `json:"selector"`
+	Attribute string `json:"attribute"`
+	Path      string `json:"path"`
+	Header    string `json:"header"`
+	Match     string `json:"match"`
 }
 
 // FetchOptions controls source resolution and progress reporting.
 type FetchOptions struct {
-	OnProgress func(Progress)
+	OnProgress func(Progress) `json:"-"`
 }
 
 // APK is a downloaded and verified publication candidate.
@@ -127,28 +127,28 @@ var scheduleAPKExpiry = func(after time.Duration, expire func()) apkTimer {
 
 // Progress reports a synchronous operation update.
 type Progress struct {
-	Operation string
+	Operation string `json:"operation"`
 	// Phase is "warning" for a safe candidate-rejection diagnostic; in that
 	// case Target contains the diagnostic and numeric fields are zero.
-	Phase     string
-	Target    string
-	Completed int64
-	Total     int64
+	Phase     string `json:"phase"`
+	Target    string `json:"target"`
+	Completed int64  `json:"completed"`
+	Total     int64  `json:"total"`
 }
 
 // PublishOptions controls proof checks, event construction, and publication.
 type PublishOptions struct {
-	Channel              string
-	BlossomURL           string
-	Relays               []string
-	Commit               string
-	SkipAppEvent         bool
-	SkipMediaCompression bool
-	SkipProofCheck       bool
-	OverwriteRelease     bool
-	Preview              bool
-	BrowserPort          int
-	OnProgress           func(Progress)
+	Channel              string         `json:"channel"`
+	BlossomURL           string         `json:"blossom_url"`
+	Relays               []string       `json:"relays"`
+	Commit               string         `json:"commit"`
+	SkipAppEvent         bool           `json:"skip_app_event"`
+	SkipMediaCompression bool           `json:"skip_media_compression"`
+	SkipProofCheck       bool           `json:"skip_proof_check"`
+	OverwriteRelease     bool           `json:"overwrite_release"`
+	Preview              bool           `json:"preview"`
+	BrowserPort          int            `json:"browser_port"`
+	OnProgress           func(Progress) `json:"-"`
 }
 
 // EventIDs identifies the events produced for a publication.
