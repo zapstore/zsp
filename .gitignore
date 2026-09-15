@@ -1,10 +1,12 @@
 .cursor
+.agents
 
 SPEC.md
 TODO.md
 
 # Binaries
 /zsp
+/test-relay
 zsp-*
 *.exe
 
@@ -32,6 +34,8 @@ coverage.html
 
 # Test data
 *.apk
+cmd/test-relay/testdata/catalog/
+testdata/catalog/
 
 # Build
 dist/

@@ -1,0 +1,44 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+keystore="$root/testdata/keystores/test-release.jks"
+output=${1:-"$root/testdata/apks/test-release.apk"}
+
+sdk=${ANDROID_HOME:-/opt/homebrew/share/android-commandlinetools}
+build_tools=$(ls -1d "$sdk"/build-tools/*/ 2>/dev/null | tail -n 1)
+android_jar=$(ls -1d "$sdk"/platforms/android-*/android.jar 2>/dev/null | tail -n 1)
+if [ -z "$build_tools" ] || [ ! -f "$android_jar" ]; then
+	echo "Android SDK build-tools and platforms are required" >&2
+	exit 1
+fi
+
+aapt="${build_tools}aapt"
+apksigner="${build_tools}apksigner"
+zipalign="${build_tools}zipalign"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+cat >"$tmp/AndroidManifest.xml" <<'EOF'
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.zapstore.testrelease"
+    android:versionCode="1"
+    android:versionName="1.0">
+    <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="35"/>
+    <application android:label="ZSP Test Release"/>
+</manifest>
+EOF
+
+"$aapt" package -f -M "$tmp/AndroidManifest.xml" -I "$android_jar" -F "$tmp/unsigned.apk"
+"$zipalign" -p -f 4 "$tmp/unsigned.apk" "$tmp/aligned.apk"
+mkdir -p "$(dirname "$output")"
+"$apksigner" sign \
+	--ks "$keystore" \
+	--ks-key-alias release \
+	--ks-pass pass:storepass \
+	--key-pass pass:storepass \
+	--out "$output" \
+	"$tmp/aligned.apk"
+"$apksigner" verify --print-certs "$output"
+echo "wrote $output"
