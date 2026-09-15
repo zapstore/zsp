@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/huh"
 	"golang.org/x/term"
 )
 
@@ -125,41 +126,68 @@ func PromptDefault(message, defaultValue string) (string, error) {
 
 // Confirm asks for yes/no confirmation.
 func Confirm(message string, defaultYes bool) (bool, error) {
-	suffix := " [y/N]: "
-	if defaultYes {
-		suffix = " [Y/n]: "
-	}
-
-	input, err := Prompt(message + suffix)
-	if err != nil {
+	value := defaultYes
+	input := huh.NewSelect[bool]().
+		Title(message).
+		Options(
+			huh.NewOption("No", false),
+			huh.NewOption("Yes", true),
+		).
+		Height(3).
+		Value(&value)
+	keymap := huh.NewDefaultKeyMap()
+	keymap.Select.Filter.SetEnabled(false)
+	if err := huh.NewForm(huh.NewGroup(input)).WithKeyMap(keymap).Run(); err != nil {
 		return false, err
 	}
-
-	input = strings.ToLower(strings.TrimSpace(input))
-
-	if input == "" {
-		return defaultYes, nil
-	}
-
-	return input == "y" || input == "yes", nil
+	return value, nil
 }
 
 // SelectOption presents a list of options with arrow-key navigation.
 // Returns the selected index (0-based).
 func SelectOption(message string, options []string, recommended int) (int, error) {
-	return Select(message, options, recommended)
+	_ = recommended
+	selected, err := SelectField(message, "", options)
+	if err != nil {
+		return 0, err
+	}
+	for index, option := range options {
+		if option == selected {
+			return index, nil
+		}
+	}
+	return 0, fmt.Errorf("selected option is unavailable")
 }
 
 // SelectMultiple presents a list of options for multiple selection with arrow keys.
 // Space toggles selection, Enter confirms.
 func SelectMultiple(message string, options []string) ([]int, error) {
-	return SelectMultipleWithArrows(message, options)
+	return SelectMultipleWithDefaults(message, options, nil)
 }
 
 // SelectMultipleWithDefaults presents a list of options with some pre-selected.
 // preselected is a list of indices to pre-select.
 func SelectMultipleWithDefaults(message string, options []string, preselected []int) ([]int, error) {
-	return SelectMultiplePreselected(message, options, preselected)
+	choices := make([]huh.Option[string], len(options))
+	for index, option := range options {
+		choices[index] = huh.NewOption(option, option)
+	}
+	var values []string
+	if err := huh.NewForm(huh.NewGroup(
+		huh.NewMultiSelect[string]().Title(message).Options(choices...).Value(&values),
+	)).Run(); err != nil {
+		return nil, err
+	}
+	result := make([]int, 0, len(values))
+	for index, option := range options {
+		for _, value := range values {
+			if option == value {
+				result = append(result, index)
+				break
+			}
+		}
+	}
+	return result, nil
 }
 
 // PromptSecret asks for secret input (like passwords or keys) with hidden characters.
@@ -278,13 +306,23 @@ func PrintSuccess(message string) {
 	fmt.Printf("%s %s\n", Success(checkmark), message)
 }
 
-// PrintError prints an error message.
-func PrintError(message string) {
+// ErrorMessage formats an error consistently across CLI commands.
+func ErrorMessage(message string) string {
 	cross := "✗"
 	if NoColor {
 		cross = "[ERROR]"
 	}
-	fmt.Printf("%s %s\n", Error(cross), message)
+	return fmt.Sprintf("%s %s", Error(cross), message)
+}
+
+// WriteError writes a consistently formatted error to writer.
+func WriteError(writer io.Writer, message string) {
+	fmt.Fprintln(writer, ErrorMessage(message))
+}
+
+// PrintError prints an error message.
+func PrintError(message string) {
+	WriteError(os.Stdout, message)
 }
 
 // PrintWarning prints a warning message.

@@ -52,39 +52,40 @@ func initStyles() {
 
 	TitleStyle = lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("#e0e0e0")) // Light grey
+		Foreground(lipgloss.Color("#dedede"))
 
 	SuccessStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#6b8c6b")) // Muted sage green
+		Foreground(lipgloss.Color("#00d892"))
 
 	ErrorStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#c87070")) // Muted coral red
+		Foreground(lipgloss.Color("#ff6285"))
 
 	WarningStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#c9a866")) // Muted gold
+		Foreground(lipgloss.Color("#e9b872"))
 
 	InfoStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#a0a0a0")) // Medium grey
+		Foreground(lipgloss.Color("#bababb"))
 
 	DimStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#606060")) // Dark grey
+		Foreground(lipgloss.Color("#818284"))
 
 	BoldStyle = lipgloss.NewStyle().
 		Bold(true)
 
 	CodeStyle = lipgloss.NewStyle().
-		Background(lipgloss.Color("#1a1a1a")).
-		Foreground(lipgloss.Color("#c8c8c8")).
+		Background(lipgloss.Color("#1f2124")).
+		Foreground(lipgloss.Color("#dedede")).
 		Padding(0, 1)
 
 	LogoStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#5a5a6e")) // Subtle dusty violet
+		Foreground(lipgloss.Color("#00d892"))
 }
 
 // SetNoColor enables or disables colored output.
 func SetNoColor(noColor bool) {
 	NoColor = noColor
 	initStyles()
+	initPresentationStyles()
 }
 
 // Title formats text as a title.
@@ -129,11 +130,11 @@ func Code(s string) string {
 
 // JSON styles for colorized output
 var (
-	jsonKeyStyle    lipgloss.Style
-	jsonStringStyle lipgloss.Style
-	jsonNumberStyle lipgloss.Style
-	jsonBoolStyle   lipgloss.Style
-	jsonNullStyle   lipgloss.Style
+	jsonKeyStyle     lipgloss.Style
+	jsonStringStyle  lipgloss.Style
+	jsonNumberStyle  lipgloss.Style
+	jsonBoolStyle    lipgloss.Style
+	jsonNullStyle    lipgloss.Style
 	jsonBracketStyle lipgloss.Style
 )
 
@@ -149,10 +150,10 @@ func initJSONStyles() {
 	}
 
 	jsonKeyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#e0e0e0")).Bold(true)
-	jsonStringStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#6b8c6b")) // Green for strings
-	jsonNumberStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#c9a866")) // Gold for numbers
-	jsonBoolStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#c9a866"))   // Gold for bools
-	jsonNullStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080"))   // Grey for null
+	jsonStringStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#6b8c6b"))  // Green for strings
+	jsonNumberStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#c9a866"))  // Gold for numbers
+	jsonBoolStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#c9a866"))    // Gold for bools
+	jsonNullStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080"))    // Grey for null
 	jsonBracketStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080")) // Grey for brackets
 }
 

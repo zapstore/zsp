@@ -31,6 +31,11 @@ var SimpleFrames = []string{"|", "/", "-", "\\"}
 
 // NewSpinner creates a new spinner with a message.
 func NewSpinner(message string) *Spinner {
+	return NewSpinnerWithWriter(os.Stderr, message)
+}
+
+// NewSpinnerWithWriter creates a spinner that writes to the supplied terminal stream.
+func NewSpinnerWithWriter(writer io.Writer, message string) *Spinner {
 	frames := DefaultFrames
 	if NoColor {
 		frames = SimpleFrames
@@ -39,7 +44,7 @@ func NewSpinner(message string) *Spinner {
 	return &Spinner{
 		message: message,
 		frames:  frames,
-		writer:  os.Stderr,
+		writer:  writer,
 		done:    make(chan struct{}),
 	}
 }
@@ -218,6 +223,11 @@ type DownloadTracker struct {
 // NewDownloadTracker creates a new download tracker.
 // Pass 0 for initialTotal if the size is unknown.
 func NewDownloadTracker(message string, initialTotal int64) *DownloadTracker {
+	return NewDownloadTrackerWithWriter(os.Stderr, message, initialTotal)
+}
+
+// NewDownloadTrackerWithWriter creates a byte progress tracker for a terminal stream.
+func NewDownloadTrackerWithWriter(writer io.Writer, message string, initialTotal int64) *DownloadTracker {
 	var bar progress.Model
 	if NoColor {
 		bar = progress.New(
@@ -242,7 +252,7 @@ func NewDownloadTracker(message string, initialTotal int64) *DownloadTracker {
 		message: message,
 		total:   initialTotal,
 		bar:     bar,
-		writer:  os.Stderr,
+		writer:  writer,
 		frames:  frames,
 	}
 }

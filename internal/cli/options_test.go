@@ -19,90 +19,100 @@ func TestParseCommand_InvalidPublishFlagSetsFlagParseError(t *testing.T) {
 	}
 }
 
-func TestParseCommand_UnknownSubcommandSetsHelpAndMarker(t *testing.T) {
+func TestParseCommand_NoArgumentsStartsWizard(t *testing.T) {
+	oldArgs := os.Args
+	t.Cleanup(func() { os.Args = oldArgs })
+	os.Args = []string{"zsp"}
+
+	opts := ParseCommand()
+	if opts.Command != CommandWizard {
+		t.Fatalf("Command = %q, want %q", opts.Command, CommandWizard)
+	}
+	if opts.Global.Help || opts.Global.JSON {
+		t.Fatalf("no-argument wizard must remain interactive: %+v", opts.Global)
+	}
+}
+
+func TestParseCommand_OperationalCallsUseJSONOnInvalidArguments(t *testing.T) {
+	oldArgs := os.Args
+	t.Cleanup(func() { os.Args = oldArgs })
+	os.Args = []string{"zsp", "publish", "--not-a-defined-flag"}
+
+	opts := ParseCommand()
+	if opts.FlagParseError == nil {
+		t.Fatal("expected FlagParseError for unknown flag")
+	}
+	if !opts.Global.JSON {
+		t.Fatal("JSON must remain enabled so the runner can emit a structured error")
+	}
+}
+
+func TestParseCommand_AcceptsRootFlags(t *testing.T) {
+	oldArgs := os.Args
+	t.Cleanup(func() { os.Args = oldArgs })
+	os.Args = []string{"zsp", "--no-color", "--verbose", "publish", "--check", "app.apk"}
+
+	opts := ParseCommand()
+	if opts.FlagParseError != nil {
+		t.Fatal(opts.FlagParseError)
+	}
+	if opts.Command != CommandPublish || !opts.Global.JSON || !opts.Global.NoColor || !opts.Global.Verbose || !opts.Publish.Check {
+		t.Fatalf("unexpected options: %+v", opts)
+	}
+}
+
+func TestParseCommand_AcceptsChannelFlags(t *testing.T) {
+	oldArgs := os.Args
+	t.Cleanup(func() { os.Args = oldArgs })
+	os.Args = []string{"zsp", "publish", "--channel", "nightly", "--prerelease-channel", "beta"}
+
+	opts := ParseCommand()
+	if opts.FlagParseError != nil {
+		t.Fatal(opts.FlagParseError)
+	}
+	if opts.Publish.Channel != "nightly" {
+		t.Errorf("Channel = %q, want nightly", opts.Publish.Channel)
+	}
+	if opts.Publish.PrereleaseChannel != "beta" {
+		t.Errorf("PrereleaseChannel = %q, want beta", opts.Publish.PrereleaseChannel)
+	}
+}
+
+func TestParseCommand_UnknownSubcommandKeepsJSONAndMarker(t *testing.T) {
 	oldArgs := os.Args
 	t.Cleanup(func() { os.Args = oldArgs })
 	os.Args = []string{"zsp", "typo"}
 
 	opts := ParseCommand()
-	if !opts.Global.Help {
-		t.Fatal("expected Global.Help for unknown subcommand")
+	if opts.Global.Help {
+		t.Fatal("unknown subcommand must not become a help request")
+	}
+	if !opts.Global.JSON {
+		t.Fatal("unknown operational command must keep JSON enabled")
 	}
 	if opts.UnknownSubcommand != "typo" {
 		t.Fatalf("UnknownSubcommand = %q, want typo", opts.UnknownSubcommand)
 	}
 }
 
-func TestParseCommand_IdentityKeyAlias(t *testing.T) {
+func TestParseCommand_RejectsLegacyIdentityCommand(t *testing.T) {
 	oldArgs := os.Args
 	t.Cleanup(func() { os.Args = oldArgs })
-	os.Args = []string{"zsp", "identity", "--link-key", "release.jks", "--key-alias", "release"}
+	os.Args = []string{"zsp", "identity", "create", "--keystore", "release.jks", "--delegate", "npub1example", "--source", "github.com/example/app"}
 
 	opts := ParseCommand()
-	if opts.FlagParseError != nil {
-		t.Fatalf("ParseCommand() error: %v", opts.FlagParseError)
-	}
-	if opts.Identity.KeyAlias != "release" {
-		t.Fatalf("KeyAlias = %q, want release", opts.Identity.KeyAlias)
+	if opts.UnknownSubcommand != "identity" {
+		t.Fatalf("UnknownSubcommand = %q, want identity", opts.UnknownSubcommand)
 	}
 }
 
-func TestParseCommand_IndexerModeImpliesQuietJSONSkipCert(t *testing.T) {
+func TestParseCommand_RejectsRemovedIndexerMode(t *testing.T) {
 	oldArgs := os.Args
 	t.Cleanup(func() { os.Args = oldArgs })
 	os.Args = []string{"zsp", "publish", "--indexer-mode", "--verbose", "app.yaml"}
 
 	opts := ParseCommand()
-	if opts.FlagParseError != nil {
-		t.Fatalf("ParseCommand() error: %v", opts.FlagParseError)
-	}
-	if !opts.Publish.IndexerMode {
-		t.Fatal("expected Publish.IndexerMode")
-	}
-	if !opts.Publish.Quiet {
-		t.Error("--indexer-mode should imply --quiet")
-	}
-	if !opts.Publish.SkipCertificateLinking {
-		t.Error("--indexer-mode should imply --skip-certificate-linking")
-	}
-	if !opts.Global.JSON {
-		t.Error("--indexer-mode should enable JSON error reporting")
-	}
-	if !opts.Global.NoColor {
-		t.Error("--indexer-mode should imply --no-color")
-	}
-	if opts.IsInteractive() {
-		t.Error("--indexer-mode should not be interactive")
-	}
-	if opts.ShouldShowSpinners() {
-		t.Error("--indexer-mode should not show spinners")
-	}
-	if opts.Global.Verbose {
-		t.Error("--indexer-mode should suppress verbose diagnostics")
-	}
-	if len(opts.Args) != 1 || opts.Args[0] != "app.yaml" {
-		t.Fatalf("Args = %v, want [app.yaml]", opts.Args)
-	}
-}
-
-func TestPublishOptionsValidateIndexerMode(t *testing.T) {
-	tests := []struct {
-		name    string
-		options PublishOptions
-		wantErr bool
-	}{
-		{name: "not CI"},
-		{name: "online publish", options: PublishOptions{IndexerMode: true}},
-		{name: "check", options: PublishOptions{IndexerMode: true, Check: true}, wantErr: true},
-		{name: "offline", options: PublishOptions{IndexerMode: true, Offline: true}, wantErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := tt.options.ValidateIndexerMode()
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("ValidateIndexerMode() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
+	if opts.FlagParseError == nil {
+		t.Fatal("removed --indexer-mode should be rejected")
 	}
 }

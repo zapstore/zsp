@@ -7,48 +7,7 @@ import (
 	"strings"
 )
 
-// Logo is the ASCII art logo for Zapstore Publisher.
-const Logo = `
- _____                _
-/ _  / __ _ _ __  ___| |_ ___  _ __ ___
-\// / / _` + "`" + ` | '_ \/ __| __/ _ \| '__/ _ \
- / //\ (_| | |_) \__ \ || (_) | | |  __/
-/____/\__,_| .__/|___/\__\___/|_|  \___|
-           |_|
-    ═══════════════════════════════
-           P U B L I S H E R
-`
-
-// Version holds the application version, set at startup.
-var Version = "dev"
-
-// SetVersion sets the application version for logo rendering.
-func SetVersion(v string) {
-	Version = v
-}
-
-// RenderLogo returns the styled logo with version underneath.
-func RenderLogo() string {
-	var result strings.Builder
-	for _, line := range strings.Split(Logo, "\n") {
-		if line != "" {
-			result.WriteString(LogoStyle.Render(line) + "\n")
-		}
-	}
-	// Add blank line before version
-	result.WriteString("\n")
-	// Add "v" prefix only if not already present
-	v := Version
-	if !strings.HasPrefix(v, "v") {
-		v = "v" + v
-	}
-	result.WriteString(v + "\n")
-	// Add blank line after version
-	result.WriteString("\n")
-	return result.String()
-}
-
-// StepTracker tracks progress through numbered steps in the CLI flow.
+// StepTracker tracks progress through wizard stages.
 type StepTracker struct {
 	current int
 	total   int
@@ -64,49 +23,20 @@ func NewStepTracker(total int) *StepTracker {
 	}
 }
 
-// StartStep begins a new step with the given name.
-// It prints a visual header for the step.
+// StartStep begins a new wizard stage.
 func (s *StepTracker) StartStep(name string) {
 	s.current++
 	s.printStepHeader(name)
 }
 
-// printStepHeader prints a formatted step header.
+// printStepHeader prints a compact wizard stage heading.
 func (s *StepTracker) printStepHeader(name string) {
-	// Print banner before the first step
-	if s.current == 1 {
-		s.printBanner()
-	}
-
-	// Create the step indicator
-	stepNum := fmt.Sprintf("%d/%d", s.current, s.total)
-
-	// Box-drawing line (heavy)
-	lineWidth := 60
-	line := strings.Repeat("━", lineWidth)
-
 	fmt.Fprintln(s.writer)
-
 	if NoColor {
-		fmt.Fprintf(s.writer, "=== STEP %s: %s ===\n", stepNum, strings.ToUpper(name))
-	} else {
-		// Top line
-		fmt.Fprintln(s.writer, DimStyle.Render(line))
-		// Step header with number and name
-		header := fmt.Sprintf(" %s ▸ %s", stepNum, strings.ToUpper(name))
-		fmt.Fprintln(s.writer, BoldStyle.Render(header))
-		// Bottom line
-		fmt.Fprintln(s.writer, DimStyle.Render(line))
-	}
-}
-
-// printBanner prints the zapstore ASCII art logo.
-func (s *StepTracker) printBanner() {
-	if NoColor {
-		fmt.Fprintln(s.writer, "=== ZAPSTORE ===")
+		fmt.Fprintf(s.writer, "✦ %s\n", name)
 		return
 	}
-	fmt.Fprint(s.writer, RenderLogo())
+	fmt.Fprintf(s.writer, "%s %s\n", Success("✦"), BoldStyle.Render(name))
 }
 
 // SetTotal updates the total number of steps (useful when steps are conditional).
@@ -188,4 +118,3 @@ func PrintCompletionSummary(success bool, message string) {
 	}
 	fmt.Println()
 }
-

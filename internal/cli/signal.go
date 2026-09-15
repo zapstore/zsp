@@ -3,7 +3,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/signal"
 	"sync"
@@ -22,7 +21,9 @@ type SignalHandler struct {
 	cancel     context.CancelFunc
 	sigCh      chan os.Signal
 	shutdownCh chan struct{}
+	doneCh     chan struct{}
 	once       sync.Once
+	stopOnce   sync.Once
 
 	// Cleanup functions to run on shutdown
 	cleanupMu sync.Mutex
@@ -42,6 +43,7 @@ func NewSignalHandler() *SignalHandler {
 		cancel:     cancel,
 		sigCh:      make(chan os.Signal, 1),
 		shutdownCh: make(chan struct{}),
+		doneCh:     make(chan struct{}),
 	}
 
 	signal.Notify(h.sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -85,10 +87,11 @@ func (h *SignalHandler) Shutdown() {
 	h.initiateShutdown("Shutting down...")
 }
 
-// initiateShutdown begins the shutdown process with a message.
+// initiateShutdown begins the shutdown process. Command owners emit their
+// final output so operational commands can preserve one-document JSON.
 func (h *SignalHandler) initiateShutdown(message string) {
 	h.once.Do(func() {
-		fmt.Fprintln(os.Stderr, "\n"+message)
+		_ = message
 		close(h.shutdownCh)
 		h.cancel()
 		h.runCleanups()
@@ -120,7 +123,6 @@ func (h *SignalHandler) watch() {
 			select {
 			case <-h.shutdownCh:
 				// Already shutting down, force exit on second signal
-				fmt.Fprintln(os.Stderr, "\nForce quit")
 				os.Exit(130)
 			default:
 				// First signal - initiate graceful shutdown
@@ -130,15 +132,13 @@ func (h *SignalHandler) watch() {
 				go func() {
 					select {
 					case <-time.After(GracefulShutdownTimeout):
-						fmt.Fprintln(os.Stderr, "\nShutdown timeout, forcing exit")
 						os.Exit(130)
-					case <-h.ctx.Done():
-						// Context was cancelled elsewhere, normal exit path
+					case <-h.doneCh:
+						// Command completed normally.
 					}
 				}()
 			}
-		case <-h.ctx.Done():
-			// Context was cancelled elsewhere (e.g., normal program completion)
+		case <-h.doneCh:
 			return
 		}
 	}
@@ -147,59 +147,8 @@ func (h *SignalHandler) watch() {
 // Stop releases resources and stops watching for signals.
 // Call this in a defer after NewSignalHandler.
 func (h *SignalHandler) Stop() {
-	signal.Stop(h.sigCh)
-	close(h.sigCh)
-}
-
-// --- Non-blocking stdin utilities ---
-
-// readLineResult holds the result of a non-blocking line read.
-type readLineResult struct {
-	line string
-	err  error
-}
-
-// readLineAsync reads a line from stdin in a goroutine using raw os.Stdin.Read().
-// Does NOT use bufio to avoid buffering conflicts with other stdin readers.
-// The goroutine is abandoned if context is cancelled (Go stdin reads cannot be interrupted).
-func readLineAsync() <-chan readLineResult {
-	ch := make(chan readLineResult, 1)
-	go func() {
-		var line []byte
-		buf := make([]byte, 1)
-		for {
-			n, err := os.Stdin.Read(buf)
-			if err != nil {
-				ch <- readLineResult{err: err}
-				return
-			}
-			if n > 0 {
-				if buf[0] == '\n' {
-					ch <- readLineResult{line: string(line)}
-					return
-				}
-				if buf[0] != '\r' { // Skip carriage return
-					line = append(line, buf[0])
-				}
-			}
-		}
-	}()
-	return ch
-}
-
-// WaitForEnter waits for the user to press Enter, with context support.
-// Returns context.Canceled if the context is cancelled.
-func WaitForEnter(ctx context.Context) error {
-	resultCh := readLineAsync()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case result := <-resultCh:
-		return result.err
-	}
-}
-
-// WaitForEnterWithContext is an alias for WaitForEnter for backwards compatibility.
-func WaitForEnterWithContext(ctx context.Context) error {
-	return WaitForEnter(ctx)
+	h.stopOnce.Do(func() {
+		signal.Stop(h.sigCh)
+		close(h.doneCh)
+	})
 }
