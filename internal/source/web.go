@@ -2,15 +2,10 @@ package source
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/tls"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -23,29 +18,8 @@ import (
 
 // Web implements Source for web scraping with version extraction.
 type Web struct {
-	cfg               *config.Config
-	client            *http.Client
-	cacheDir          string
-	SkipCache         bool // Set to true to bypass version/HTTP cache
-	SkipDownloadCache bool // Set to true to skip saving APKs to download cache
-
-	// pendingCache holds the cache from the last fetch, not yet committed to disk.
-	// Call CommitCache() after successful publishing to persist it.
-	pendingCache *webCache
-}
-
-// webCache stores version and HTTP caching information for a web source.
-type webCache struct {
-	// Version-based caching (when version extractor is configured)
-	Version  string `json:"version,omitempty"`
-	AssetURL string `json:"asset_url,omitempty"`
-
-	// HTTP caching (for versionless URLs - ETag/Last-Modified/Content-Length)
-	ETag          string `json:"etag,omitempty"`
-	LastModified  string `json:"last_modified,omitempty"`
-	ContentLength int64  `json:"content_length,omitempty"` // Fallback when ETag/Last-Modified unavailable
-
-	LatestPublishedReleaseVersion string `json:"latest_published_release_version,omitempty"`
+	cfg    *config.Config
+	client *http.Client
 }
 
 // NewWeb creates a new web scraping source.
@@ -54,39 +28,22 @@ func NewWeb(cfg *config.Config) (*Web, error) {
 		return nil, fmt.Errorf("invalid web source configuration")
 	}
 
-	// Set up cache directory
-	cacheDir, err := os.UserCacheDir()
-	if err != nil {
-		cacheDir = os.TempDir()
-	}
-	cacheDir = filepath.Join(cacheDir, "zsp", "web")
-
 	return &Web{
-		cfg:      cfg,
-		client:   newSecureHTTPClient(30 * time.Second),
-		cacheDir: cacheDir,
+		cfg:    cfg,
+		client: newSecureHTTPClient(30 * time.Second),
 	}, nil
 }
 
-// resolveRedirects follows redirects and returns the final URL.
-// Uses HEAD request to avoid downloading the full content.
+// resolveRedirects follows redirects and returns the final URL. HEAD is used
+// first to avoid downloading the asset, with a GET fallback for endpoints that
+// deliberately reject HEAD.
 func (w *Web) resolveRedirects(ctx context.Context, url string) (string, error) {
 	// Create a client that tracks redirects but still follows them
 	var finalURL string
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				MinVersion: tls.VersionTLS12,
-			},
-		},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			finalURL = req.URL.String()
-			if len(via) >= 10 {
-				return fmt.Errorf("too many redirects")
-			}
-			return nil
-		},
+	client := newSecureHTTPClient(30 * time.Second)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		finalURL = req.URL.String()
+		return validateRedirect(req, via)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
@@ -95,6 +52,14 @@ func (w *Web) resolveRedirects(ctx context.Context, url string) (string, error) 
 	}
 
 	resp, err := client.Do(req)
+	if err == nil && resp.StatusCode == http.StatusMethodNotAllowed {
+		resp.Body.Close()
+		req, err = http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err == nil {
+			req.Header.Set("Range", "bytes=0-0")
+			resp, err = client.Do(req)
+		}
+	}
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve redirects: %w", err)
 	}
@@ -113,96 +78,6 @@ func (w *Web) Type() config.SourceType {
 	return config.SourceWeb
 }
 
-// cacheFilePath returns the file path for storing cached URL data.
-func (w *Web) cacheFilePath() string {
-	// Hash the source URL (or asset_url/asset URL if no url) for a unique filename
-	cacheKey := w.cfg.ReleaseSource.URL
-	if cacheKey == "" {
-		cacheKey = w.cfg.ReleaseSource.AssetURL
-	}
-	if cacheKey == "" && w.cfg.ReleaseSource.Asset != nil {
-		cacheKey = w.cfg.ReleaseSource.Asset.URL
-	}
-	h := sha256.Sum256([]byte(cacheKey))
-	return filepath.Join(w.cacheDir, hex.EncodeToString(h[:8])+".json")
-}
-
-// loadCache reads the cached data from disk.
-func (w *Web) loadCache() *webCache {
-	data, err := os.ReadFile(w.cacheFilePath())
-	if err != nil {
-		return nil
-	}
-	var cache webCache
-	if err := json.Unmarshal(data, &cache); err != nil {
-		return nil
-	}
-	return &cache
-}
-
-// saveCache writes the cache data to disk.
-func (w *Web) saveCache(cache *webCache) error {
-	if err := os.MkdirAll(w.cacheDir, 0755); err != nil {
-		return err
-	}
-	data, err := json.Marshal(cache)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(w.cacheFilePath(), data, 0644)
-}
-
-// SetSkipCache implements CacheSkipper.
-func (w *Web) SetSkipCache(v bool) { w.SkipCache = v }
-
-// GetCachedRelease returns the cached release if available.
-func (w *Web) GetCachedRelease() *Release {
-	cache := w.loadCache()
-	if cache == nil || cache.AssetURL == "" {
-		return nil
-	}
-	assetName := filepath.Base(cache.AssetURL)
-	return &Release{
-		Version: cache.Version,
-		Assets: []*Asset{{
-			Name: assetName,
-			URL:  cache.AssetURL,
-		}},
-	}
-}
-
-// ClearCache removes the cached data.
-func (w *Web) ClearCache() error {
-	w.pendingCache = nil // Clear pending cache
-	cachePath := w.cacheFilePath()
-	err := os.Remove(cachePath)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	return err
-}
-
-// GetPublishedVersion implements PublishedVersionReader.
-func (w *Web) GetPublishedVersion() string {
-	if cache := w.loadCache(); cache != nil {
-		return cache.LatestPublishedReleaseVersion
-	}
-	return ""
-}
-
-// CommitCache saves the pending cache to disk.
-// This should be called after successful publishing to persist the cache.
-func (w *Web) CommitCache() error {
-	if w.pendingCache == nil {
-		return nil // Nothing to commit
-	}
-	err := w.saveCache(w.pendingCache)
-	if err == nil {
-		w.pendingCache = nil // Clear pending after successful commit
-	}
-	return err
-}
-
 // FetchLatestRelease fetches the latest release from a web source.
 //
 // The method supports four modes:
@@ -210,16 +85,14 @@ func (w *Web) CommitCache() error {
 // 1. Version extraction mode (version + asset_url with {version} template):
 //   - Fetches the URL and extracts version using the configured extractor
 //   - Substitutes {version} in asset_url to get the download URL
-//   - Caches by version - skips if version hasn't changed
 //
 // 2. Asset extraction mode (version + asset extractor):
-//   - Extracts version from page for caching (skips if unchanged)
+//   - Extracts version from page (for the release event) if configured
 //   - Extracts download URL dynamically from page using asset extractor
 //   - Used for sites with dynamic/expiring download URLs (e.g., CDN tokens)
 //
 // 3. Direct URL mode (asset_url only, no version extractor):
 //   - Uses asset_url directly as the download URL
-//   - Uses HTTP caching (ETag/Last-Modified) to detect changes
 //   - Version is extracted from the downloaded APK
 //
 // 4. Direct URL shorthand (release_source: "https://example.com/app.apk"):
@@ -230,25 +103,14 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	var version string
 	var assetURL string
 	var nameURL string // optional override for filename (e.g. resolved redirect target)
-	var newCache *webCache
 
 	if repo.HasAssetExtractor() {
 		// Mode 2: Extract asset URL from page (version optionally extracted too)
-
-		// If version extractor is configured, use it for caching
 		if repo.HasVersionExtractor() {
 			var err error
 			version, err = w.extractVersion(ctx, repo)
 			if err != nil {
 				return nil, fmt.Errorf("failed to extract version: %w", err)
-			}
-
-			// Check cache - if version hasn't changed, skip
-			if !w.SkipCache {
-				cache := w.loadCache()
-				if cache != nil && cache.Version == version {
-					return nil, ErrNotModified
-				}
 			}
 		}
 
@@ -257,11 +119,6 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		assetURL, err = w.extractAssetURL(ctx, repo)
 		if err != nil {
 			return nil, fmt.Errorf("failed to extract asset URL: %w", err)
-		}
-
-		newCache = &webCache{
-			Version:  version, // may be "" if no version extractor
-			AssetURL: assetURL,
 		}
 	} else if repo.HasVersionExtractor() {
 		// Mode 1: Extract version from page, construct asset URL
@@ -273,60 +130,18 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 
 		// Substitute {version} in asset_url
 		assetURL = strings.ReplaceAll(repo.AssetURL, "{version}", version)
-
-		// Check cache - if version hasn't changed, skip
-		if !w.SkipCache {
-			cache := w.loadCache()
-			if cache != nil && cache.Version == version {
-				return nil, ErrNotModified
-			}
-		}
-
-		newCache = &webCache{
-			Version:  version,
-			AssetURL: assetURL,
-		}
 	} else {
-		// Mode 2/3: Direct URL (versionless), use HTTP caching
+		// Mode 2/3: Direct URL (versionless)
 		assetURL = repo.AssetURL
 
-		// Resolve redirects for filename + HTTP cache validation only.
-		// Keep downloading from the original URL so tokenized CDN targets
-		// (e.g. telegram.org → telesco.pe?token=...) are minted at GET time.
+		// Resolve redirects for filename purposes only. Keep downloading from the
+		// original URL so tokenized CDN targets (e.g. telegram.org → telesco.pe?token=...)
+		// are minted at GET time.
 		finalURL, err := w.resolveRedirects(ctx, assetURL)
 		if err != nil {
-			return nil, fmt.Errorf("failed to resolve URL: %w", err)
-		}
-
-		// Check for changes using HTTP caching headers (on the final URL)
-		cache := w.loadCache()
-		if !w.SkipCache && cache != nil {
-			modified, etag, lastMod, contentLen, err := w.checkHTTPCacheHeaders(ctx, finalURL, cache.ETag, cache.LastModified, cache.ContentLength)
-			if err != nil {
-				return nil, fmt.Errorf("failed to check for updates: %w", err)
-			}
-			if !modified {
-				return nil, ErrNotModified
-			}
-			// Store new headers for later commit
-			newCache = &webCache{
-				ETag:          etag,
-				LastModified:  lastMod,
-				ContentLength: contentLen,
-			}
-		} else {
-			// No cache, fetch headers for future use
-			_, etag, lastMod, contentLen, err := w.checkHTTPCacheHeaders(ctx, finalURL, "", "", 0)
-			if err != nil {
-				// Non-fatal - we can still download without caching
-				newCache = &webCache{}
-			} else {
-				newCache = &webCache{
-					ETag:          etag,
-					LastModified:  lastMod,
-					ContentLength: contentLen,
-				}
-			}
+			// HEAD is only a filename optimization. Some otherwise valid APK
+			// endpoints reject it, while the authoritative GET succeeds.
+			finalURL = assetURL
 		}
 
 		// Filename from redirect target (e.g. Telegram.apk); download still uses assetURL
@@ -336,17 +151,10 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		version = ""
 	}
 
-	// Store cache for later commit
-	if newCache != nil {
-		newCache.LatestPublishedReleaseVersion = version
-	}
-	w.pendingCache = newCache
-
 	// Create asset
-	// Exclude original URL from event when it shouldn't be advertised:
-	// - Asset extractor: URL is dynamic/expiring (CDN tokens, etc.)
-	// - No {version} placeholder in asset_url: URL is static, only Blossom URL should be used
-	excludeURL := repo.HasAssetExtractor() || !repo.HasVersionPlaceholder()
+	// An extracted URL is runtime-derived and may be short-lived. A static
+	// source URL remains publishable even when it has no version placeholder.
+	excludeURL := repo.HasAssetExtractor()
 
 	// Extract filename from URL path (without query parameters).
 	// nameURL may be the redirect target when the download URL itself is generic.
@@ -390,9 +198,11 @@ func (w *Web) extractAssetURL(ctx context.Context, repo *config.ReleaseSource) (
 		return "", err
 	}
 
-	// Validate that the extracted value looks like a URL
-	if !strings.HasPrefix(assetURL, "http://") && !strings.HasPrefix(assetURL, "https://") {
-		return "", fmt.Errorf("extracted asset value %q is not a valid URL", assetURL)
+	// An extracted asset URL is not an explicit configuration value, but it
+	// must satisfy the same HTTPS-outside-loopback rule so a compromised or
+	// misconfigured page cannot redirect the download to an insecure target.
+	if err := validateDownloadURL(assetURL); err != nil {
+		return "", fmt.Errorf("extracted asset value %q is not a valid download URL: %w", assetURL, err)
 	}
 
 	return assetURL, nil
@@ -478,12 +288,9 @@ func (w *Web) extractVersionJSON(ctx context.Context, v *config.VersionExtractor
 		return "", err
 	}
 
-	// Security: Limit response size to prevent memory exhaustion
-	limitedReader := io.LimitReader(resp.Body, MaxRemoteDownloadSize)
-
-	// Parse JSON
+	// Parse a bounded response.
 	var data interface{}
-	if err := json.NewDecoder(limitedReader).Decode(&data); err != nil {
+	if err := decodeJSONResponse(resp, MaxJSONResponseSize, &data); err != nil {
 		return "", fmt.Errorf("failed to parse JSON: %w", err)
 	}
 
@@ -519,16 +326,9 @@ func (w *Web) extractVersionJSON(ctx context.Context, v *config.VersionExtractor
 // extractVersionHeader extracts version from HTTP redirect headers.
 func (w *Web) extractVersionHeader(ctx context.Context, v *config.VersionExtractor) (string, error) {
 	// Don't follow redirects - we want to capture the redirect header
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				MinVersion: tls.VersionTLS12,
-			},
-		},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse // Stop at first redirect
-		},
+	client := newSecureHTTPClient(30 * time.Second)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse // Stop at first redirect
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", v.URL, nil)
@@ -587,101 +387,19 @@ func extractWithPattern(value, pattern string) (string, error) {
 	return matches[1], nil
 }
 
-// checkHTTPCacheHeaders checks if a resource has been modified using ETag/Last-Modified/Content-Length.
-// Returns (modified, newETag, newLastModified, newContentLength, error).
-func (w *Web) checkHTTPCacheHeaders(ctx context.Context, url, etag, lastModified string, contentLength int64) (bool, string, string, int64, error) {
-	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
-	if err != nil {
-		return true, "", "", 0, err
-	}
-
-	// Add conditional headers if we have cached values
-	if etag != "" {
-		req.Header.Set("If-None-Match", etag)
-	}
-	if lastModified != "" {
-		req.Header.Set("If-Modified-Since", lastModified)
-	}
-
-	resp, err := w.client.Do(req)
-	if err != nil {
-		return true, "", "", 0, fmt.Errorf("HEAD request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// 304 Not Modified means resource hasn't changed
-	if resp.StatusCode == http.StatusNotModified {
-		return false, etag, lastModified, contentLength, nil
-	}
-
-	// Get new caching headers
-	newETag := resp.Header.Get("ETag")
-	newLastMod := resp.Header.Get("Last-Modified")
-	newContentLen := resp.ContentLength
-
-	// If we had old values and they match new ones, not modified
-	if etag != "" && newETag != "" && etag == newETag {
-		return false, newETag, newLastMod, newContentLen, nil
-	}
-	if lastModified != "" && newLastMod != "" && lastModified == newLastMod {
-		return false, newETag, newLastMod, newContentLen, nil
-	}
-
-	// Fallback: check Content-Length if no ETag/Last-Modified available
-	if etag == "" && lastModified == "" && contentLength > 0 && newContentLen > 0 {
-		if contentLength == newContentLen {
-			return false, newETag, newLastMod, newContentLen, nil
-		}
-	}
-
-	return true, newETag, newLastMod, newContentLen, nil
-}
-
 // Download downloads an APK from the web.
-// Uses a download cache to avoid re-downloading the same file.
 func (w *Web) Download(ctx context.Context, asset *Asset, destDir string, progress DownloadProgress) (string, error) {
 	if asset.URL == "" {
 		return "", fmt.Errorf("asset has no download URL")
 	}
 
-	// Check download cache first
-	if cachedPath := GetCachedDownload(asset.URL, asset.Name); cachedPath != "" {
-		asset.LocalPath = cachedPath
-		return cachedPath, nil
-	}
-
-	// Create destination directory if needed
-	if destDir == "" {
-		destDir = os.TempDir()
-	}
-	if err := os.MkdirAll(destDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create destination directory: %w", err)
-	}
-
-	// Security: Sanitize filename to prevent path traversal attacks
-	safeName := filepath.Base(asset.Name)
-	if safeName == "." || safeName == ".." || safeName == "" {
-		return "", fmt.Errorf("invalid asset filename: %s", asset.Name)
-	}
-	destPath := filepath.Join(destDir, safeName)
-
-	// Security: Validate the final path is within destDir
-	cleanDest := filepath.Clean(destPath)
-	cleanDir := filepath.Clean(destDir)
-	if !strings.HasPrefix(cleanDest, cleanDir+string(filepath.Separator)) && cleanDest != cleanDir {
-		return "", fmt.Errorf("invalid destination path: path traversal detected")
-	}
-
-	if err := DownloadHTTP(ctx, w.client, asset.URL, destPath, asset.Size, progress); err != nil {
+	destPath, err := prepareDownloadDest(destDir, asset.Name)
+	if err != nil {
 		return "", err
 	}
 
-	// Save to download cache (best-effort, ignore errors) unless skipped
-	if !w.SkipDownloadCache {
-		if cachedPath, err := SaveToDownloadCache(asset.URL, asset.Name, destPath); err == nil {
-			os.Remove(destPath)
-			destPath = cachedPath
-		}
+	if err := DownloadHTTP(ctx, asset.URL, destPath, asset.Size, nil, progress); err != nil {
+		return "", err
 	}
 
 	asset.LocalPath = destPath

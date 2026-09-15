@@ -2,8 +2,10 @@ package source
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -147,6 +149,15 @@ func TestDefaultMetadataSources(t *testing.T) {
 	}
 }
 
+func TestDefaultMetadataSourcesPreservesExplicitOrder(t *testing.T) {
+	configured := []string{"github", "playstore", "fdroid", "github"}
+	got := DefaultMetadataSources(&config.Config{MetadataSources: configured})
+	want := []string{"github", "playstore", "fdroid"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("DefaultMetadataSources() = %v, want %v", got, want)
+	}
+}
+
 // TestMetadataFetcherCreation tests MetadataFetcher creation
 func TestMetadataFetcherCreation(t *testing.T) {
 	cfg := &config.Config{
@@ -164,6 +175,16 @@ func TestMetadataFetcherCreation(t *testing.T) {
 	}
 	if fetcherWithPkg.PackageID != "com.aeonbtc.mempal" {
 		t.Errorf("PackageID = %q, want %q", fetcherWithPkg.PackageID, "com.aeonbtc.mempal")
+	}
+}
+
+func TestFetchMetadataStopsWhenContextIsCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	fetcher := NewMetadataFetcher(&config.Config{Repository: "https://github.com/example/app"})
+	result := fetcher.FetchMetadataWithResult(ctx, []string{"github", "playstore"})
+	if len(result.Errors) != 1 || !errors.Is(result.Errors[0].Err, context.Canceled) {
+		t.Fatalf("metadata errors = %v, want one cancellation", result.Errors)
 	}
 }
 
@@ -279,6 +300,30 @@ func testResponse(status int, body string) *http.Response {
 		StatusCode: status,
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+func TestFetchGiteaMetadata(t *testing.T) {
+	fetcher := NewMetadataFetcher(&config.Config{Repository: "https://codeberg.org/owner/app"})
+	fetcher.client = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() != "https://codeberg.org/api/v1/repos/owner/app" {
+			t.Fatalf("request URL = %q", req.URL)
+		}
+		return testResponse(http.StatusOK, `{
+			"name":"Example",
+			"description":"A Gitea application",
+			"website":"https://example.com",
+			"topics":["android","nostr"]
+		}`), nil
+	})}
+
+	meta, err := fetcher.fetchGiteaMetadata(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Name != "Example" || meta.Description != "A Gitea application" ||
+		meta.Website != "https://example.com" || !slices.Equal(meta.Tags, []string{"android", "nostr"}) {
+		t.Fatalf("metadata = %+v", meta)
 	}
 }
 

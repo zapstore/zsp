@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/zapstore/zsp/internal/config"
 )
@@ -63,7 +64,7 @@ func (l *Local) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	// Filter to only .apk files
 	var apkFiles []string
 	for _, m := range matches {
-		if filepath.Ext(m) == ".apk" {
+		if strings.EqualFold(filepath.Ext(m), ".apk") {
 			apkFiles = append(apkFiles, m)
 		}
 	}
@@ -118,4 +119,3 @@ func (l *Local) Download(ctx context.Context, asset *Asset, destDir string, prog
 
 	return asset.LocalPath, nil
 }
-

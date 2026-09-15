@@ -3,17 +3,15 @@ package nostr
 
 import (
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/zapstore/zsp/internal/apk"
 	"github.com/zapstore/zsp/internal/config"
 )
-
-// DefaultCommunity is the h-tag value used when config does not set communities.
-// Zapstore catalog community (32-byte secp256k1 pubkey, lowercase hex).
-const DefaultCommunity = "acfeaea6e51420e8068fac446ca9d17d7a9ef6a5d20d93894e50fee3d4902a84"
 
 // Event kinds for Zapstore
 const (
@@ -39,7 +37,6 @@ type AppMetadata struct {
 	IconURL     string   // Blossom URL for icon
 	ImageURLs   []string // Screenshot URLs
 	Platforms   []string // Platform identifiers (e.g., "android-arm64-v8a")
-	Communities []string // h tag values; defaults to [DefaultCommunity] if empty
 }
 
 // ReleaseMetadata contains Software Release metadata (kind 30063).
@@ -68,7 +65,6 @@ type AssetMetadata struct {
 	TargetSDK             int32
 	Platforms             []string // Full platform identifiers (e.g., "android-arm64-v8a")
 	Filename              string   // Original filename (for variant detection)
-	Variant               string   // Explicit variant name (e.g., "fdroid", "google")
 	Commit                string   // Git commit hash for reproducible builds
 	SupportedNIPs         []string // Supported Nostr NIPs
 	MinAllowedVersion     string   // Minimum allowed version string
@@ -96,10 +92,10 @@ func BuildAppMetadataEvent(meta *AppMetadata, pubkey string) *nostr.Event {
 	if meta.IconURL != "" {
 		tags = append(tags, nostr.Tag{"icon", meta.IconURL})
 	}
-	for _, url := range meta.ImageURLs {
+	for _, url := range canonicalStrings(meta.ImageURLs) {
 		tags = append(tags, nostr.Tag{"image", url})
 	}
-	for _, tag := range meta.Tags {
+	for _, tag := range canonicalStrings(meta.Tags) {
 		tags = append(tags, nostr.Tag{"t", tag})
 	}
 	if meta.Website != "" {
@@ -117,20 +113,11 @@ func BuildAppMetadataEvent(meta *AppMetadata, pubkey string) *nostr.Event {
 		}
 	}
 	// Platform identifiers (f tags) - REQUIRED per NIP-82
-	for _, platform := range meta.Platforms {
+	for _, platform := range canonicalStrings(meta.Platforms) {
 		tags = append(tags, nostr.Tag{"f", platform})
 	}
 	if meta.License != "" {
 		tags = append(tags, nostr.Tag{"license", meta.License})
-	}
-
-	// h tags: community identifiers
-	communities := meta.Communities
-	if len(communities) == 0 {
-		communities = []string{DefaultCommunity}
-	}
-	for _, c := range communities {
-		tags = append(tags, nostr.Tag{"h", c})
 	}
 
 	return &nostr.Event{
@@ -164,19 +151,21 @@ func BuildReleaseEvent(meta *ReleaseMetadata, pubkey string) *nostr.Event {
 	version := versionOrCode(meta.Version, meta.VersionCode)
 
 	tags = append(tags,
+		nostr.Tag{"a", "32267:" + pubkey + ":" + meta.PackageID},
 		nostr.Tag{"i", meta.PackageID},
 		nostr.Tag{"version", version},
+		nostr.Tag{"version_code", strconv.FormatInt(meta.VersionCode, 10)},
 		nostr.Tag{"d", meta.PackageID + "@" + version},
 		nostr.Tag{"c", channel},
 	)
 
 	// Platform identifiers (f tags) - same as kind 32267
-	for _, platform := range meta.Platforms {
+	for _, platform := range canonicalStrings(meta.Platforms) {
 		tags = append(tags, nostr.Tag{"f", platform})
 	}
 
 	// Asset event references (e tags)
-	for _, eventID := range meta.AssetEventIDs {
+	for _, eventID := range canonicalStrings(meta.AssetEventIDs) {
 		if meta.AssetRelayHint != "" {
 			tags = append(tags, nostr.Tag{"e", eventID, meta.AssetRelayHint})
 		} else {
@@ -204,7 +193,7 @@ func BuildSoftwareAssetEvent(meta *AssetMetadata, pubkey string) *nostr.Event {
 	)
 
 	// Download URLs
-	for _, url := range meta.URLs {
+	for _, url := range canonicalStrings(meta.URLs) {
 		tags = append(tags, nostr.Tag{"url", url})
 	}
 
@@ -217,7 +206,7 @@ func BuildSoftwareAssetEvent(meta *AssetMetadata, pubkey string) *nostr.Event {
 	}
 
 	// Platform identifiers (f tags) - REQUIRED per NIP-82
-	for _, platform := range meta.Platforms {
+	for _, platform := range canonicalStrings(meta.Platforms) {
 		tags = append(tags, nostr.Tag{"f", platform})
 	}
 
@@ -234,18 +223,13 @@ func BuildSoftwareAssetEvent(meta *AssetMetadata, pubkey string) *nostr.Event {
 		tags = append(tags, nostr.Tag{"filename", meta.Filename})
 	}
 
-	// Explicit variant name
-	if meta.Variant != "" {
-		tags = append(tags, nostr.Tag{"variant", meta.Variant})
-	}
-
 	// Git commit hash for reproducible builds
 	if meta.Commit != "" {
 		tags = append(tags, nostr.Tag{"commit", meta.Commit})
 	}
 
 	// Supported NIPs
-	for _, nip := range meta.SupportedNIPs {
+	for _, nip := range canonicalStrings(meta.SupportedNIPs) {
 		tags = append(tags, nostr.Tag{"supported_nip", nip})
 	}
 
@@ -275,11 +259,15 @@ func BuildSoftwareAssetEvent(meta *AssetMetadata, pubkey string) *nostr.Event {
 }
 
 // BuildBlossomAuthEvent creates a kind 24242 event for Blossom upload authorization.
-func BuildBlossomAuthEvent(fileHash string, pubkey string, expiration time.Time) *nostr.Event {
+// server is the lowercase Blossom host when the authorization is server-scoped.
+func BuildBlossomAuthEvent(fileHash string, pubkey string, expiration time.Time, server ...string) *nostr.Event {
 	tags := nostr.Tags{
 		{"t", "upload"},
 		{"x", fileHash},
 		{"expiration", strconv.FormatInt(expiration.Unix(), 10)},
+	}
+	if len(server) > 0 && server[0] != "" {
+		tags = append(tags, nostr.Tag{"server", server[0]})
 	}
 
 	return &nostr.Event{
@@ -307,17 +295,27 @@ func archToPlatform(arch string) string {
 	}
 }
 
+func canonicalStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := append([]string(nil), values...)
+	sort.Strings(result)
+	return compactStrings(result)
+}
+
 // BuildEventSetParams contains parameters for building an event set.
 type BuildEventSetParams struct {
-	APKInfo          *apk.APKInfo
-	Config           *config.Config
-	Pubkey           string
-	OriginalURL      string // Original download URL (from release source)
-	BlossomServer    string // Blossom server URL (fallback when OriginalURL is empty)
+	APKInfo     *apk.APKInfo
+	Config      *config.Config
+	Pubkey      string
+	OriginalURL string // Original download URL (from release source)
+	// BlossomURL is retained for source compatibility. Asset URL tags are
+	// deliberately built from OriginalURL only.
+	BlossomURL       string
 	IconURL          string
 	ImageURLs        []string
 	Changelog        string    // Release notes (from remote source or local file)
-	Variant          string    // Explicit variant name (from config variants map)
 	Commit           string    // Git commit hash for reproducible builds
 	Channel          string    // Release channel: main (default), beta, nightly, dev
 	ReleaseTimestamp time.Time // Release publish date (zero means use current time)
@@ -331,8 +329,6 @@ type BuildEventSetParams struct {
 }
 
 // BuildEventSet creates all events for an APK release.
-// The Release event's asset references (e tags) are populated by SignEventSet
-// after the asset event is signed.
 func BuildEventSet(params BuildEventSetParams) *EventSet {
 	apkInfo := params.APKInfo
 	cfg := params.Config
@@ -346,27 +342,22 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		name = apkInfo.PackageID
 	}
 
-	// Build APK URLs - include original URL and/or Blossom URL
+	// Asset events may contain a stable source URL. Blossom discovery uses the
+	// content hash and configured server, so publishing its derived URL here
+	// would create a second, non-source URL tag.
 	var apkURLs []string
 	if params.OriginalURL != "" {
 		apkURLs = append(apkURLs, params.OriginalURL)
 	}
-	// Always include Blossom URL as fallback (or primary if no original URL)
-	if params.BlossomServer != "" && apkInfo.SHA256 != "" {
-		blossomURL := params.BlossomServer + "/" + apkInfo.SHA256
-		apkURLs = append(apkURLs, blossomURL)
-	}
-
 	// Convert architectures to platform identifiers
 	platforms := make([]string, 0, len(apkInfo.Architectures))
 	for _, arch := range apkInfo.Architectures {
 		platforms = append(platforms, archToPlatform(arch))
 	}
-	// If no native libs, it's architecture-independent - support all Android platforms
-	if len(platforms) == 0 {
-		platforms = []string{"android-arm64-v8a", "android-armeabi-v7a", "android-x86", "android-x86_64"}
+	sort.Strings(platforms)
+	if len(platforms) > 0 {
+		platforms = compactStrings(platforms)
 	}
-
 	// Build NIP-34 repository pointer if available
 	var nip34Repo, nip34Relay string
 	if cfg.NIP34Repo != nil {
@@ -392,7 +383,6 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		IconURL:     params.IconURL,
 		ImageURLs:   params.ImageURLs,
 		Platforms:   platforms,
-		Communities: cfg.Communities,
 	}
 
 	// Determine release channel (default: main)
@@ -402,14 +392,13 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 	}
 
 	// Software Release event
-	// AssetEventIDs will be populated by SignEventSet after asset is signed
 	releaseMeta := &ReleaseMetadata{
 		PackageID:     apkInfo.PackageID,
 		Version:       apkInfo.VersionName,
 		VersionCode:   apkInfo.VersionCode,
 		Changelog:     params.Changelog,
 		Channel:       channel,
-		AssetEventIDs: []string{}, // Populated after signing
+		AssetEventIDs: []string{},
 		Commit:        params.Commit,
 		Platforms:     platforms,
 	}
@@ -427,7 +416,6 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		TargetSDK:             apkInfo.TargetSDK,
 		Platforms:             platforms,
 		Filename:              filepath.Base(apkInfo.FilePath),
-		Variant:               params.Variant,
 		Commit:                params.Commit,
 		SupportedNIPs:         cfg.SupportedNIPs,
 		MinAllowedVersion:     cfg.MinAllowedVersion,
@@ -439,6 +427,7 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		Release:        BuildReleaseEvent(releaseMeta, params.Pubkey),
 		SoftwareAssets: []*nostr.Event{BuildSoftwareAssetEvent(assetMeta, params.Pubkey)},
 	}
+	eventSet.UpdateReleasePlatforms()
 
 	// If a release timestamp is provided, use it for release and asset events
 	// by default. Optionally, app metadata can also use the release timestamp.
@@ -470,7 +459,6 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 }
 
 // AddAssetReference adds an asset event ID reference to the Release event.
-// This must be called after the asset event is signed but before the release is signed.
 func (es *EventSet) AddAssetReference(assetEventID string, relayHint string) {
 	if relayHint != "" {
 		es.Release.Tags = append(es.Release.Tags, nostr.Tag{"e", assetEventID, relayHint})
@@ -479,17 +467,59 @@ func (es *EventSet) AddAssetReference(assetEventID string, relayHint string) {
 	}
 }
 
-// AddAssetReferences adds all asset event ID references to the Release event.
-// This must be called after the asset events are signed but before the release is signed.
-func (es *EventSet) AddAssetReferences(relayHint string) {
-	for _, asset := range es.SoftwareAssets {
-		es.AddAssetReference(asset.ID, relayHint)
+// FinalizeEventSet fills every deterministic event ID and release reference
+// before preview or signing. Signing must not change the resulting event body.
+func FinalizeEventSet(events *EventSet, relayHint string) {
+	events.SetApplicationRelayHint(relayHint)
+	for _, asset := range events.SoftwareAssets {
+		asset.ID = asset.GetID()
+		events.AddAssetReference(asset.ID, relayHint)
+	}
+	events.Release.ID = events.Release.GetID()
+	if events.AppMetadata != nil {
+		events.AppMetadata.ID = events.AppMetadata.GetID()
+	}
+	if events.IdentityProof != nil {
+		events.IdentityProof.ID = events.IdentityProof.GetID()
+	}
+}
+
+// SetApplicationRelayHint adds the configured publication relay to the
+// release event's required application coordinate.
+func (es *EventSet) SetApplicationRelayHint(relayHint string) {
+	if relayHint == "" {
+		return
+	}
+	for index, tag := range es.Release.Tags {
+		if len(tag) >= 2 && tag[0] == "a" {
+			es.Release.Tags[index] = nostr.Tag{"a", tag[1], relayHint}
+			return
+		}
+	}
+}
+
+// SetApplicationPubkey points the release at an existing application event
+// owner without changing the release signer's pubkey.
+func (es *EventSet) SetApplicationPubkey(pubkey string) {
+	if pubkey == "" {
+		return
+	}
+	for index, tag := range es.Release.Tags {
+		if len(tag) >= 2 && tag[0] == "a" {
+			parts := strings.SplitN(tag[1], ":", 3)
+			if len(parts) != 3 {
+				return
+			}
+			tag[1] = parts[0] + ":" + pubkey + ":" + parts[2]
+			es.Release.Tags[index] = tag
+			return
+		}
 	}
 }
 
 // UpdateReleasePlatforms aggregates platform identifiers (f tags) from all Software Assets
 // and updates the Release event. This should be called after all assets are added to the EventSet
-// but before the Release event is signed. This is useful when publishing multiple APK variants
+// but before the Release event is signed. This is useful when publishing multiple APK assets
 // in a single release, where each asset may support different architectures.
 func (es *EventSet) UpdateReleasePlatforms() {
 	// Collect unique platforms from all assets
@@ -521,7 +551,12 @@ func (es *EventSet) UpdateReleasePlatforms() {
 	}
 
 	// Insert f tags at the correct position
+	platforms := make([]string, 0, len(platformSet))
 	for platform := range platformSet {
+		platforms = append(platforms, platform)
+	}
+	sort.Strings(platforms)
+	for _, platform := range platforms {
 		fTag := nostr.Tag{"f", platform}
 		newTags = append(newTags[:insertPos], append(nostr.Tags{fTag}, newTags[insertPos:]...)...)
 		insertPos++

@@ -88,7 +88,7 @@ func (f *MetadataFetcher) githubContents(ctx context.Context, repoPath, path str
 		return nil, fmt.Errorf("creating GitHub Fastlane request: %w", err)
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+	if token := config.GetEnv("GITHUB_TOKEN"); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 

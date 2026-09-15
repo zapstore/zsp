@@ -3,13 +3,10 @@ package source
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -33,22 +30,15 @@ const gitlabExternalRedirectMarker = "You are being redirected away from GitLab"
 // gitlabExternalRedirectHref matches the external target link on that page.
 var gitlabExternalRedirectHref = regexp.MustCompile(`(?i)href=["'](https?://[^"']+)["']`)
 
-// gitlabCache stores the last successfully published release version.
-type gitlabCache struct {
-	LatestPublishedReleaseVersion string `json:"latest_published_release_version,omitempty"`
-}
-
 // GitLab implements Source for GitLab releases.
 // Supports both gitlab.com and self-hosted GitLab instances.
 type GitLab struct {
-	cfg               *config.Config
-	baseURL           string // e.g., "https://gitlab.com" or self-hosted URL
-	projectID         string // URL-encoded project path (e.g., "user%2Frepo")
-	numericProjectID  int    // GitLab numeric project id (needed for /-/project/:id/uploads/ URLs)
-	client            *http.Client
-	cacheDir          string
-	pendingVersion    string
-	SkipDownloadCache bool // Set to true to skip saving APKs to download cache
+	cfg                *config.Config
+	baseURL            string // e.g., "https://gitlab.com" or self-hosted URL
+	projectID          string // URL-encoded project path (e.g., "user%2Frepo")
+	numericProjectID   int    // GitLab numeric project id (needed for /-/project/:id/uploads/ URLs)
+	client             *http.Client
+	IncludePreReleases bool
 }
 
 // NewGitLab creates a new GitLab source.
@@ -69,68 +59,12 @@ func NewGitLab(cfg *config.Config) (*GitLab, error) {
 	// URL-encode the project path for API calls
 	projectID := url.PathEscape(repoPath)
 
-	cacheDir, err := os.UserCacheDir()
-	if err != nil {
-		cacheDir = os.TempDir()
-	}
-	cacheDir = filepath.Join(cacheDir, "zsp", "gitlab")
-
 	return &GitLab{
 		cfg:       cfg,
 		baseURL:   baseURL,
 		projectID: projectID,
 		client:    newSecureHTTPClient(30 * time.Second),
-		cacheDir:  cacheDir,
 	}, nil
-}
-
-func (g *GitLab) cacheFilePath() string {
-	name, _ := url.PathUnescape(g.projectID)
-	name = strings.ReplaceAll(name, "/", "_")
-	return filepath.Join(g.cacheDir, name+".json")
-}
-
-func (g *GitLab) loadCache() *gitlabCache {
-	data, err := os.ReadFile(g.cacheFilePath())
-	if err != nil {
-		return nil
-	}
-	var cache gitlabCache
-	if err := json.Unmarshal(data, &cache); err != nil {
-		return nil
-	}
-	return &cache
-}
-
-func (g *GitLab) saveCache(cache *gitlabCache) error {
-	if err := os.MkdirAll(g.cacheDir, 0755); err != nil {
-		return err
-	}
-	data, err := json.Marshal(cache)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(g.cacheFilePath(), data, 0644)
-}
-
-// CommitCache implements CacheCommitter.
-func (g *GitLab) CommitCache() error {
-	if g.pendingVersion == "" {
-		return nil
-	}
-	err := g.saveCache(&gitlabCache{LatestPublishedReleaseVersion: g.pendingVersion})
-	if err == nil {
-		g.pendingVersion = ""
-	}
-	return err
-}
-
-// GetPublishedVersion returns the last successfully published release version.
-func (g *GitLab) GetPublishedVersion() string {
-	if cache := g.loadCache(); cache != nil {
-		return cache.LatestPublishedReleaseVersion
-	}
-	return ""
 }
 
 // Type returns the source type.
@@ -140,11 +74,12 @@ func (g *GitLab) Type() config.SourceType {
 
 // gitlabRelease represents a GitLab release API response.
 type gitlabRelease struct {
-	TagName     string `json:"tag_name"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	ReleasedAt  string `json:"released_at"`
-	Links       struct {
+	TagName         string `json:"tag_name"`
+	Name            string `json:"name"`
+	Description     string `json:"description"`
+	ReleasedAt      string `json:"released_at"`
+	UpcomingRelease bool   `json:"upcoming_release"`
+	Links           struct {
 		Self string `json:"self"` // Release page URL
 	} `json:"_links"`
 	Assets struct {
@@ -189,12 +124,11 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GitLab API error (status %d): %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("GitLab API error (status %d)", resp.StatusCode)
 	}
 
 	var releases []gitlabRelease
-	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+	if err := decodeJSONResponse(resp, MaxJSONResponseSize, &releases); err != nil {
 		return nil, fmt.Errorf("failed to parse releases: %w", err)
 	}
 
@@ -204,12 +138,14 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 
 	// Find the first release with valid APKs
 	for _, glRelease := range releases {
-		if !g.matchesReleaseFilter(glRelease.TagName) {
+		if glRelease.UpcomingRelease && !g.IncludePreReleases {
+			continue
+		}
+		if !g.matchesReleaseFilter(glRelease.TagName, glRelease.Name) {
 			continue
 		}
 		release := g.convertRelease(&glRelease)
 		if HasValidAPKs(release.Assets) {
-			g.pendingVersion = release.Version
 			return release, nil
 		}
 	}
@@ -240,14 +176,13 @@ func (g *GitLab) ensureNumericProjectID(ctx context.Context) error {
 		return fmt.Errorf("GitLab project not found or not accessible")
 	}
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("GitLab API error (status %d): %s", resp.StatusCode, string(body))
+		return fmt.Errorf("GitLab API error (status %d)", resp.StatusCode)
 	}
 
 	var project struct {
 		ID int `json:"id"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&project); err != nil {
+	if err := decodeJSONResponse(resp, MaxJSONResponseSize, &project); err != nil {
 		return fmt.Errorf("failed to parse GitLab project: %w", err)
 	}
 	if project.ID <= 0 {
@@ -325,9 +260,6 @@ func (g *GitLab) convertRelease(glRelease *gitlabRelease) *Release {
 	// uploads in the description, with no formal assets.links entries.
 	assets = mergeGitLabAssets(assets, g.descriptionAPKAssets(glRelease.Description))
 
-	// Filter out APKs with unsupported architectures (x86, x86_64, etc.)
-	assets = FilterUnsupportedArchitectures(assets)
-
 	// Extract version from tag name
 	version := strings.TrimPrefix(glRelease.TagName, "v")
 
@@ -342,6 +274,7 @@ func (g *GitLab) convertRelease(glRelease *gitlabRelease) *Release {
 	return &Release{
 		Version:   version,
 		TagName:   glRelease.TagName,
+		Name:      glRelease.Name,
 		Changelog: glRelease.Description,
 		Assets:    assets,
 		URL:       glRelease.Links.Self,
@@ -349,90 +282,27 @@ func (g *GitLab) convertRelease(glRelease *gitlabRelease) *Release {
 	}
 }
 
-// Download downloads an asset from GitLab.
-// Uses a download cache to avoid re-downloading the same file.
+// Download downloads an asset from GitLab, using the shared DownloadHTTP
+// retry/size/stall pipeline while preserving GitLab-specific handling of the
+// external-redirect interstitial page (see doAssetDownload).
 func (g *GitLab) Download(ctx context.Context, asset *Asset, destDir string, progress DownloadProgress) (string, error) {
 	if asset.URL == "" {
 		return "", fmt.Errorf("asset has no download URL")
 	}
-
-	// Check download cache first
-	if cachedPath := GetCachedDownload(asset.URL, asset.Name); cachedPath != "" {
-		asset.LocalPath = cachedPath
-		return cachedPath, nil
+	if err := validateDownloadURL(asset.URL); err != nil {
+		return "", err
 	}
 
-	// Create destination directory if needed
-	if destDir == "" {
-		destDir = os.TempDir()
-	}
-	if err := os.MkdirAll(destDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create destination directory: %w", err)
-	}
-
-	// Security: Sanitize filename to prevent path traversal attacks
-	safeName := filepath.Base(asset.Name)
-	if safeName == "." || safeName == ".." || safeName == "" {
-		return "", fmt.Errorf("invalid asset filename: %s", asset.Name)
-	}
-	destPath := filepath.Join(destDir, safeName)
-
-	// Security: Validate the final path is within destDir
-	cleanDest := filepath.Clean(destPath)
-	cleanDir := filepath.Clean(destDir)
-	if !strings.HasPrefix(cleanDest, cleanDir+string(filepath.Separator)) && cleanDest != cleanDir {
-		return "", fmt.Errorf("invalid destination path: path traversal detected")
-	}
-
-	// Use download client (no total timeout — only stall detection)
-	dlClient := newDownloadHTTPClient()
-
-	resp, err := g.doAssetDownload(ctx, dlClient, asset.URL)
+	destPath, err := prepareDownloadDest(destDir, asset.Name)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
 
-	// Use Content-Length from response if available, otherwise use asset size
-	total := resp.ContentLength
-	if total <= 0 {
-		total = asset.Size
+	fetch := func(ctx context.Context) (*http.Response, error) {
+		return g.doAssetDownload(ctx, newDownloadHTTPClient(), asset.URL)
 	}
-
-	// Create destination file
-	f, err := os.Create(destPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to create file: %w", err)
-	}
-	defer f.Close()
-
-	// Wrap body with stall timeout — fails only if no data received for 30s
-	var reader io.Reader = &StallTimeoutReader{
-		Reader:  resp.Body,
-		Timeout: downloadStallTimeout,
-	}
-
-	// Wrap with progress tracking if callback provided
-	if progress != nil && total > 0 {
-		reader = &ProgressReader{
-			Reader:     reader,
-			Total:      total,
-			OnProgress: progress,
-		}
-	}
-
-	_, err = io.Copy(f, reader)
-	if err != nil {
-		os.Remove(destPath)
-		return "", fmt.Errorf("failed to write file: %w", err)
-	}
-
-	// Save to download cache (best-effort, ignore errors) unless skipped
-	if !g.SkipDownloadCache {
-		if cachedPath, err := SaveToDownloadCache(asset.URL, asset.Name, destPath); err == nil {
-			os.Remove(destPath)
-			destPath = cachedPath
-		}
+	if err := downloadWithRetries(ctx, destPath, asset.Size, progress, fetch); err != nil {
+		return "", err
 	}
 
 	asset.LocalPath = destPath
@@ -441,8 +311,11 @@ func (g *GitLab) Download(ctx context.Context, asset *Asset, destDir string, pro
 
 // doAssetDownload GETs url and, when GitLab returns its external-redirect
 // interstitial (HTTP 200 HTML, no Location), follows the embedded href once.
+// The returned response's body holds the actual asset bytes; the caller
+// (downloadWithRetries, via writeDownloadResponse) applies the shared size
+// limit and stall detection when streaming it to disk.
 func (g *GitLab) doAssetDownload(ctx context.Context, client *http.Client, downloadURL string) (*http.Response, error) {
-	resp, err := getOK(ctx, client, downloadURL)
+	resp, err := doGet(ctx, client, downloadURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -457,7 +330,10 @@ func (g *GitLab) doAssetDownload(ctx context.Context, client *http.Client, downl
 	}
 
 	resp.Body.Close()
-	resp, err = getOK(ctx, client, externalURL)
+	if err := validateDownloadURL(externalURL); err != nil {
+		return nil, fmt.Errorf("follow GitLab external redirect: %w", err)
+	}
+	resp, err = doGet(ctx, client, externalURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("follow GitLab external redirect: %w", err)
 	}
@@ -471,22 +347,6 @@ func (g *GitLab) doAssetDownload(ctx context.Context, client *http.Client, downl
 		return nil, fmt.Errorf("GitLab external redirect loop for %s", downloadURL)
 	}
 
-	return resp, nil
-}
-
-func getOK(ctx context.Context, client *http.Client, downloadURL string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := DoWithTorFallback(ctx, client, req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		return nil, fmt.Errorf("download failed with status %d: %s", resp.StatusCode, downloadURL)
-	}
 	return resp, nil
 }
 
@@ -524,7 +384,10 @@ func looksLikeGitLabExternalRedirect(resp *http.Response) bool {
 }
 
 // parseGitLabExternalRedirect extracts the external download URL from GitLab's
-// "redirected away from GitLab" interstitial HTML.
+// "redirected away from GitLab" interstitial HTML. The extracted URL must
+// satisfy the same HTTPS-outside-loopback rule as an explicit configuration
+// URL; doAssetDownload re-validates it before following it, but rejecting an
+// unsafe target here keeps this function's contract self-contained.
 func parseGitLabExternalRedirect(body []byte) (string, bool) {
 	if !strings.Contains(string(body), gitlabExternalRedirectMarker) {
 		return "", false
@@ -534,24 +397,30 @@ func parseGitLabExternalRedirect(body []byte) (string, bool) {
 		return "", false
 	}
 	externalURL := string(match[1])
-	parsed, err := url.Parse(externalURL)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+	if validateDownloadURL(externalURL) != nil {
 		return "", false
 	}
 	return externalURL, true
 }
 
-// matchesReleaseFilter checks if a tag name matches the configured release_filter.
-// Returns true if no filter is configured or if the tag matches the filter.
-func (g *GitLab) matchesReleaseFilter(tagName string) bool {
+// matchesReleaseFilter checks whether a release tag or name matches the filter.
+func (g *GitLab) matchesReleaseFilter(tagName string, names ...string) bool {
 	if g.cfg.ReleaseFilter == "" {
 		return true
 	}
-	matched, err := regexp.MatchString(g.cfg.ReleaseFilter, tagName)
+	re, err := regexp.Compile(g.cfg.ReleaseFilter)
 	if err != nil {
 		return false
 	}
-	return matched
+	if re.MatchString(tagName) {
+		return true
+	}
+	for _, name := range names {
+		if re.MatchString(name) {
+			return true
+		}
+	}
+	return false
 }
 
 // descriptionAPKAssets extracts APK assets from markdown links in a release description.

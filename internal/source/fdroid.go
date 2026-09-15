@@ -2,15 +2,11 @@ package source
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"time"
 
@@ -18,27 +14,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// fdroidIndexCache stores the ETag and parsed package versions for a repo index.
-// Keyed on the index URL so all packages from the same repo share one cached file.
-type fdroidIndexCache struct {
-	ETag                          string                            `json:"etag"`
-	Packages                      map[string][]fdroidPackageVersion `json:"packages"`
-	LatestPublishedReleaseVersion string                            `json:"latest_published_release_version,omitempty"`
-}
-
 // FDroid implements Source for F-Droid compatible repositories.
 // Supports: f-droid.org, IzzyOnDroid (apt.izzysoft.de), and other F-Droid repos.
 type FDroid struct {
-	cfg               *config.Config
-	repoInfo          *config.FDroidRepoInfo
-	client            *http.Client
-	cacheDir          string
-	SkipCache         bool
-	SkipDownloadCache bool // Set to true to skip saving APKs to download cache
-
-	// pending holds cache data from the last fetch, not yet committed to disk.
-	pending *fdroidIndexCache
+	cfg      *config.Config
+	repoInfo *config.FDroidRepoInfo
+	client   *http.Client
 }
+
+// MaxFDroidIndexSize limits repository indexes while allowing large legitimate indexes.
+const MaxFDroidIndexSize int64 = 100 * 1024 * 1024
 
 // NewFDroid creates a new F-Droid source.
 func NewFDroid(cfg *config.Config) (*FDroid, error) {
@@ -48,85 +33,11 @@ func NewFDroid(cfg *config.Config) (*FDroid, error) {
 		return nil, fmt.Errorf("invalid F-Droid URL: %s", url)
 	}
 
-	cacheDir, err := os.UserCacheDir()
-	if err != nil {
-		cacheDir = os.TempDir()
-	}
-	cacheDir = filepath.Join(cacheDir, "zsp", "fdroid")
-
 	return &FDroid{
 		cfg:      cfg,
 		repoInfo: repoInfo,
 		client:   newDownloadHTTPClient(), // No total timeout, uses stall detection
-		cacheDir: cacheDir,
 	}, nil
-}
-
-// cacheFilePath returns the path for the cached index file, keyed on the index URL.
-func (f *FDroid) cacheFilePath() string {
-	h := sha256.Sum256([]byte(f.repoInfo.IndexURL))
-	return filepath.Join(f.cacheDir, hex.EncodeToString(h[:8])+".json")
-}
-
-// loadCache reads the cached index from disk.
-func (f *FDroid) loadCache() *fdroidIndexCache {
-	data, err := os.ReadFile(f.cacheFilePath())
-	if err != nil {
-		return nil
-	}
-	var cache fdroidIndexCache
-	if err := json.Unmarshal(data, &cache); err != nil {
-		return nil
-	}
-	return &cache
-}
-
-// saveCache writes the index cache to disk.
-func (f *FDroid) saveCache(cache *fdroidIndexCache) error {
-	if err := os.MkdirAll(f.cacheDir, 0755); err != nil {
-		return err
-	}
-	data, err := json.Marshal(cache)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(f.cacheFilePath(), data, 0644)
-}
-
-// CommitCache persists the pending cache to disk after successful publishing.
-func (f *FDroid) CommitCache() error {
-	if f.pending == nil {
-		return nil
-	}
-	err := f.saveCache(f.pending)
-	if err == nil {
-		f.pending = nil
-	}
-	return err
-}
-
-// GetPublishedVersion implements PublishedVersionReader.
-func (f *FDroid) GetPublishedVersion() string {
-	if cache := f.loadCache(); cache != nil {
-		return cache.LatestPublishedReleaseVersion
-	}
-	return ""
-}
-
-// SetSkipCache implements CacheSkipper.
-func (f *FDroid) SetSkipCache(v bool) { f.SkipCache = v }
-
-// GetCachedRelease returns the cached release for this package if available.
-func (f *FDroid) GetCachedRelease() *Release {
-	cache := f.loadCache()
-	if cache == nil {
-		return nil
-	}
-	version, err := f.selectVersion(cache.Packages)
-	if err != nil {
-		return nil
-	}
-	return f.buildRelease(version)
 }
 
 // Type returns the source type.
@@ -169,25 +80,23 @@ type fdroidMetadata struct {
 	Description  string   `yaml:"Description"`
 }
 
-// FetchLatestRelease fetches the latest release from an F-Droid compatible repository.
-// For repos with a per-package API (f-droid.org), uses a lightweight API call.
-// For others (IzzyOnDroid), fetches the shared index with ETag caching to avoid
-// re-downloading the full 14–50 MB file when unchanged.
+// FetchLatestRelease fetches the latest release from an F-Droid compatible repository
+// by downloading the shared repo index and selecting this package's best version.
 func (f *FDroid) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	version, err := f.fetchLatestVersion(ctx)
 	if err != nil {
 		return nil, err
-	}
-	if f.pending != nil && version != nil {
-		f.pending.LatestPublishedReleaseVersion = version.VersionName
 	}
 	return f.buildRelease(version), nil
 }
 
 // buildRelease constructs a Release from a parsed package version entry.
 func (f *FDroid) buildRelease(version *fdroidPackageVersion) *Release {
-	apkURL := fmt.Sprintf("%s/%s_%d.apk", f.repoInfo.RepoURL, f.repoInfo.PackageID, version.VersionCode)
-	apkName := fmt.Sprintf("%s_%d.apk", f.repoInfo.PackageID, version.VersionCode)
+	apkName := version.ApkName
+	if apkName == "" {
+		apkName = fmt.Sprintf("%s_%d.apk", f.repoInfo.PackageID, version.VersionCode)
+	}
+	apkURL := fmt.Sprintf("%s/%s", f.repoInfo.RepoURL, apkName)
 
 	var createdAt time.Time
 	if version.Added > 0 {
@@ -207,27 +116,18 @@ func (f *FDroid) buildRelease(version *fdroidPackageVersion) *Release {
 	}
 }
 
-// fetchLatestVersion fetches the latest version for this package from the shared repo
-// index, using a disk-cached ETag to avoid re-downloading the full index when unchanged.
+// fetchLatestVersion fetches the latest version for this package by downloading
+// the shared repo index fresh on every call.
 func (f *FDroid) fetchLatestVersion(ctx context.Context) (*fdroidPackageVersion, error) {
 	return f.fetchLatestVersionFromIndex(ctx)
 }
 
-// fetchLatestVersionFromIndex fetches the latest version from the shared repo index,
-// using a disk-cached ETag to avoid re-downloading the full 14–50 MB file when unchanged.
+// fetchLatestVersionFromIndex downloads the shared repo index and selects the
+// best version for this package.
 func (f *FDroid) fetchLatestVersionFromIndex(ctx context.Context) (*fdroidPackageVersion, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", f.repoInfo.IndexURL, nil)
 	if err != nil {
 		return nil, err
-	}
-
-	// Send If-None-Match if we have a cached ETag (unless skipping cache).
-	var cached *fdroidIndexCache
-	if !f.SkipCache {
-		cached = f.loadCache()
-		if cached != nil && cached.ETag != "" {
-			req.Header.Set("If-None-Match", cached.ETag)
-		}
 	}
 
 	resp, err := f.client.Do(req)
@@ -236,22 +136,19 @@ func (f *FDroid) fetchLatestVersionFromIndex(ctx context.Context) (*fdroidPackag
 	}
 	defer resp.Body.Close()
 
-	// Handle 304 Not Modified with ETag cache
-	if resp.StatusCode == http.StatusNotModified && cached != nil {
-		return f.selectVersion(cached.Packages)
-	}
-
 	// Validate HTTP status
 	if err := checkHTTPStatus(resp, "F-Droid repository"); err != nil {
 		return nil, err
 	}
 
-	// Wrap body with stall timeout. F-Droid indexes are large (48+ MB) and can be
-	// slow to download, so we use stall detection (fails only if no data received
-	// for 30s) rather than a total timeout. No size limit - if F-Droid legitimately
-	// has a large index, we download it.
+	if resp.ContentLength > MaxFDroidIndexSize {
+		return nil, fmt.Errorf("repo index exceeds maximum size of %d bytes", MaxFDroidIndexSize)
+	}
+	// F-Droid indexes can be large and slow to download. Use both a generous
+	// size cap and stall detection so an unresponsive or hostile mirror cannot
+	// consume memory or leave the operation blocked indefinitely.
 	reader := &StallTimeoutReader{
-		Reader:  resp.Body,
+		Reader:  io.LimitReader(resp.Body, MaxFDroidIndexSize+1),
 		Timeout: downloadStallTimeout,
 	}
 
@@ -264,16 +161,13 @@ func (f *FDroid) fetchLatestVersionFromIndex(ctx context.Context) (*fdroidPackag
 		}
 		return nil, fmt.Errorf("failed to read repo index: %w", err)
 	}
+	if int64(len(body)) > MaxFDroidIndexSize {
+		return nil, fmt.Errorf("repo index exceeds maximum size of %d bytes", MaxFDroidIndexSize)
+	}
 
 	var index fdroidIndex
 	if err := json.Unmarshal(body, &index); err != nil {
 		return nil, fmt.Errorf("failed to parse repo index: %w", err)
-	}
-
-	// Stage cache for commit after successful publish.
-	etag := resp.Header.Get("ETag")
-	if etag != "" {
-		f.pending = &fdroidIndexCache{ETag: etag, Packages: index.Packages}
 	}
 
 	return f.selectVersion(index.Packages)
@@ -328,90 +222,21 @@ func hasArm64(nativeCodes []string) bool {
 	return false
 }
 
-// Download downloads an APK from F-Droid.
-// Uses a download cache to avoid re-downloading the same file.
+// Download downloads an APK from F-Droid, using the shared DownloadHTTP
+// pipeline (size limit, redirect validation, stall detection, bounded
+// retries). F-Droid repositories require no authentication.
 func (f *FDroid) Download(ctx context.Context, asset *Asset, destDir string, progress DownloadProgress) (string, error) {
 	if asset.URL == "" {
 		return "", fmt.Errorf("asset has no download URL")
 	}
 
-	// Check download cache first
-	if cachedPath := GetCachedDownload(asset.URL, asset.Name); cachedPath != "" {
-		asset.LocalPath = cachedPath
-		return cachedPath, nil
-	}
-
-	// Create destination directory if needed
-	if destDir == "" {
-		destDir = os.TempDir()
-	}
-	if err := os.MkdirAll(destDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create destination directory: %w", err)
-	}
-
-	// Sanitize filename to prevent path traversal
-	safeName := filepath.Base(asset.Name)
-	destPath := filepath.Join(destDir, safeName)
-
-	// Use download client (no total timeout — only stall detection)
-	dlClient := newDownloadHTTPClient()
-
-	req, err := http.NewRequestWithContext(ctx, "GET", asset.URL, nil)
+	destPath, err := prepareDownloadDest(destDir, asset.Name)
 	if err != nil {
 		return "", err
 	}
 
-	resp, err := DoWithTorFallback(ctx, dlClient, req)
-	if err != nil {
+	if err := DownloadHTTP(ctx, asset.URL, destPath, asset.Size, nil, progress); err != nil {
 		return "", err
-	}
-	defer resp.Body.Close()
-
-	// Validate HTTP status
-	if err := checkHTTPStatus(resp, "F-Droid APK download"); err != nil {
-		return "", err
-	}
-
-	// Use Content-Length from response if available, otherwise use asset size
-	total := resp.ContentLength
-	if total <= 0 {
-		total = asset.Size
-	}
-
-	// Create destination file
-	file, err := os.Create(destPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to create file: %w", err)
-	}
-	defer file.Close()
-
-	// Wrap body with stall timeout — fails only if no data received for 30s
-	var reader io.Reader = &StallTimeoutReader{
-		Reader:  resp.Body,
-		Timeout: downloadStallTimeout,
-	}
-
-	// Wrap with progress tracking if callback provided
-	if progress != nil && total > 0 {
-		reader = &ProgressReader{
-			Reader:     reader,
-			Total:      total,
-			OnProgress: progress,
-		}
-	}
-
-	_, err = io.Copy(file, reader)
-	if err != nil {
-		os.Remove(destPath)
-		return "", fmt.Errorf("failed to write file: %w", err)
-	}
-
-	// Save to download cache (best-effort, ignore errors) unless skipped
-	if !f.SkipDownloadCache {
-		if cachedPath, err := SaveToDownloadCache(asset.URL, asset.Name, destPath); err == nil {
-			os.Remove(destPath)
-			destPath = cachedPath
-		}
 	}
 
 	asset.LocalPath = destPath
@@ -440,9 +265,15 @@ func (f *FDroid) FetchMetadata(ctx context.Context) (*fdroidMetadata, error) {
 		return nil, err
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	if resp.ContentLength > MaxRemoteDownloadSize {
+		return nil, fmt.Errorf("metadata exceeds maximum size of %d bytes", MaxRemoteDownloadSize)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxRemoteDownloadSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read metadata: %w", err)
+	}
+	if int64(len(data)) > MaxRemoteDownloadSize {
+		return nil, fmt.Errorf("metadata exceeds maximum size of %d bytes", MaxRemoteDownloadSize)
 	}
 
 	var meta fdroidMetadata

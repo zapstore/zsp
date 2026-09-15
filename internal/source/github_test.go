@@ -1,71 +1,14 @@
 package source
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/zapstore/zsp/internal/config"
 )
-
-func TestGitHubCacheRoundtrip(t *testing.T) {
-	dir := t.TempDir()
-
-	g := &GitHub{
-		owner:    "owner",
-		repo:     "repo",
-		cacheDir: dir,
-	}
-
-	// No cache yet
-	if got := g.GetPublishedVersion(); got != "" {
-		t.Fatalf("expected empty version before any publish, got %q", got)
-	}
-
-	// Simulate FetchLatestRelease setting pending
-	g.pending = &pendingCache{
-		ETag:                          `"etag-v1"`,
-		Release:                       &githubRelease{TagName: "v1.2.3"},
-		LatestPublishedReleaseVersion: "1.2.3",
-	}
-
-	// CommitCache should write to disk and clear pending
-	if err := g.CommitCache(); err != nil {
-		t.Fatalf("CommitCache() error: %v", err)
-	}
-	if g.pending != nil {
-		t.Fatal("expected pending to be nil after CommitCache")
-	}
-
-	// GetPublishedVersion should read the written version
-	if got := g.GetPublishedVersion(); got != "1.2.3" {
-		t.Fatalf("GetPublishedVersion() = %q, want %q", got, "1.2.3")
-	}
-
-	// Commit with a new version
-	g.pending = &pendingCache{
-		ETag:                          `"etag-v2"`,
-		Release:                       &githubRelease{TagName: "v2.0.0"},
-		LatestPublishedReleaseVersion: "2.0.0",
-	}
-	if err := g.CommitCache(); err != nil {
-		t.Fatalf("CommitCache() error on second publish: %v", err)
-	}
-	if got := g.GetPublishedVersion(); got != "2.0.0" {
-		t.Fatalf("GetPublishedVersion() after update = %q, want %q", got, "2.0.0")
-	}
-
-	// ClearCache should delete the file
-	if err := g.ClearCache(); err != nil {
-		t.Fatalf("ClearCache() error: %v", err)
-	}
-	if got := g.GetPublishedVersion(); got != "" {
-		t.Fatalf("expected empty version after ClearCache, got %q", got)
-	}
-
-	// CommitCache with no pending is a no-op
-	if err := g.CommitCache(); err != nil {
-		t.Fatalf("CommitCache() with nil pending should not error: %v", err)
-	}
-}
 
 func TestGitHub_matchesReleaseFilter(t *testing.T) {
 	tests := []struct {
@@ -130,5 +73,50 @@ func TestGitHub_matchesReleaseFilter(t *testing.T) {
 				t.Errorf("matchesReleaseFilter(%q) = %v, want %v", tt.tagName, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestGitHubDownloadSendsBearerToken confirms GitHub's Download method routes
+// through the shared DownloadHTTP pipeline while still attaching the
+// configured token as a bearer Authorization header.
+func TestGitHubDownloadSendsBearerToken(t *testing.T) {
+	var gotAuth string
+	payload := []byte("apk-bytes-ok")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	g := &GitHub{token: "test-token"}
+	asset := &Asset{Name: "app.apk", URL: srv.URL + "/app.apk"}
+
+	path, err := g.Download(context.Background(), asset, t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("Download() error = %v", err)
+	}
+	if gotAuth != "Bearer test-token" {
+		t.Fatalf("Authorization header = %q, want %q", gotAuth, "Bearer test-token")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("downloaded %q, want %q", got, payload)
+	}
+	if asset.LocalPath != path {
+		t.Fatalf("asset.LocalPath = %q, want %q", asset.LocalPath, path)
+	}
+}
+
+// TestGitHubDownloadRejectsInsecureURL confirms GitHub asset downloads inherit
+// the shared pipeline's HTTPS-outside-loopback validation.
+func TestGitHubDownloadRejectsInsecureURL(t *testing.T) {
+	g := &GitHub{}
+	asset := &Asset{Name: "app.apk", URL: "http://evil.example.com/app.apk"}
+
+	if _, err := g.Download(context.Background(), asset, t.TempDir(), nil); err == nil {
+		t.Fatal("Download() error = nil, want rejection of insecure URL")
 	}
 }

@@ -1,9 +1,87 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
+
+func TestGetRelayHTTPURLDefault(t *testing.T) {
+	t.Setenv("RELAYS", "")
+	t.Chdir(t.TempDir())
+
+	if got := GetRelayHTTPURL(); got != DefaultRelayHTTPURL {
+		t.Fatalf("GetRelayHTTPURL() = %q, want %q", got, DefaultRelayHTTPURL)
+	}
+}
+
+func TestGetRelayHTTPURLFromDotEnv(t *testing.T) {
+	t.Chdir(t.TempDir())
+	previous, wasSet := os.LookupEnv("RELAYS")
+	if err := os.Unsetenv("RELAYS"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if wasSet {
+			_ = os.Setenv("RELAYS", previous)
+			return
+		}
+		_ = os.Unsetenv("RELAYS")
+	})
+	if err := os.WriteFile(".env", []byte("RELAYS=ws://localhost:3334\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := GetRelayHTTPURL(); got != "http://localhost:3334" {
+		t.Fatalf("GetRelayHTTPURL() from .env = %q, want http://localhost:3334", got)
+	}
+}
+
+func TestGetRelayHTTPURLFromRelays(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	tests := []struct {
+		relays string
+		want   string
+	}{
+		{relays: "ws://localhost:3334, wss://relay.example", want: "http://localhost:3334"},
+		{relays: "wss://relay.zapstore.dev", want: "https://relay.zapstore.dev"},
+		{relays: "relay.zapstore.dev", want: "https://relay.zapstore.dev"},
+		{relays: "localhost:3334", want: "http://localhost:3334"},
+	}
+	for _, test := range tests {
+		t.Setenv("RELAYS", test.relays)
+		if got := GetRelayHTTPURL(); got != test.want {
+			t.Fatalf("GetRelayHTTPURL() RELAYS=%q = %q, want %q", test.relays, got, test.want)
+		}
+	}
+}
+
+func TestGetEnvReadsDotEnvForEachOperation(t *testing.T) {
+	t.Chdir(t.TempDir())
+	previous, wasSet := os.LookupEnv("ZSP_TEST_ENV_CACHE")
+	if err := os.Unsetenv("ZSP_TEST_ENV_CACHE"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if wasSet {
+			_ = os.Setenv("ZSP_TEST_ENV_CACHE", previous)
+			return
+		}
+		_ = os.Unsetenv("ZSP_TEST_ENV_CACHE")
+	})
+	if err := os.WriteFile(".env", []byte("ZSP_TEST_ENV_CACHE=first\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := GetEnv("ZSP_TEST_ENV_CACHE"); got != "first" {
+		t.Fatalf("GetEnv() = %q, want first", got)
+	}
+	if err := os.WriteFile(".env", []byte("ZSP_TEST_ENV_CACHE=second\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := GetEnv("ZSP_TEST_ENV_CACHE"); got != "second" {
+		t.Fatalf("updated GetEnv() = %q, want second", got)
+	}
+}
 
 func TestParse(t *testing.T) {
 	tests := []struct {
@@ -236,6 +314,23 @@ another_unknown: 123
 	}
 }
 
+func TestParseChannelFields(t *testing.T) {
+	config, err := Parse(strings.NewReader(`
+repository: https://github.com/example/app
+prerelease_channel: beta
+channel: nightly
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.PrereleaseChannel != "beta" {
+		t.Errorf("PrereleaseChannel = %q, want beta", config.PrereleaseChannel)
+	}
+	if config.Channel != "nightly" {
+		t.Errorf("Channel = %q, want nightly", config.Channel)
+	}
+}
+
 func TestParseErrors(t *testing.T) {
 	tests := []struct {
 		name string
@@ -297,6 +392,55 @@ func TestValidate(t *testing.T) {
 			err := tt.config.Validate()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsInvalidSourceAndPublicURLs(t *testing.T) {
+	tests := []struct {
+		name   string
+		config Config
+	}{
+		{
+			name: "unknown explicit source type",
+			config: Config{ReleaseSource: &ReleaseSource{
+				URL: "https://example.com/app", Type: "typo",
+			}},
+		},
+		{
+			name: "unrecognized fdroid host",
+			config: Config{ReleaseSource: &ReleaseSource{
+				URL: "https://not-f-droid.org/packages/com.example", Type: "fdroid",
+			}},
+		},
+		{
+			name:   "insecure website",
+			config: Config{Repository: "https://github.com/user/app", Website: "http://example.com"},
+		},
+		{
+			name:   "insecure image",
+			config: Config{Repository: "https://github.com/user/app", Images: []string{"http://example.com/image.png"}},
+		},
+		{
+			name:   "insecure release notes",
+			config: Config{Repository: "https://github.com/user/app", ReleaseNotes: "http://example.com/notes.md"},
+		},
+		{
+			name: "attribute with json extractor",
+			config: Config{ReleaseSource: &ReleaseSource{
+				IsWebSource: true,
+				AssetURL:    "https://example.com/app.apk",
+				Version: &VersionExtractor{
+					URL: "https://example.com/version", Path: "$.version", Attribute: "href",
+				},
+			}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.config.Validate(); err == nil {
+				t.Fatal("Validate() error = nil, want rejection")
 			}
 		})
 	}
@@ -964,6 +1108,7 @@ func TestValidateURLCases(t *testing.T) {
 		{"https://localhost:8080/user/repo", false},
 		{"http://localhost/path", false},     // HTTP allowed for localhost
 		{"http://127.0.0.1/path", false},     // HTTP allowed for 127.0.0.1
+		{"http://[::1]/path", false},         // HTTP allowed for IPv6 loopback
 		{"ftp://github.com/user/repo", true}, // Invalid scheme
 		{"github.com/user/repo", true},       // No scheme
 		{"https://", true},                   // No host

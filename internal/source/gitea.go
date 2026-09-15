@@ -2,23 +2,15 @@ package source
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/zapstore/zsp/internal/config"
 )
-
-// giteaCache stores the last successfully published release version.
-type giteaCache struct {
-	LatestPublishedReleaseVersion string `json:"latest_published_release_version,omitempty"`
-}
 
 // Gitea implements Source for Gitea/Forgejo/Codeberg releases.
 // This covers any Gitea-compatible forge (Gitea, Forgejo, Codeberg, etc.)
@@ -29,10 +21,7 @@ type Gitea struct {
 	repo               string
 	token              string
 	client             *http.Client
-	cacheDir           string
-	pendingVersion     string
 	IncludePreReleases bool // Set to true to include pre-releases (--pre-release)
-	SkipDownloadCache  bool // Set to true to skip saving APKs to download cache
 }
 
 // NewGitea creates a new Gitea source.
@@ -48,68 +37,14 @@ func NewGitea(cfg *config.Config) (*Gitea, error) {
 		return nil, fmt.Errorf("invalid Gitea repo path: %s", repoPath)
 	}
 
-	cacheDir, err := os.UserCacheDir()
-	if err != nil {
-		cacheDir = os.TempDir()
-	}
-	cacheDir = filepath.Join(cacheDir, "zsp", "gitea")
-
 	return &Gitea{
-		cfg:      cfg,
-		baseURL:  baseURL,
-		owner:    parts[0],
-		repo:     parts[1],
-		token:    os.Getenv("GITEA_TOKEN"),
-		client:   newSecureHTTPClient(30 * time.Second),
-		cacheDir: cacheDir,
+		cfg:     cfg,
+		baseURL: baseURL,
+		owner:   parts[0],
+		repo:    parts[1],
+		token:   os.Getenv("GITEA_TOKEN"),
+		client:  newSecureHTTPClient(30 * time.Second),
 	}, nil
-}
-
-func (g *Gitea) cacheFilePath() string {
-	return filepath.Join(g.cacheDir, fmt.Sprintf("%s_%s.json", g.owner, g.repo))
-}
-
-func (g *Gitea) loadCache() *giteaCache {
-	data, err := os.ReadFile(g.cacheFilePath())
-	if err != nil {
-		return nil
-	}
-	var cache giteaCache
-	if err := json.Unmarshal(data, &cache); err != nil {
-		return nil
-	}
-	return &cache
-}
-
-func (g *Gitea) saveCache(cache *giteaCache) error {
-	if err := os.MkdirAll(g.cacheDir, 0755); err != nil {
-		return err
-	}
-	data, err := json.Marshal(cache)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(g.cacheFilePath(), data, 0644)
-}
-
-// CommitCache implements CacheCommitter.
-func (g *Gitea) CommitCache() error {
-	if g.pendingVersion == "" {
-		return nil
-	}
-	err := g.saveCache(&giteaCache{LatestPublishedReleaseVersion: g.pendingVersion})
-	if err == nil {
-		g.pendingVersion = ""
-	}
-	return err
-}
-
-// GetPublishedVersion returns the last successfully published release version.
-func (g *Gitea) GetPublishedVersion() string {
-	if cache := g.loadCache(); cache != nil {
-		return cache.LatestPublishedReleaseVersion
-	}
-	return ""
 }
 
 // Type returns the source type.
@@ -174,12 +109,11 @@ func (g *Gitea) fetchLatestFromList(ctx context.Context) (*Release, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("Gitea API error (status %d): %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("Gitea API error (status %d)", resp.StatusCode)
 	}
 
 	var releases []giteaRelease
-	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+	if err := decodeJSONResponse(resp, MaxJSONResponseSize, &releases); err != nil {
 		return nil, fmt.Errorf("failed to parse releases: %w", err)
 	}
 
@@ -193,12 +127,11 @@ func (g *Gitea) fetchLatestFromList(ctx context.Context) (*Release, error) {
 		if r.Draft || (r.Prerelease && !g.IncludePreReleases) {
 			continue
 		}
-		if !g.matchesReleaseFilter(r.TagName) {
+		if !g.matchesReleaseFilter(r.TagName, r.Name) {
 			continue
 		}
 		release := g.convertRelease(&r)
 		if HasValidAPKs(release.Assets) {
-			g.pendingVersion = release.Version
 			return release, nil
 		}
 	}
@@ -216,9 +149,6 @@ func (g *Gitea) convertRelease(gtRelease *giteaRelease) *Release {
 			Size: a.Size,
 		})
 	}
-
-	// Filter out APKs with unsupported architectures (x86, x86_64, etc.)
-	assets = FilterUnsupportedArchitectures(assets)
 
 	// Extract version from tag name (strip leading 'v' if present)
 	version := gtRelease.TagName
@@ -241,6 +171,7 @@ func (g *Gitea) convertRelease(gtRelease *giteaRelease) *Release {
 	return &Release{
 		Version:    version,
 		TagName:    gtRelease.TagName,
+		Name:       gtRelease.Name,
 		Changelog:  gtRelease.Body,
 		Assets:     assets,
 		PreRelease: gtRelease.Prerelease,
@@ -249,120 +180,48 @@ func (g *Gitea) convertRelease(gtRelease *giteaRelease) *Release {
 	}
 }
 
-// Download downloads an asset from a Gitea-compatible forge.
-// Uses a download cache to avoid re-downloading the same file.
+// Download downloads an asset from a Gitea-compatible forge, using the
+// shared DownloadHTTP pipeline (size limit, redirect validation, stall
+// detection, bounded retries) with Gitea's token attached when configured.
 func (g *Gitea) Download(ctx context.Context, asset *Asset, destDir string, progress DownloadProgress) (string, error) {
 	if asset.URL == "" {
 		return "", fmt.Errorf("asset has no download URL")
 	}
 
-	// Check download cache first
-	if cachedPath := GetCachedDownload(asset.URL, asset.Name); cachedPath != "" {
-		asset.LocalPath = cachedPath
-		return cachedPath, nil
-	}
-
-	// Create destination directory if needed
-	if destDir == "" {
-		destDir = os.TempDir()
-	}
-	if err := os.MkdirAll(destDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create destination directory: %w", err)
-	}
-
-	// Security: Sanitize filename to prevent path traversal attacks
-	safeName := filepath.Base(asset.Name)
-	if safeName == "." || safeName == ".." || safeName == "" {
-		return "", fmt.Errorf("invalid asset filename: %s", asset.Name)
-	}
-	destPath := filepath.Join(destDir, safeName)
-
-	// Security: Validate the final path is within destDir
-	cleanDest := filepath.Clean(destPath)
-	cleanDir := filepath.Clean(destDir)
-	if !strings.HasPrefix(cleanDest, cleanDir+string(filepath.Separator)) && cleanDest != cleanDir {
-		return "", fmt.Errorf("invalid destination path: path traversal detected")
-	}
-
-	// Use download client (no total timeout — only stall detection)
-	dlClient := newDownloadHTTPClient()
-
-	req, err := http.NewRequestWithContext(ctx, "GET", asset.URL, nil)
+	destPath, err := prepareDownloadDest(destDir, asset.Name)
 	if err != nil {
 		return "", err
 	}
 
+	var headers map[string]string
 	if g.token != "" {
-		req.Header.Set("Authorization", "token "+g.token)
+		headers = map[string]string{"Authorization": "token " + g.token}
 	}
 
-	resp, err := DoWithTorFallback(ctx, dlClient, req)
-	if err != nil {
+	if err := DownloadHTTP(ctx, asset.URL, destPath, asset.Size, headers, progress); err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download failed with status %d: %s", resp.StatusCode, asset.URL)
-	}
-
-	// Use Content-Length from response if available, otherwise use asset size
-	total := resp.ContentLength
-	if total <= 0 {
-		total = asset.Size
-	}
-
-	// Create destination file
-	f, err := os.Create(destPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to create file: %w", err)
-	}
-	defer f.Close()
-
-	// Wrap body with stall timeout — fails only if no data received for 30s
-	var reader io.Reader = &StallTimeoutReader{
-		Reader:  resp.Body,
-		Timeout: downloadStallTimeout,
-	}
-
-	// Wrap with progress tracking if callback provided
-	if progress != nil && total > 0 {
-		reader = &ProgressReader{
-			Reader:     resp.Body,
-			Total:      total,
-			OnProgress: progress,
-		}
-	}
-
-	_, err = io.Copy(f, reader)
-	if err != nil {
-		os.Remove(destPath)
-		return "", fmt.Errorf("failed to write file: %w", err)
-	}
-
-	// Save to download cache (best-effort, ignore errors) unless skipped
-	if !g.SkipDownloadCache {
-		if cachedPath, err := SaveToDownloadCache(asset.URL, asset.Name, destPath); err == nil {
-			os.Remove(destPath)
-			destPath = cachedPath
-		}
-	}
-
-	// Update asset with local path
 	asset.LocalPath = destPath
-
 	return destPath, nil
 }
 
-// matchesReleaseFilter checks if a tag name matches the configured release_filter.
-// Returns true if no filter is configured or if the tag matches the filter.
-func (g *Gitea) matchesReleaseFilter(tagName string) bool {
+// matchesReleaseFilter checks whether a release tag or name matches the filter.
+func (g *Gitea) matchesReleaseFilter(tagName string, names ...string) bool {
 	if g.cfg.ReleaseFilter == "" {
 		return true
 	}
-	matched, err := regexp.MatchString(g.cfg.ReleaseFilter, tagName)
+	re, err := regexp.Compile(g.cfg.ReleaseFilter)
 	if err != nil {
 		return false
 	}
-	return matched
+	if re.MatchString(tagName) {
+		return true
+	}
+	for _, name := range names {
+		if re.MatchString(name) {
+			return true
+		}
+	}
+	return false
 }

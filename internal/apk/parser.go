@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -28,9 +29,9 @@ import (
 	"golang.org/x/image/webp"
 )
 
-// maxZipFileSize is the maximum size for reading individual files from APK archives.
-// This prevents memory exhaustion from malicious or corrupted APKs.
-const maxZipFileSize = 650 * 1024 * 1024 // 650MB
+// maxAPKResourceSize bounds individual manifest resources and icons read into
+// memory. APKs can be large, but these auxiliary resources should be small.
+const maxAPKResourceSize = 16 * 1024 * 1024 // 16MB
 
 // APKInfo contains extracted metadata from an APK file.
 type APKInfo struct {
@@ -57,8 +58,16 @@ type APKInfo struct {
 	// Required device features declared by the manifest.
 	Features []string
 
-	// Certificate SHA-256 fingerprint (hex encoded, lowercase)
+	// Certificate SHA-256 fingerprint (hex encoded, lowercase) of the
+	// current signing certificate.
 	CertFingerprint string
+
+	// SigningAncestors holds the SHA-256 fingerprints (hex encoded, lowercase)
+	// of validated v3 signing-certificate-rotation ancestors, ordered oldest
+	// to newest. The current certificate (CertFingerprint) is not repeated
+	// here. It is nil unless the APK's v3/v3.1 signing block carries a
+	// verified rotation lineage.
+	SigningAncestors []string
 
 	// Icon PNG bytes (nil if not found or extraction failed)
 	Icon []byte
@@ -107,12 +116,15 @@ func Parse(path string) (*APKInfo, error) {
 	// Extract native architectures from lib/ directory
 	info.Architectures = extractArchitectures(path)
 
-	// Verify signature and extract certificate fingerprint
-	certFingerprint, err := verifyCertificate(path)
+	// Verify v1/v2/v3 signatures, reject malformed signatures and multiple
+	// current signers, and extract the current certificate fingerprint plus
+	// any validated signing-rotation ancestors.
+	sig, err := verifySignature(path)
 	if err != nil {
 		return nil, fmt.Errorf("signature verification failed: %w", err)
 	}
-	info.CertFingerprint = certFingerprint
+	info.CertFingerprint = sig.fingerprint()
+	info.SigningAncestors = sig.ancestors
 
 	// Extract icon. Icon extraction failure is not fatal.
 	icon, err := extractIcon(path, manifest.Icon)
@@ -337,6 +349,7 @@ func extractArchitectures(path string) []string {
 	for arch := range archSet {
 		archs = append(archs, arch)
 	}
+	sort.Strings(archs)
 	return archs
 }
 
@@ -362,39 +375,96 @@ func isValidZipEntryPath(path string) bool {
 	return true
 }
 
-// verifyCertificate verifies the APK signature and returns the certificate fingerprint.
-func verifyCertificate(path string) (string, error) {
-	res, err := apkverifier.Verify(path, nil)
-	if err != nil {
-		return "", fmt.Errorf("APK verification failed: %w", err)
-	}
-
-	// Pick the best certificate (prefers v3 > v2 > v1)
-	_, cert := apkverifier.PickBestApkCert(res.SignerCerts)
-	if cert == nil {
-		return "", fmt.Errorf("failed to extract certificate: no valid certificate found")
-	}
-
-	// Calculate SHA256 fingerprint of the certificate
-	fingerprint := sha256.Sum256(cert.Raw)
-	return hex.EncodeToString(fingerprint[:]), nil
+// verifiedSignature is the outcome of a robust v1/v2/v3 APK signature
+// verification: exactly one current signing certificate, plus any validated
+// v3 signing-certificate-rotation lineage ending at that certificate.
+type verifiedSignature struct {
+	cert      *x509.Certificate
+	ancestors []string // SHA-256 hex fingerprints, oldest to newest, excluding cert
 }
 
-// ExtractCertificate extracts the signing certificate from an APK file.
-// Returns the x509 certificate used to sign the APK.
-func ExtractCertificate(path string) (*x509.Certificate, error) {
+func (s *verifiedSignature) fingerprint() string {
+	sum := sha256.Sum256(s.cert.Raw)
+	return hex.EncodeToString(sum[:])
+}
+
+// verifySignature verifies the APK's v1, v2, and v3 signatures using the full
+// supported SDK range. It rejects malformed signatures (any error surfaced by
+// the underlying verifier, including missing/mismatched certificates, digest
+// mismatches, and downgrade-attack detection) and rejects APKs with more than
+// one current signer, since zsp's identity model requires a single current
+// signing certificate.
+func verifySignature(path string) (*verifiedSignature, error) {
 	res, err := apkverifier.Verify(path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("APK verification failed: %w", err)
 	}
 
-	// Pick the best certificate (prefers v3 > v2 > v1)
-	_, cert := apkverifier.PickBestApkCert(res.SignerCerts)
-	if cert == nil {
-		return nil, fmt.Errorf("failed to extract certificate: no valid certificate found")
+	if len(res.SignerCerts) == 0 {
+		return nil, fmt.Errorf("APK verification failed: no valid certificate found")
+	}
+	if len(res.SignerCerts) > 1 {
+		return nil, fmt.Errorf("APK verification failed: found %d current signers, expected exactly one", len(res.SignerCerts))
 	}
 
-	return cert, nil
+	// Pick the best certificate from the (single) signer's chain.
+	_, cert := apkverifier.PickBestApkCert(res.SignerCerts)
+	if cert == nil {
+		return nil, fmt.Errorf("APK verification failed: no valid certificate found")
+	}
+
+	ancestors, err := signingAncestors(res, cert)
+	if err != nil {
+		return nil, fmt.Errorf("APK verification failed: %w", err)
+	}
+
+	return &verifiedSignature{cert: cert, ancestors: ancestors}, nil
+}
+
+// signingAncestors returns the validated v3 signing-certificate-rotation
+// lineage, oldest to newest, excluding the current certificate. It returns
+// nil when the APK carries no v3/v3.1 rotation lineage. The underlying
+// verifier cryptographically validates every lineage link and confirms the
+// current certificate terminates the chain before Verify returns success, so
+// any mismatch found here indicates an inconsistency between schemes and is
+// treated as a verification failure rather than silently ignored.
+func signingAncestors(res apkverifier.Result, current *x509.Certificate) ([]string, error) {
+	if res.SigningBlockResult == nil || res.SigningBlockResult.SigningLineage == nil {
+		return nil, nil
+	}
+
+	nodes := res.SigningBlockResult.SigningLineage.Nodes
+	if len(nodes) == 0 {
+		return nil, nil
+	}
+
+	last := nodes[len(nodes)-1]
+	if last.SigningCert == nil || !last.SigningCert.Equal(current) {
+		return nil, fmt.Errorf("signing certificate lineage does not end at the current signing certificate")
+	}
+
+	if len(nodes) == 1 {
+		// Lineage of one is just the current certificate; no rotation happened.
+		return nil, nil
+	}
+
+	ancestors := make([]string, 0, len(nodes)-1)
+	for _, node := range nodes[:len(nodes)-1] {
+		sum := sha256.Sum256(node.SigningCert.Raw)
+		ancestors = append(ancestors, hex.EncodeToString(sum[:]))
+	}
+	return ancestors, nil
+}
+
+// ExtractCertificate extracts the current signing certificate from an APK
+// file, applying the same robust v1/v2/v3 verification as Parse: malformed
+// signatures and multiple current signers are rejected.
+func ExtractCertificate(path string) (*x509.Certificate, error) {
+	sig, err := verifySignature(path)
+	if err != nil {
+		return nil, err
+	}
+	return sig.cert, nil
 }
 
 // extractIcon extracts the app icon from the APK as PNG bytes.
@@ -792,11 +862,10 @@ func readZipIcon(f *zip.File) ([]byte, error) {
 	return data, nil
 }
 
-// readZipFile reads the contents of a file within a zip archive.
-// Returns an error if the uncompressed size exceeds maxZipFileSize.
+// readZipFile reads a bounded manifest resource or icon from an APK archive.
 func readZipFile(f *zip.File) ([]byte, error) {
-	if f.UncompressedSize64 > maxZipFileSize {
-		return nil, fmt.Errorf("file %s too large: %d bytes (max %d)", f.Name, f.UncompressedSize64, maxZipFileSize)
+	if f.UncompressedSize64 > maxAPKResourceSize {
+		return nil, fmt.Errorf("file %s too large: %d bytes (max %d)", f.Name, f.UncompressedSize64, maxAPKResourceSize)
 	}
 
 	rc, err := f.Open()
@@ -805,8 +874,15 @@ func readZipFile(f *zip.File) ([]byte, error) {
 	}
 	defer rc.Close()
 
-	// Use LimitReader as defense-in-depth against incorrect UncompressedSize64
-	return io.ReadAll(io.LimitReader(rc, int64(maxZipFileSize)))
+	// Read one byte past the declared cap so forged ZIP metadata cannot bypass it.
+	data, err := io.ReadAll(io.LimitReader(rc, int64(maxAPKResourceSize)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxAPKResourceSize {
+		return nil, fmt.Errorf("file %s exceeds maximum size of %d bytes", f.Name, maxAPKResourceSize)
+	}
+	return data, nil
 }
 
 // encodePNG encodes an image to PNG format.
@@ -858,6 +934,9 @@ func (a *APKInfo) String() string {
 	fmt.Fprintf(&buf, "Min SDK: %d, Target SDK: %d\n", a.MinSDK, a.TargetSDK)
 	fmt.Fprintf(&buf, "Architectures: %v\n", a.Architectures)
 	fmt.Fprintf(&buf, "Certificate: %s\n", a.CertFingerprint)
+	if len(a.SigningAncestors) > 0 {
+		fmt.Fprintf(&buf, "Signing ancestors: %v\n", a.SigningAncestors)
+	}
 	fmt.Fprintf(&buf, "Size: %d bytes\n", a.FileSize)
 	fmt.Fprintf(&buf, "SHA256: %s\n", a.SHA256)
 	if a.Icon != nil {

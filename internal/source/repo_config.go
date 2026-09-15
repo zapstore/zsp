@@ -81,7 +81,7 @@ func fetchGitHubRepoConfig(ctx context.Context, client *http.Client, cfg *config
 	if err != nil {
 		return nil, fmt.Errorf("creating GitHub repo config request: %w", err)
 	}
-	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+	if token := config.GetEnv("GITHUB_TOKEN"); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	return doRepoConfigRequest(client, req)

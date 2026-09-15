@@ -27,8 +27,8 @@ match: ".*-arm64.*\\.apk$"
 		name      string
 		cfg       *config.Config
 		transport roundTripperFunc
-		torStatus int   // if set, Tor fallback returns this status with repoYAML
-		torErr    error // if set, Tor client factory fails
+		torStatus int
+		torErr    error
 		wantName  string
 		wantMatch string
 		wantSame  bool // expect returned pointer == indexer cfg

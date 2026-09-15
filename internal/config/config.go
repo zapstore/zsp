@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -34,6 +35,12 @@ type Config struct {
 	// Asset matching (optional, overrides auto-detection)
 	Match string `yaml:"match,omitempty"`
 
+	// PrereleaseChannel selects prerelease source releases when non-empty.
+	PrereleaseChannel string `yaml:"prerelease_channel,omitempty"`
+
+	// Channel identifies the NIP-82 channel for published releases.
+	Channel string `yaml:"channel,omitempty"`
+
 	// App metadata (all optional, overrides APK-extracted values)
 	Name        string   `yaml:"name,omitempty"`
 	Description string   `yaml:"description,omitempty"`
@@ -51,7 +58,8 @@ type Config struct {
 	// only the section for this release is extracted.
 	ReleaseNotes string `yaml:"release_notes,omitempty"`
 
-	// Changelog is deprecated, use ReleaseNotes instead
+	// Changelog is deprecated and has no effect on parsing or validation; use
+	// ReleaseNotes instead. Kept only for legacy callers outside this package.
 	Changelog string `yaml:"changelog,omitempty"`
 
 	// SupportedNIPs lists Nostr NIPs supported by this application
@@ -63,26 +71,19 @@ type Config struct {
 	// MinAllowedVersionCode is the minimum allowed version code (Android)
 	MinAllowedVersionCode int64 `yaml:"min_allowed_version_code,omitempty"`
 
-	// Variants maps variant names to regex patterns for APK filename matching
-	// Example: { "fdroid": ".*-fdroid-.*\\.apk$", "google": ".*-google-.*\\.apk$" }
-	Variants map[string]string `yaml:"variants,omitempty"`
-
 	// MetadataSources specifies where to fetch additional metadata from.
 	// Supported values: "fastlane", "github", "gitlab", "fdroid", "playstore".
 	// If not set, GitHub and GitLab repositories use Fastlane metadata first,
 	// then fall back to their native repository metadata.
 	MetadataSources []string `yaml:"metadata_sources,omitempty"`
 
-	// Pubkey is the npub of the developer who publishes this app.
-	// Used by the relay for auto-whitelisting via repo verification.
+	// Pubkey is deprecated and has no effect on parsing, validation, or
+	// loading: Load never resolves or checks it against the process signer.
+	// Kept only for legacy callers outside this package (e.g. the wizard).
 	Pubkey string `yaml:"pubkey,omitempty"`
 
-	// Communities lists the h-tag values for kind 32267 events.
-	// Each entry becomes a separate "h" tag, allowing the app to appear in
-	// multiple Nostr communities simultaneously.
-	// Defaults to the Zapstore catalog community pubkey (hex) if not set (see nostr.DefaultCommunity).
-	// Example (single):  communities: [acfeaea6e51420e8068fac446ca9d17d7a9ef6a5d20d93894e50fee3d4902a84]
-	// Example (multiple): communities: [acfeaea6e51420e8068fac446ca9d17d7a9ef6a5d20d93894e50fee3d4902a84, fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210]
+	// Communities is deprecated and has no effect on parsing or validation.
+	// Kept only for legacy callers outside this package.
 	Communities []string `yaml:"communities,omitempty"`
 
 	// BaseDir is the directory containing the config file (for relative paths).
@@ -249,8 +250,8 @@ func ParseSourceType(s string) SourceType {
 }
 
 // Load reads and parses a config file.
-// If the config contains a pubkey field, it is checked against the current SIGN_WITH signer.
-// A mismatch is a hard error to prevent accidental publishing under the wrong identity.
+// Loading never depends on the process signer: it performs no SIGN_WITH
+// resolution and never fails based on the resolved signing identity.
 func Load(path string) (*Config, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -267,20 +268,6 @@ func Load(path string) (*Config, error) {
 	absPath, err := filepath.Abs(path)
 	if err == nil {
 		cfg.BaseDir = filepath.Dir(absPath)
-	}
-
-	// Pubkey mismatch check: if zapstore.yaml has a pubkey, it must match the signer.
-	if cfg.Pubkey != "" {
-		if signWith := GetSignWith(); signWith != "" {
-			signerNpub := ResolvePubkeyFromSignWith(signWith)
-			if signerNpub != "" && signerNpub != cfg.Pubkey {
-				return nil, fmt.Errorf(
-					"pubkey mismatch: zapstore.yaml has pubkey %s but SIGN_WITH resolves to %s.\n"+
-						"Either update zapstore.yaml or set the correct SIGN_WITH.",
-					cfg.Pubkey, signerNpub,
-				)
-			}
-		}
 	}
 
 	return cfg, nil
@@ -304,10 +291,9 @@ func Parse(r io.Reader) (*Config, error) {
 		return nil, err
 	}
 
-	// Handle deprecated changelog field
-	if cfg.Changelog != "" && cfg.ReleaseNotes == "" {
-		cfg.ReleaseNotes = cfg.Changelog
-	}
+	// changelog, pubkey, and communities are deprecated and unknown fields are
+	// ignored: they are decoded (when the struct still declares them for
+	// legacy callers) but have no effect on parsing, validation, or behavior.
 
 	return &cfg, nil
 }
@@ -398,8 +384,10 @@ func (c *Config) parseReleaseSource() error {
 			return fmt.Errorf("failed to parse release_source config: %w", err)
 		}
 
-		// Web source mode if asset_url or asset extractor is set (with or without version extractor)
-		isWebSource := web.AssetURL != "" || web.Asset != nil
+		// Any extractor or asset setting selects structured web mode. This also
+		// makes an otherwise-unused version extractor fail validation unless an
+		// asset URL or asset extractor is provided.
+		isWebSource := web.AssetURL != "" || web.Version != nil || web.Asset != nil
 
 		c.ReleaseSource = &ReleaseSource{
 			URL:         web.URL,
@@ -408,6 +396,10 @@ func (c *Config) parseReleaseSource() error {
 			AssetURL:    web.AssetURL,
 			Version:     web.Version,
 			Asset:       web.Asset,
+		}
+		if ParseSourceType(web.Type) == SourceLocal {
+			c.ReleaseSource.LocalPath = web.URL
+			c.ReleaseSource.URL = ""
 		}
 
 	default:
@@ -457,6 +449,15 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("invalid release_source URL: %w", err)
 		}
 	}
+	if c.ReleaseSource != nil && c.ReleaseSource.Type != "" {
+		sourceType := ParseSourceType(c.ReleaseSource.Type)
+		if sourceType == SourceUnknown {
+			return fmt.Errorf("unsupported release_source type %q", c.ReleaseSource.Type)
+		}
+		if sourceType == SourceFDroid && GetFDroidRepoInfo(c.ReleaseSource.URL) == nil {
+			return fmt.Errorf("unsupported F-Droid release_source URL")
+		}
+	}
 
 	// Validate web source version extractors
 	if c.ReleaseSource != nil && c.ReleaseSource.IsWebSource {
@@ -464,11 +465,21 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("invalid release_source: %w", err)
 		}
 	}
-
-	// Validate variants regex patterns
-	for name, pattern := range c.Variants {
-		if _, err := regexp.Compile(pattern); err != nil {
-			return fmt.Errorf("invalid variant %q regex pattern %q: %w", name, pattern, err)
+	if c.Website != "" {
+		if err := ValidateURL(c.Website); err != nil {
+			return fmt.Errorf("invalid website URL: %w", err)
+		}
+	}
+	for _, mediaURL := range append([]string{c.Icon}, c.Images...) {
+		if strings.Contains(mediaURL, "://") {
+			if err := ValidateURL(mediaURL); err != nil {
+				return fmt.Errorf("invalid media URL: %w", err)
+			}
+		}
+	}
+	if strings.Contains(c.ReleaseNotes, "://") {
+		if err := ValidateURL(c.ReleaseNotes); err != nil {
+			return fmt.Errorf("invalid release_notes URL: %w", err)
 		}
 	}
 
@@ -476,6 +487,20 @@ func (c *Config) Validate() error {
 	if c.ReleaseFilter != "" {
 		if _, err := regexp.Compile(c.ReleaseFilter); err != nil {
 			return fmt.Errorf("invalid release_filter pattern %q: %w", c.ReleaseFilter, err)
+		}
+	}
+
+	// Validate match regex pattern
+	if c.Match != "" {
+		if _, err := regexp.Compile(c.Match); err != nil {
+			return fmt.Errorf("invalid match pattern %q: %w", c.Match, err)
+		}
+	}
+	for _, source := range c.MetadataSources {
+		switch strings.ToLower(strings.TrimSpace(source)) {
+		case "fastlane", "github", "gitlab", "gitea", "fdroid", "playstore":
+		default:
+			return fmt.Errorf("unsupported metadata source %q", source)
 		}
 	}
 
@@ -552,8 +577,14 @@ func (v *VersionExtractor) Validate() error {
 		// attribute is optional - defaults to text extraction when omitted
 	case "json":
 		// path extracts the value directly
+		if v.Attribute != "" {
+			return fmt.Errorf("attribute is only valid with selector")
+		}
 	case "header":
 		// header value is used directly
+		if v.Attribute != "" {
+			return fmt.Errorf("attribute is only valid with selector")
+		}
 	}
 
 	// Validate match pattern if provided
@@ -606,10 +637,16 @@ func ValidateURL(rawURL string) error {
 	if parsed.Host == "" {
 		return fmt.Errorf("URL must have a host")
 	}
+	if parsed.User != nil {
+		return fmt.Errorf("URL must not contain userinfo")
+	}
+	if parsed.Fragment != "" {
+		return fmt.Errorf("URL must not contain a fragment")
+	}
 
 	// Host must be localhost or contain a dot (domain.tld)
 	host := parsed.Hostname()
-	if host != "localhost" && !strings.Contains(host, ".") {
+	if host != "localhost" && net.ParseIP(host) == nil && !strings.Contains(host, ".") {
 		return fmt.Errorf("invalid host %q: must be a valid domain (e.g., github.com/user/repo)", host)
 	}
 
@@ -648,8 +685,13 @@ func (c *Config) GetSourceType() SourceType {
 		return DetectSourceType(c.ReleaseSource.URL)
 	}
 
-	// Fallback to repository
-	return DetectSourceType(c.Repository)
+	// Only forge repositories are release sources. F-Droid and Play Store
+	// require an explicit release_source.
+	sourceType := DetectSourceType(c.Repository)
+	if sourceType == SourceFDroid {
+		return SourceUnknown
+	}
+	return sourceType
 }
 
 // GetAPKSourceURL returns the URL to fetch APKs from.
@@ -666,26 +708,28 @@ func DetectSourceType(rawURL string) SourceType {
 		return SourceUnknown
 	}
 
-	lower := strings.ToLower(rawURL)
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return SourceUnknown
+	}
+	host := strings.ToLower(parsed.Hostname())
 
-	if strings.Contains(lower, "github.com") {
+	if host == "github.com" || host == "www.github.com" {
 		return SourceGitHub
 	}
 	// GitLab: gitlab.com and self-hosted instances with "gitlab" in the domain
-	if strings.Contains(lower, "gitlab.com") || containsGitLab(lower) {
+	if host == "gitlab.com" || host == "www.gitlab.com" || containsGitLab(rawURL) {
 		return SourceGitLab
 	}
 	// Gitea-compatible forges: Codeberg, and hosts with gitea/forgejo in the domain
-	if strings.Contains(lower, "codeberg.org") || containsGitea(lower) {
+	if host == "codeberg.org" || host == "www.codeberg.org" || containsGitea(rawURL) {
 		return SourceGitea
 	}
-	// F-Droid compatible repositories
-	if strings.Contains(lower, "f-droid.org") ||
-		strings.Contains(lower, "apt.izzysoft.de") ||
-		strings.Contains(lower, "izzysoft.de") {
+	// Only the recognized F-Droid and IzzyOnDroid package URLs are accepted.
+	if GetFDroidRepoInfo(rawURL) != nil {
 		return SourceFDroid
 	}
-	if strings.Contains(lower, "play.google.com") {
+	if host == "play.google.com" {
 		return SourcePlayStore
 	}
 
@@ -721,18 +765,25 @@ type FDroidRepoInfo struct {
 	MetadataURL string // Metadata YAML URL (empty if not available)
 }
 
-// GetFDroidRepoInfo extracts repository info from an F-Droid compatible URL.
-// Supports: f-droid.org, apt.izzysoft.de (IzzyOnDroid), and other F-Droid repos.
+// GetFDroidRepoInfo extracts repository info from recognized F-Droid and
+// IzzyOnDroid package URLs.
 func GetFDroidRepoInfo(rawURL string) *FDroidRepoInfo {
-	lower := strings.ToLower(rawURL)
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return nil
+	}
+	host := strings.ToLower(parsed.Hostname())
+	path := strings.Trim(parsed.Path, "/")
+	segments := strings.Split(path, "/")
 
 	// F-Droid official repo
-	// Handle: https://f-droid.org/packages/com.example.app
-	// Handle: https://f-droid.org/en/packages/com.example.app
-	if strings.Contains(lower, "f-droid.org") {
-		if idx := strings.Index(lower, "/packages/"); idx != -1 {
-			packageID := rawURL[idx+len("/packages/"):]
-			packageID = strings.TrimSuffix(packageID, "/")
+	// Handle: https://f-droid.org/packages/com.example.app and locale variants.
+	if host == "f-droid.org" || host == "www.f-droid.org" {
+		if len(segments) == 2 && segments[0] == "packages" || len(segments) == 3 && segments[1] == "packages" {
+			packageID := segments[len(segments)-1]
+			if packageID == "" {
+				return nil
+			}
 			return &FDroidRepoInfo{
 				RepoURL:     "https://f-droid.org/repo",
 				IndexURL:    "https://f-droid.org/repo/index-v1.json",
@@ -744,10 +795,12 @@ func GetFDroidRepoInfo(rawURL string) *FDroidRepoInfo {
 
 	// IzzyOnDroid repo
 	// Handle: https://apt.izzysoft.de/fdroid/index/apk/com.example.app
-	if strings.Contains(lower, "apt.izzysoft.de") || strings.Contains(lower, "izzysoft.de") {
-		if idx := strings.Index(lower, "/apk/"); idx != -1 {
-			packageID := rawURL[idx+len("/apk/"):]
-			packageID = strings.TrimSuffix(packageID, "/")
+	if host == "apt.izzysoft.de" {
+		if len(segments) == 4 && strings.Join(segments[:3], "/") == "fdroid/index/apk" {
+			packageID := segments[3]
+			if packageID == "" {
+				return nil
+			}
 			return &FDroidRepoInfo{
 				RepoURL:   "https://apt.izzysoft.de/fdroid/repo",
 				IndexURL:  "https://apt.izzysoft.de/fdroid/repo/index-v1.json",
@@ -772,16 +825,18 @@ func GetFDroidPackageID(rawURL string) string {
 }
 
 // GetGitHubRepo extracts owner/repo from a GitHub URL.
-func GetGitHubRepo(url string) string {
-	// Handle: https://github.com/owner/repo
-	lower := strings.ToLower(url)
-	if idx := strings.Index(lower, "github.com/"); idx != -1 {
-		path := url[idx+len("github.com/"):]
-		// Remove trailing parts like /releases, etc.
-		parts := strings.Split(path, "/")
-		if len(parts) >= 2 {
-			return parts[0] + "/" + parts[1]
-		}
+func GetGitHubRepo(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host != "github.com" && host != "www.github.com" {
+		return ""
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
+		return parts[0] + "/" + strings.TrimSuffix(parts[1], ".git")
 	}
 	return ""
 }
@@ -843,43 +898,4 @@ func gitLabProjectPath(path string) string {
 		return ""
 	}
 	return path
-}
-
-// GetRelayURLs returns the RELAY_URLS environment variable value.
-// Checks both process environment and .env file.
-func GetRelayURLs() string {
-	return GetEnv("RELAY_URLS")
-}
-
-// ResolvePubkeyFromSignWith derives the npub from a SIGN_WITH value.
-// Supports nsec1... and npub1... synchronously.
-// Returns empty string for bunker/browser (requires async resolution).
-func ResolvePubkeyFromSignWith(signWith string) string {
-	signWith = strings.TrimSpace(signWith)
-
-	if strings.HasPrefix(signWith, "npub1") {
-		return signWith
-	}
-
-	if strings.HasPrefix(signWith, "nsec1") {
-		_, data, err := nip19.Decode(signWith)
-		if err != nil {
-			return ""
-		}
-		privkey, ok := data.(string)
-		if !ok {
-			return ""
-		}
-		pubkeyHex, err := nostr.GetPublicKey(privkey)
-		if err != nil {
-			return ""
-		}
-		npub, err := nip19.EncodePublicKey(pubkeyHex)
-		if err != nil {
-			return ""
-		}
-		return npub
-	}
-
-	return ""
 }

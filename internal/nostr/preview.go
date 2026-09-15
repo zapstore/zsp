@@ -2,17 +2,21 @@ package nostr
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html"
 	"net"
 	"net/http"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -62,6 +66,7 @@ type PreviewData struct {
 	VersionCode int64
 	Channel     string
 	Changelog   string
+	C1Status    string
 
 	// Software Assets (multiple)
 	Assets []AssetPreviewData
@@ -113,18 +118,10 @@ func BuildPreviewDataFromAPKs(apkInfos []*apk.APKInfo, cfg *config.Config, chang
 			assetPlatforms = append(assetPlatforms, p)
 			platformSet[p] = true
 		}
-		if len(assetPlatforms) == 0 {
-			// Architecture-independent
-			for _, p := range []string{"android-arm64-v8a", "android-armeabi-v7a", "android-x86", "android-x86_64"} {
-				assetPlatforms = append(assetPlatforms, p)
-				platformSet[p] = true
-			}
-		}
-
 		assets = append(assets, AssetPreviewData{
 			SHA256:          apkInfo.SHA256,
 			FileSize:        apkInfo.FileSize,
-			Filename:        apkInfo.FilePath,
+			Filename:        filepath.Base(apkInfo.FilePath),
 			CertFingerprint: apkInfo.CertFingerprint,
 			MinSDK:          apkInfo.MinSDK,
 			TargetSDK:       apkInfo.TargetSDK,
@@ -168,6 +165,11 @@ func BuildPreviewData(apkInfo *apk.APKInfo, cfg *config.Config, events *EventSet
 		data.AppMetadataEvent = events.AppMetadata
 		data.ReleaseEvent = events.Release
 		data.SoftwareAssetEvents = events.SoftwareAssets
+		if events.Release != nil {
+			if channel := events.Release.Tags.GetFirst([]string{"c"}); channel != nil && len(*channel) == 2 {
+				data.Channel = (*channel)[1]
+			}
+		}
 	}
 	return data
 }
@@ -186,15 +188,19 @@ func BuildPreviewDataFromEvents(apkInfos []*apk.APKInfo, cfg *config.Config, eve
 
 // PreviewServer serves the HTML preview.
 type PreviewServer struct {
-	port        int
-	server      *http.Server
-	listener    net.Listener
-	data        *PreviewData
-	done        chan struct{}
-	cliConfirm  chan struct{} // signals when confirmed from CLI
-	changelog   string
-	iconURL     string
-	iconDataB64 string
+	port         int
+	server       *http.Server
+	listener     net.Listener
+	data         *PreviewData
+	done         chan struct{}
+	cliConfirm   chan struct{} // signals when confirmed from CLI
+	decision     chan bool
+	closeOnce    sync.Once
+	confirmOnce  sync.Once
+	changelog    string
+	iconURL      string
+	iconDataB64  string
+	sessionNonce string
 }
 
 // NewPreviewServer creates a preview server on the specified port.
@@ -209,12 +215,12 @@ func NewPreviewServer(data *PreviewData, changelog, iconURL string, port int) *P
 	if len(data.IconData) > 0 {
 		iconDataB64 = base64.StdEncoding.EncodeToString(data.IconData)
 	}
-
 	return &PreviewServer{
 		port:        port,
 		data:        data,
 		done:        make(chan struct{}),
 		cliConfirm:  make(chan struct{}),
+		decision:    make(chan bool, 1),
 		changelog:   changelog,
 		iconURL:     iconURL,
 		iconDataB64: iconDataB64,
@@ -223,6 +229,13 @@ func NewPreviewServer(data *PreviewData, changelog, iconURL string, port int) *P
 
 // Start starts the preview server and opens the browser.
 func (s *PreviewServer) Start() (string, error) {
+	if s.sessionNonce == "" {
+		nonce := make([]byte, 16)
+		if _, err := rand.Read(nonce); err != nil {
+			return "", fmt.Errorf("generate preview session nonce: %w", err)
+		}
+		s.sessionNonce = hex.EncodeToString(nonce)
+	}
 	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", s.port))
 	if err != nil {
 		return "", fmt.Errorf("failed to start preview server: %w", err)
@@ -233,18 +246,22 @@ func (s *PreviewServer) Start() (string, error) {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/poll", s.handlePoll)
+	mux.HandleFunc("/api/approve", s.securityMiddleware(s.handleApprove))
+	mux.HandleFunc("/api/reject", s.securityMiddleware(s.handleReject))
 	mux.HandleFunc("/images/", s.handleImage) // Serve pre-downloaded images
 
-	s.server = &http.Server{Handler: mux}
+	s.server = &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		IdleTimeout:       30 * time.Second,
+	}
 	go s.server.Serve(listener)
 
 	url := fmt.Sprintf("http://localhost:%d/", s.port)
 
 	// Open browser
-	if err := openBrowser(url); err != nil {
-		// Non-fatal: user can manually open the URL
-		fmt.Printf("Could not open browser automatically. Please open: %s\n", url)
-	}
+	_ = openBrowser(url)
 
 	return url, nil
 }
@@ -271,7 +288,7 @@ func (s *PreviewServer) handleImage(w http.ResponseWriter, r *http.Request) {
 
 // Close shuts down the preview server.
 func (s *PreviewServer) Close() error {
-	close(s.done)
+	s.closeOnce.Do(func() { close(s.done) })
 	if s.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -285,10 +302,32 @@ func (s *PreviewServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(s.buildHTML()))
 }
 
+func (s *PreviewServer) securityMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Method == http.MethodPost {
+			origin := r.Header.Get("Origin")
+			expectedLocalhost := fmt.Sprintf("http://localhost:%d", s.port)
+			expectedLoopback := fmt.Sprintf("http://127.0.0.1:%d", s.port)
+			if origin != expectedLocalhost && origin != expectedLoopback {
+				http.Error(w, "forbidden origin", http.StatusForbidden)
+				return
+			}
+			if r.Header.Get("X-Session-Nonce") != s.sessionNonce {
+				http.Error(w, "invalid session nonce", http.StatusForbidden)
+				return
+			}
+		}
+		next(w, r)
+	}
+}
+
 func (s *PreviewServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	// Events may be nil if preview is shown before signing
-	if s.data.AppMetadataEvent == nil {
+	if s.data.AppMetadataEvent == nil && s.data.ReleaseEvent == nil && len(s.data.SoftwareAssetEvents) == 0 {
 		json.NewEncoder(w).Encode(map[string]any{
 			"message": "Events will be generated after signing",
 		})
@@ -318,7 +357,41 @@ func (s *PreviewServer) handlePoll(w http.ResponseWriter, r *http.Request) {
 
 // ConfirmFromCLI confirms the preview from the CLI, which signals the browser to close.
 func (s *PreviewServer) ConfirmFromCLI() {
-	close(s.cliConfirm)
+	s.confirmOnce.Do(func() { close(s.cliConfirm) })
+}
+
+// WaitDecision waits for browser approval, rejection, or cancellation.
+func (s *PreviewServer) WaitDecision(ctx context.Context) (bool, error) {
+	select {
+	case approved := <-s.decision:
+		return approved, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+}
+
+func (s *PreviewServer) handleApprove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	select {
+	case s.decision <- true:
+	default:
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *PreviewServer) handleReject(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	select {
+	case s.decision <- false:
+	default:
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *PreviewServer) buildHTML() string {
@@ -463,6 +536,21 @@ func (s *PreviewServer) buildHTML() string {
 		appInfoHTML = fmt.Sprintf(`<div class="info-grid">%s%s%s</div>`, websiteRow, repoRow, licenseRow)
 	}
 
+	eventsJSON, _ := json.MarshalIndent(map[string]any{
+		"application": d.AppMetadataEvent,
+		"assets":      d.SoftwareAssetEvents,
+		"release":     d.ReleaseEvent,
+	}, "", "  ")
+	reviewHTML := fmt.Sprintf(`
+    <div class="section">
+      <h2>Proof and events</h2>
+      <div class="asset-item">
+        <div class="label">C1 status</div>
+        <div class="value">%s</div>
+      </div>
+      <pre class="changelog">%s</pre>
+    </div>`, html.EscapeString(d.C1Status), html.EscapeString(string(eventsJSON)))
+
 	return fmt.Sprintf(previewHTML,
 		// Title
 		html.EscapeString(d.AppName),
@@ -479,9 +567,11 @@ func (s *PreviewServer) buildHTML() string {
 		releaseSectionHTML,
 		// Assets section (built dynamically)
 		assetsHTML,
+		reviewHTML,
 		// Publish targets
 		html.EscapeString(d.BlossomServer),
 		relayURLsHTML,
+		s.sessionNonce,
 	)
 }
 
@@ -983,6 +1073,8 @@ const previewHTML = `<!DOCTYPE html>
     %s
     
     %s
+
+    %s
     
     <div class="section">
       <h2>Publish To</h2>
@@ -999,13 +1091,23 @@ const previewHTML = `<!DOCTYPE html>
     </div>
     
     <div class="actions">
-      <div class="terminal-hint">Press <kbd>Enter</kbd> in terminal to continue, or <kbd>Ctrl+C</kbd> to cancel</div>
+      <button type="button" onclick="decide('/api/approve', true)">Approve publication</button>
+      <button type="button" onclick="decide('/api/reject', false)">Reject</button>
+      <div class="terminal-hint">Review the prepared metadata, files, and events before approving.</div>
     </div>
     
     <div id="status" class="status"></div>
   </div>
   
   <script>
+    const sessionNonce = %q;
+    async function decide(path, approved) {
+      await fetch(path, {method: 'POST', headers: {'X-Session-Nonce': sessionNonce}});
+      const status = document.getElementById('status');
+      status.className = approved ? 'status success' : 'status';
+      status.textContent = approved ? 'Approved. You can close this window.' : 'Rejected. You can close this window.';
+    }
+
     // Poll for terminal confirmation or server shutdown
     async function pollCLI() {
       while (true) {

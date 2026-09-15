@@ -1,6 +1,7 @@
 package nostr
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -76,8 +77,8 @@ func TestBuildAppMetadataEvent(t *testing.T) {
 	}
 
 	hTags := filterExactTag(event.Tags, "h")
-	if len(hTags) != 1 || hTags[0][1] != DefaultCommunity {
-		t.Errorf("expected default h tag %q, got %v", DefaultCommunity, hTags)
+	if len(hTags) != 0 {
+		t.Errorf("deprecated community tags must be omitted, got %v", hTags)
 	}
 }
 
@@ -104,6 +105,10 @@ func TestBuildReleaseEvent(t *testing.T) {
 	iTag := event.Tags.GetFirst([]string{"i"})
 	if iTag == nil || (*iTag)[1] != "com.example.app" {
 		t.Errorf("missing or incorrect i tag: %v", iTag)
+	}
+	aTag := event.Tags.GetFirst([]string{"a"})
+	if aTag == nil || (*aTag)[1] != "32267:"+pubkey+":com.example.app" {
+		t.Errorf("missing or incorrect a tag: %v", aTag)
 	}
 
 	// Check d tag format
@@ -272,6 +277,24 @@ func TestBuildSoftwareAssetEvent(t *testing.T) {
 	if fnTag == nil || (*fnTag)[1] != "example-v1.2.3-arm64.apk" {
 		t.Error("missing or incorrect filename tag")
 	}
+
+	if event.Content != "" {
+		t.Errorf("expected empty content without changelog, got %q", event.Content)
+	}
+}
+
+func TestBuildSoftwareAssetEventKeepsContentEmpty(t *testing.T) {
+	meta := &AssetMetadata{
+		Identifier: "com.example.app",
+		Version:    "1.2.3",
+		SHA256:     "abc123def456",
+		Platforms:  []string{"android-arm64-v8a"},
+	}
+
+	event := BuildSoftwareAssetEvent(meta, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	if event.Content != "" {
+		t.Errorf("expected empty asset content, got %q", event.Content)
+	}
 }
 
 func TestBuildSoftwareAssetEventEmptyVersionFallsBackToVersionCode(t *testing.T) {
@@ -289,6 +312,34 @@ func TestBuildSoftwareAssetEventEmptyVersionFallsBackToVersionCode(t *testing.T)
 	versionTag := event.Tags.GetFirst([]string{"version"})
 	if versionTag == nil || (*versionTag)[1] != "789" {
 		t.Errorf("expected version tag to fall back to version_code, got %v", versionTag)
+	}
+}
+
+func TestEventCollectionTagsAreCanonical(t *testing.T) {
+	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	app := BuildAppMetadataEvent(&AppMetadata{
+		PackageID: "com.example.app",
+		Tags:      []string{"z", "a", "z"},
+		ImageURLs: []string{"https://example.com/b.png", "https://example.com/a.png", "https://example.com/a.png"},
+		Platforms: []string{"android-x86", "android-arm64-v8a", "android-x86"},
+	}, pubkey)
+	if got, want := filterExactTag(app.Tags, "t"), (nostr.Tags{{"t", "a"}, {"t", "z"}}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("app tags = %v, want %v", got, want)
+	}
+	if got, want := filterExactTag(app.Tags, "image"), (nostr.Tags{{"image", "https://example.com/a.png"}, {"image", "https://example.com/b.png"}}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("images = %v, want %v", got, want)
+	}
+	asset := BuildSoftwareAssetEvent(&AssetMetadata{
+		Identifier: "com.example.app", SHA256: "hash",
+		URLs:          []string{"https://example.com/b.apk", "https://example.com/a.apk", "https://example.com/a.apk"},
+		Platforms:     []string{"android-x86", "android-arm64-v8a", "android-x86"},
+		SupportedNIPs: []string{"82", "34", "82"},
+	}, pubkey)
+	if got, want := filterExactTag(asset.Tags, "url"), (nostr.Tags{{"url", "https://example.com/a.apk"}, {"url", "https://example.com/b.apk"}}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("asset URLs = %v, want %v", got, want)
+	}
+	if got, want := filterExactTag(asset.Tags, "supported_nip"), (nostr.Tags{{"supported_nip", "34"}, {"supported_nip", "82"}}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("supported NIPs = %v, want %v", got, want)
 	}
 }
 
@@ -316,12 +367,14 @@ func TestBuildEventSet(t *testing.T) {
 
 	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	originalURL := "https://github.com/example/app/releases/download/v1.0.0/app.apk"
+	blossomURL := "https://cdn.example.com/abc123.apk"
 
 	events := BuildEventSet(BuildEventSetParams{
 		APKInfo:     apkInfo,
 		Config:      cfg,
 		Pubkey:      pubkey,
 		OriginalURL: originalURL,
+		BlossomURL:  blossomURL,
 	})
 
 	if events.AppMetadata == nil {
@@ -369,6 +422,10 @@ func TestBuildEventSet(t *testing.T) {
 	if iTag == nil || (*iTag)[1] != "com.example.app" {
 		t.Errorf("expected i tag 'com.example.app', got %v", iTag)
 	}
+	urlTags := filterExactTag(events.SoftwareAssets[0].Tags, "url")
+	if len(urlTags) != 1 || urlTags[0][1] != originalURL {
+		t.Errorf("asset URLs = %v, want only the original source URL", urlTags)
+	}
 }
 
 func TestBuildEventSetFallbackToLabel(t *testing.T) {
@@ -399,7 +456,7 @@ func TestBuildEventSetFallbackToLabel(t *testing.T) {
 }
 
 func TestBuildEventSetArchitectureIndependent(t *testing.T) {
-	// APK with no native libraries should support all Android platforms
+	// APKs with no native libraries omit architecture restrictions.
 	apkInfo := &apk.APKInfo{
 		PackageID:     "com.example.app",
 		VersionName:   "1.0.0",
@@ -419,10 +476,10 @@ func TestBuildEventSetArchitectureIndependent(t *testing.T) {
 		Pubkey:  pubkey,
 	})
 
-	// Should have all 4 Android platform tags
+	// An absent f tag means architecture-independent.
 	fTags := filterExactTag(events.AppMetadata.Tags, "f")
-	if len(fTags) != 4 {
-		t.Errorf("expected 4 f tags for arch-independent APK, got %d", len(fTags))
+	if len(fTags) != 0 {
+		t.Errorf("expected no f tags for arch-independent APK, got %d", len(fTags))
 	}
 }
 
@@ -573,7 +630,7 @@ func TestBuildSoftwareAssetEventMultipleURLs(t *testing.T) {
 	}
 }
 
-// TestBuildEventSetWithChangelog tests the changelog is properly propagated
+// TestBuildEventSetWithChangelog keeps release notes on the release only.
 func TestBuildEventSetWithChangelog(t *testing.T) {
 	apkInfo := &apk.APKInfo{
 		PackageID:   "com.example.app",
@@ -598,6 +655,12 @@ func TestBuildEventSetWithChangelog(t *testing.T) {
 	// Release event should contain the changelog
 	if events.Release.Content != changelog {
 		t.Errorf("expected changelog %q in release content, got %q", changelog, events.Release.Content)
+	}
+	if len(events.SoftwareAssets) == 0 {
+		t.Fatal("expected at least one software asset")
+	}
+	if events.SoftwareAssets[0].Content != "" {
+		t.Errorf("expected empty asset content, got %q", events.SoftwareAssets[0].Content)
 	}
 }
 

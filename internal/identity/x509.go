@@ -26,7 +26,7 @@ import (
 )
 
 // DefaultExpiry is the default validity period for identity proofs.
-const DefaultExpiry = 365 * 24 * time.Hour // 1 year
+const DefaultExpiry = 2 * 365 * 24 * time.Hour // 2 years
 
 // JKS magic bytes: 0xFEEDFEED
 var jksMagic = []byte{0xFE, 0xED, 0xFE, 0xED}
@@ -50,7 +50,7 @@ type IdentityProof struct {
 
 // IdentityProofOptions contains options for generating an identity proof.
 type IdentityProofOptions struct {
-	Expiry time.Duration // How long the proof should be valid (default: 1 year)
+	Expiry time.Duration // How long the proof should be valid (default: 2 years)
 }
 
 // GenerateIdentityProof creates a NIP-C1 cryptographic identity proof.
@@ -88,8 +88,6 @@ func GenerateIdentityProof(privateKey crypto.PrivateKey, cert *x509.Certificate,
 	case *rsa.PrivateKey:
 		messageHash := sha256.Sum256([]byte(message))
 		signature, err = rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, messageHash[:])
-	case ed25519.PrivateKey:
-		signature = ed25519.Sign(key, []byte(message))
 	default:
 		return nil, fmt.Errorf("unsupported key type: %T", privateKey)
 	}
@@ -171,7 +169,7 @@ func (p *IdentityProof) ExpiryTime() time.Time {
 
 // IsExpired returns true if the proof has expired.
 func (p *IdentityProof) IsExpired() bool {
-	return time.Now().Unix() > p.Expiry
+	return time.Now().Unix() >= p.Expiry
 }
 
 // VerificationResult contains the result of verifying an identity proof.
@@ -188,28 +186,50 @@ type VerificationResult struct {
 
 // ParseIdentityProofFromEvent parses a kind 30509 event into an IdentityProof.
 func ParseIdentityProofFromEvent(event *nostr.Event) (*IdentityProof, error) {
+	if event == nil {
+		return nil, fmt.Errorf("identity proof event is required")
+	}
 	if event.Kind != 30509 {
 		return nil, fmt.Errorf("invalid event kind: expected 30509, got %d", event.Kind)
 	}
 
-	certHash := event.Tags.GetD()
-	if certHash == "" {
-		return nil, fmt.Errorf("missing d tag (cert hash)")
+	certHash, err := singletonTagValue(event, "d", true)
+	if err != nil {
+		return nil, err
+	}
+	if !isLowerHex(certHash, sha256.Size*2) {
+		return nil, fmt.Errorf("invalid d tag (certificate hash)")
 	}
 
-	signatureTag := event.Tags.GetFirst([]string{"signature"})
-	if signatureTag == nil || len(*signatureTag) < 2 {
-		return nil, fmt.Errorf("missing signature tag")
+	signature, err := singletonTagValue(event, "signature", true)
+	if err != nil {
+		return nil, err
 	}
-	signature := (*signatureTag)[1]
+	decodedSignature, err := base64.StdEncoding.DecodeString(signature)
+	if err != nil || len(decodedSignature) == 0 || base64.StdEncoding.EncodeToString(decodedSignature) != signature {
+		return nil, fmt.Errorf("invalid signature tag")
+	}
 
-	expiryTag := event.Tags.GetFirst([]string{"expiry"})
-	if expiryTag == nil || len(*expiryTag) < 2 {
-		return nil, fmt.Errorf("missing expiry tag")
+	expiryValue, err := singletonTagValue(event, "expiry", true)
+	if err != nil {
+		return nil, err
 	}
-	expiry, err := strconv.ParseInt((*expiryTag)[1], 10, 64)
+	expiry, err := strconv.ParseInt(expiryValue, 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("invalid expiry timestamp: %w", err)
+	}
+	if strconv.FormatInt(expiry, 10) != expiryValue {
+		return nil, fmt.Errorf("invalid expiry timestamp")
+	}
+	if _, err := singletonTagValue(event, "cert", false); err != nil {
+		return nil, err
+	}
+	delegation, err := singletonTagValue(event, "delegation", false)
+	if err != nil {
+		return nil, err
+	}
+	if delegation != "" && !isLowerHex(delegation, 64) {
+		return nil, fmt.Errorf("invalid delegation tag")
 	}
 
 	return &IdentityProof{
@@ -218,6 +238,85 @@ func ParseIdentityProofFromEvent(event *nostr.Event) (*IdentityProof, error) {
 		CreatedAt: int64(event.CreatedAt),
 		Expiry:    expiry,
 	}, nil
+}
+
+// ValidateActiveProofEvent verifies that event is a current, valid C1 proof
+// for certificate at now.
+func ValidateActiveProofEvent(event *nostr.Event, certificate *x509.Certificate, now time.Time) (*IdentityProof, error) {
+	if event == nil || certificate == nil {
+		return nil, fmt.Errorf("identity proof event and certificate are required")
+	}
+	if event.Content != "" {
+		return nil, fmt.Errorf("identity proof content must be empty")
+	}
+	if !isLowerHex(event.PubKey, 64) {
+		return nil, fmt.Errorf("invalid identity proof pubkey")
+	}
+	valid, err := event.CheckSignature()
+	if err != nil || !valid {
+		return nil, fmt.Errorf("invalid identity proof event signature")
+	}
+	proof, err := ParseIdentityProofFromEvent(event)
+	if err != nil {
+		return nil, err
+	}
+	if proof.CertHash != ComputeCertHash(certificate) {
+		return nil, fmt.Errorf("identity proof certificate does not match")
+	}
+	if proof.Expiry <= int64(event.CreatedAt) {
+		return nil, fmt.Errorf("expiry must be greater than created_at")
+	}
+	if now.Unix() >= proof.Expiry {
+		return nil, fmt.Errorf("identity proof has expired")
+	}
+	revoked, _ := IsRevoked(event)
+	if revoked {
+		return nil, fmt.Errorf("identity proof is revoked")
+	}
+	if encodedCert, err := singletonTagValue(event, "cert", false); err != nil {
+		return nil, err
+	} else if encodedCert != "" {
+		der, decodeErr := base64.StdEncoding.DecodeString(encodedCert)
+		if decodeErr != nil || base64.StdEncoding.EncodeToString(der) != encodedCert {
+			return nil, fmt.Errorf("invalid cert tag")
+		}
+		embedded, parseErr := x509.ParseCertificate(der)
+		if parseErr != nil || !bytes.Equal(embedded.Raw, certificate.Raw) {
+			return nil, fmt.Errorf("identity proof certificate does not match")
+		}
+	}
+	verification := VerifyIdentityProofWithCert(proof, event, event.PubKey, certificate)
+	if !verification.Valid || verification.Error != nil {
+		return nil, fmt.Errorf("invalid certificate proof signature")
+	}
+	return proof, nil
+}
+
+func singletonTagValue(event *nostr.Event, name string, required bool) (string, error) {
+	var value string
+	found := false
+	for _, tag := range event.Tags {
+		if len(tag) == 0 || tag[0] != name {
+			continue
+		}
+		if len(tag) != 2 || found || tag[1] == "" {
+			return "", fmt.Errorf("identity proof must contain at most one valid %s tag", name)
+		}
+		found = true
+		value = tag[1]
+	}
+	if required && !found {
+		return "", fmt.Errorf("identity proof is missing %s tag", name)
+	}
+	return value, nil
+}
+
+func isLowerHex(value string, length int) bool {
+	if len(value) != length {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && hex.EncodeToString(decoded) == value
 }
 
 // IsRevoked checks if a kind 30509 event has been revoked.
@@ -299,19 +398,9 @@ func verifyProofSignature(proof *IdentityProof, event *nostr.Event, pubkeyHex st
 		messageHash := sha256.Sum256([]byte(message))
 		err := rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, messageHash[:], signature)
 		if err != nil {
-			pssOpts := &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash}
-			err = rsa.VerifyPSS(pubKey, crypto.SHA256, messageHash[:], signature, pssOpts)
-		}
-		if err != nil {
 			result.Error = fmt.Errorf("RSA signature verification failed: %w", err)
 		} else {
 			result.Valid = true
-		}
-	case ed25519.PublicKey:
-		if ed25519.Verify(pubKey, []byte(message), signature) {
-			result.Valid = true
-		} else {
-			result.Error = fmt.Errorf("Ed25519 signature verification failed")
 		}
 	default:
 		result.Error = fmt.Errorf("unsupported public key type: %T", pubKeyInterface)

@@ -3,9 +3,8 @@ package source
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
-	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -41,13 +40,13 @@ func newSecureHTTPClient(timeout time.Duration) *http.Client {
 			MaxIdleConnsPerHost: 10,
 			IdleConnTimeout:     90 * time.Second,
 		}),
+		CheckRedirect: validateRedirect,
 	}
 }
 
 // downloadStallTimeout is the duration after which a download is considered stalled
 // if no data has been received.
 const downloadStallTimeout = 30 * time.Second
-const torSOCKSAddress = "127.0.0.1:9050"
 
 // downloadMaxAttempts is how many times DownloadHTTP retries transient failures
 // (unexpected EOF, connection reset) before giving up.
@@ -56,10 +55,18 @@ const downloadMaxAttempts = 3
 // downloadRetryBackoff is the base delay between download attempts.
 const downloadRetryBackoff = 1 * time.Second
 
+var errUnsafeDownloadURL = errors.New("refusing unsafe download URL")
+
+const torSOCKSAddress = "127.0.0.1:9050"
+
 // newDownloadHTTPClient creates an HTTP client for large file downloads.
 // Unlike newSecureHTTPClient, it does NOT set a total request timeout.
 // Instead, the caller should wrap the response body with a StallTimeoutReader
 // to detect stalled downloads. Retries once through Tor on HTTP 403.
+//
+// Every redirect hop is validated with the same HTTPS-outside-loopback rule
+// applied to explicit configuration URLs, so a download cannot be steered to
+// an insecure or internal target by following a redirect.
 func newDownloadHTTPClient() *http.Client {
 	return &http.Client{
 		Transport: withTorFallback(&http.Transport{
@@ -71,7 +78,28 @@ func newDownloadHTTPClient() *http.Client {
 			IdleConnTimeout:       90 * time.Second,
 			ResponseHeaderTimeout: 30 * time.Second, // timeout for server to start responding
 		}),
+		CheckRedirect: validateRedirect,
 	}
+}
+
+func validateRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return fmt.Errorf("too many redirects")
+	}
+	return validateDownloadURL(req.URL.String())
+}
+
+// validateDownloadURL applies the same HTTPS-outside-loopback rule that
+// config.ValidateURL enforces on explicit configuration URLs (repository,
+// release_source, asset_url) to a download target. It is used both for the
+// initial request and for every redirect hop, so a redirect or a dynamically
+// extracted URL (e.g. a GitLab interstitial target or a web asset extractor
+// result) cannot smuggle an insecure or internal target past validation.
+func validateDownloadURL(rawURL string) error {
+	if err := config.ValidateURL(rawURL); err != nil {
+		return fmt.Errorf("%w: %v", errUnsafeDownloadURL, err)
+	}
+	return nil
 }
 
 // newTorHTTPClient creates an HTTP client routed through a locally running
@@ -98,6 +126,7 @@ func newTorHTTPClient() (*http.Client, error) {
 			IdleConnTimeout:       90 * time.Second,
 			ResponseHeaderTimeout: 30 * time.Second,
 		},
+		CheckRedirect: validateRedirect,
 	}, nil
 }
 
@@ -156,8 +185,6 @@ func DoWithTorFallback(ctx context.Context, client *http.Client, req *http.Reque
 	if client == nil {
 		client = &http.Client{Transport: withTorFallback(nil)}
 	} else if _, ok := client.Transport.(*torFallbackTransport); !ok {
-		// Clone the client so callers keep their timeout/settings while gaining
-		// a single Tor retry on 403 (e.g. workflow image downloads).
 		cloned := *client
 		cloned.Transport = withTorFallback(client.Transport)
 		client = &cloned
@@ -176,8 +203,6 @@ func checkHTTPStatus(resp *http.Response, serviceName string) error {
 	switch resp.StatusCode {
 	case http.StatusOK:
 		return nil
-	case http.StatusNotModified:
-		return nil // Caller should handle 304 separately if using ETag caching
 	case http.StatusNotFound:
 		return fmt.Errorf("%s returned 404 Not Found: %s", serviceName, resp.Request.URL)
 	case http.StatusForbidden:
@@ -191,11 +216,6 @@ func checkHTTPStatus(resp *http.Response, serviceName string) error {
 	case http.StatusServiceUnavailable, http.StatusBadGateway, http.StatusGatewayTimeout:
 		return fmt.Errorf("%s temporarily unavailable (status %d): try again later", serviceName, resp.StatusCode)
 	default:
-		// Try to read error body for more context (limit to 512 bytes)
-		bodyPreview, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		if len(bodyPreview) > 0 {
-			return fmt.Errorf("%s returned status %d: %s", serviceName, resp.StatusCode, string(bodyPreview))
-		}
 		return fmt.Errorf("%s returned status %d", serviceName, resp.StatusCode)
 	}
 }
@@ -231,17 +251,23 @@ func (r *StallTimeoutReader) Read(p []byte) (int, error) {
 		r.timer.Stop()
 		return res.n, res.err
 	case <-r.timer.C:
+		if closer, ok := r.Reader.(io.Closer); ok {
+			_ = closer.Close()
+		}
 		return 0, fmt.Errorf("download stalled: no data received for %s", r.Timeout)
 	}
 }
 
 // unsupportedArchRegex matches APK filenames that explicitly indicate unsupported architectures.
 // We only want arm64-v8a. Filter out x86, x86_64 (Intel/AMD) and armeabi/armeabi-v7a (32-bit ARM).
-var unsupportedArchRegex = regexp.MustCompile(`(?i)[-_\.](x86_64|x86|i686|i386|amd64|armeabi-v7a|armeabi)[-_\.]`)
+var unsupportedArchRegex = regexp.MustCompile(`(?i)(^|[-_.])(x86_64|x86|armeabi-v7a|armeabi)([-_.]|$)`)
 
 // MaxRemoteDownloadSize is the maximum size for remote downloads (images, metadata, etc.)
 // This prevents memory exhaustion from malicious or unexpectedly large responses.
 const MaxRemoteDownloadSize = 20 * 1024 * 1024 // 20MB
+
+// MaxJSONResponseSize bounds API responses decoded into memory.
+const MaxJSONResponseSize int64 = 10 * 1024 * 1024
 
 // MaxDownloadSize is the hard cap for APK downloads (and any HTTP downloads
 // via DownloadHTTP) to avoid excessive bandwidth or disk usage.
@@ -265,6 +291,7 @@ type Asset struct {
 type Release struct {
 	Version    string    // Version string (e.g., "1.2.3" or "v1.2.3")
 	TagName    string    // Git tag name (if applicable)
+	Name       string    // Human-readable release title (if applicable)
 	Changelog  string    // Release notes/changelog
 	Assets     []*Asset  // Available APK assets
 	PreRelease bool      // Whether this is a pre-release
@@ -299,15 +326,8 @@ type Options struct {
 	// Typically the directory containing the config file.
 	BaseDir string
 
-	// SkipCache bypasses ETag cache for GitHub sources (--overwrite-release).
-	SkipCache bool
-
 	// IncludePreReleases includes pre-releases when fetching the latest release (--pre-release).
 	IncludePreReleases bool
-
-	// SkipDownloadCache skips saving downloaded APKs to the download cache.
-	// Used in --quiet mode and for transient operations like --check.
-	SkipDownloadCache bool
 }
 
 // New creates a new source based on the config.
@@ -331,16 +351,14 @@ func NewWithOptions(cfg *config.Config, opts Options) (Source, error) {
 		if err != nil {
 			return nil, err
 		}
-		gh.SkipCache = opts.SkipCache
 		gh.IncludePreReleases = opts.IncludePreReleases
-		gh.SkipDownloadCache = opts.SkipDownloadCache
 		return gh, nil
 	case config.SourceGitLab:
 		gl, err := NewGitLab(cfg)
 		if err != nil {
 			return nil, err
 		}
-		gl.SkipDownloadCache = opts.SkipDownloadCache
+		gl.IncludePreReleases = opts.IncludePreReleases
 		return gl, nil
 	case config.SourceGitea:
 		gt, err := NewGitea(cfg)
@@ -348,22 +366,18 @@ func NewWithOptions(cfg *config.Config, opts Options) (Source, error) {
 			return nil, err
 		}
 		gt.IncludePreReleases = opts.IncludePreReleases
-		gt.SkipDownloadCache = opts.SkipDownloadCache
 		return gt, nil
 	case config.SourceFDroid:
 		fd, err := NewFDroid(cfg)
 		if err != nil {
 			return nil, err
 		}
-		fd.SkipDownloadCache = opts.SkipDownloadCache
 		return fd, nil
 	case config.SourceWeb:
 		web, err := NewWeb(cfg)
 		if err != nil {
 			return nil, err
 		}
-		web.SkipCache = opts.SkipCache
-		web.SkipDownloadCache = opts.SkipDownloadCache
 		return web, nil
 	default:
 		return nil, fmt.Errorf("unsupported source type: %s", sourceType)
@@ -372,65 +386,6 @@ func NewWithOptions(cfg *config.Config, opts Options) (Source, error) {
 
 // DownloadProgress is called during downloads to report progress.
 type DownloadProgress func(downloaded, total int64)
-
-// CacheClearer is an optional interface for sources that support cache clearing.
-// Sources that cache release data (like GitHub with ETags) should implement this
-// to allow clearing the cache when publishing fails.
-type CacheClearer interface {
-	// ClearCache removes any cached release data.
-	ClearCache() error
-}
-
-// CachedReleaseProvider is an optional interface for sources that can return a
-// previously cached release. Used when FetchLatestRelease returns ErrNotModified
-// so the workflow can proceed with the cached data instead of aborting.
-type CachedReleaseProvider interface {
-	GetCachedRelease() *Release
-}
-
-// CacheSkipper is an optional interface for sources that support bypassing their
-// ETag/version cache. Used as a fallback when ErrNotModified is returned but no
-// cached release is available — the workflow retries with the cache skipped.
-type CacheSkipper interface {
-	SetSkipCache(bool)
-}
-
-// CacheCommitter is an optional interface for sources that support deferred cache commits.
-// Sources like GitHub store cache data in memory during fetch, then commit to disk
-// only after successful publishing via CommitCache().
-type CacheCommitter interface {
-	// CommitCache persists the pending cache data to disk.
-	// Should be called after successful publishing.
-	CommitCache() error
-}
-
-// PublishedVersionReader is an optional interface for sources that can return
-// the last successfully published release version from their cache.
-type PublishedVersionReader interface {
-	GetPublishedVersion() string
-}
-
-// IsAlreadyPublished reports whether the local source cache indicates this
-// release was already published successfully. Used by `zsp utils has-new-release`
-// and as an early gate in `zsp publish` (skipped with --overwrite-release).
-//
-// Returns true when FetchLatestRelease returned ErrNotModified, or when
-// release.Version matches GetPublishedVersion(). Real fetch errors are not
-// treated as already-published — the caller should handle those separately.
-func IsAlreadyPublished(src Source, release *Release, fetchErr error) bool {
-	if fetchErr == ErrNotModified {
-		return true
-	}
-	if fetchErr != nil || release == nil {
-		return false
-	}
-	reader, ok := src.(PublishedVersionReader)
-	if !ok {
-		return false
-	}
-	cached := reader.GetPublishedVersion()
-	return cached != "" && cached == release.Version
-}
 
 // Downloader wraps an io.Reader to track download progress.
 type ProgressReader struct {
@@ -449,65 +404,66 @@ func (pr *ProgressReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// DownloadHTTP downloads a file from a URL with optional progress reporting.
-// This is a shared helper for all HTTP-based sources.
-// Uses stall-based timeout: fails only if no data received for 30s, not after a fixed total time.
-// Transient failures (unexpected EOF, connection reset) are retried up to downloadMaxAttempts.
-func DownloadHTTP(ctx context.Context, client *http.Client, url, destPath string, expectedSize int64, progress DownloadProgress) error {
-	_ = client // kept for API compatibility with callers that pass a configured client
-
-	var lastErr error
-	for attempt := 1; attempt <= downloadMaxAttempts; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if attempt > 1 {
-			backoff := downloadRetryBackoff * time.Duration(attempt-1)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(backoff):
-			}
-		}
-
-		err := downloadHTTPOnce(ctx, url, destPath, expectedSize, progress)
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		if !isTransientDownloadError(err) || attempt == downloadMaxAttempts {
-			return err
-		}
-		os.Remove(destPath)
+// prepareDownloadDest resolves the destination file path for a downloaded
+// asset, creating destDir if needed and sanitizing name against path
+// traversal. This is a shared helper for all sources that download to a
+// caller-owned temporary directory.
+func prepareDownloadDest(destDir, name string) (string, error) {
+	if destDir == "" {
+		destDir = os.TempDir()
 	}
-	return lastErr
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create destination directory: %w", err)
+	}
+
+	// Security: sanitize the filename to prevent path traversal attacks.
+	safeName := filepath.Base(name)
+	if safeName == "." || safeName == ".." || safeName == "" {
+		return "", fmt.Errorf("invalid asset filename: %s", name)
+	}
+	destPath := filepath.Join(destDir, safeName)
+
+	// Security: validate the final path is within destDir.
+	cleanDest := filepath.Clean(destPath)
+	cleanDir := filepath.Clean(destDir)
+	if !strings.HasPrefix(cleanDest, cleanDir+string(filepath.Separator)) && cleanDest != cleanDir {
+		return "", fmt.Errorf("invalid destination path: path traversal detected")
+	}
+	return destPath, nil
 }
 
-// downloadHTTPOnce performs a single download attempt.
-func downloadHTTPOnce(ctx context.Context, url, destPath string, expectedSize int64, progress DownloadProgress) error {
-	dlClient := newDownloadHTTPClient()
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+// doGet issues a GET request with optional headers (e.g. Authorization) and
+// validates a 200 response. The caller owns the returned response and must
+// close its body.
+func doGet(ctx context.Context, client *http.Client, rawURL string, headers map[string]string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
 	}
 
-	resp, err := DoWithTorFallback(ctx, dlClient, req)
+	resp, err := DoWithTorFallback(ctx, client, req)
 	if err != nil {
-		return fmt.Errorf("download failed: %w", err)
+		return nil, fmt.Errorf("download failed: %w", err)
 	}
-	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download failed with status %d: %s", resp.StatusCode, url)
+		resp.Body.Close()
+		return nil, fmt.Errorf("download failed with status %d: %s", resp.StatusCode, rawURL)
 	}
+	return resp, nil
+}
 
-	// Use Content-Length from response if available, otherwise use expected size
+// writeDownloadResponse streams resp.Body to destPath, enforcing
+// MaxDownloadSize and the stall timeout, and reporting progress. The caller
+// retains ownership of resp and must close its body.
+func writeDownloadResponse(resp *http.Response, destPath string, expectedSize int64, progress DownloadProgress) error {
+	// Use Content-Length from response if available, otherwise use expected size.
 	total := resp.ContentLength
 	if total <= 0 {
 		total = expectedSize
 	}
-
 	if total > MaxDownloadSize {
 		return fmt.Errorf("download size %d bytes exceeds limit of %d bytes", total, MaxDownloadSize)
 	}
@@ -516,13 +472,10 @@ func downloadHTTPOnce(ctx context.Context, url, destPath string, expectedSize in
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
-	defer f.Close()
-
 	var reader io.Reader = &StallTimeoutReader{
 		Reader:  resp.Body,
 		Timeout: downloadStallTimeout,
 	}
-
 	if progress != nil {
 		reader = &ProgressReader{
 			Reader:     reader,
@@ -539,10 +492,14 @@ func downloadHTTPOnce(ctx context.Context, url, destPath string, expectedSize in
 
 	written, err := io.Copy(f, limitedReader)
 	if err != nil {
+		closeErr := f.Close()
 		os.Remove(destPath)
-		return fmt.Errorf("failed to write file: %w", err)
+		return fmt.Errorf("failed to write file: %w", errors.Join(err, closeErr))
 	}
-
+	if err := f.Close(); err != nil {
+		os.Remove(destPath)
+		return fmt.Errorf("close download: %w", err)
+	}
 	if written > MaxDownloadSize {
 		os.Remove(destPath)
 		return fmt.Errorf("download exceeded limit of %d bytes", MaxDownloadSize)
@@ -553,13 +510,101 @@ func downloadHTTPOnce(ctx context.Context, url, destPath string, expectedSize in
 		os.Remove(destPath)
 		return fmt.Errorf("failed to write file: %w", io.ErrUnexpectedEOF)
 	}
-
 	return nil
+}
+
+// decodeJSONResponse reads and decodes a remote JSON response within maxBytes.
+// The cap-plus-one read detects bodies that omit or lie about Content-Length.
+func decodeJSONResponse(resp *http.Response, maxBytes int64, target interface{}) error {
+	if maxBytes <= 0 {
+		return fmt.Errorf("JSON response limit must be positive")
+	}
+	if resp.ContentLength > maxBytes {
+		return fmt.Errorf("JSON response exceeds maximum size of %d bytes", maxBytes)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return fmt.Errorf("read JSON response: %w", err)
+	}
+	if int64(len(body)) > maxBytes {
+		return fmt.Errorf("JSON response exceeds maximum size of %d bytes", maxBytes)
+	}
+	if err := json.Unmarshal(body, target); err != nil {
+		return fmt.Errorf("decode JSON response: %w", err)
+	}
+	return nil
+}
+
+// downloadOnce performs a single fetch-and-write attempt. fetch performs the
+// (possibly source-specific) HTTP exchange for this attempt and must return a
+// fresh response — retries must not reuse an already-consumed body.
+func downloadOnce(ctx context.Context, destPath string, expectedSize int64, progress DownloadProgress, fetch func(context.Context) (*http.Response, error)) error {
+	resp, err := fetch(ctx)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return writeDownloadResponse(resp, destPath, expectedSize, progress)
+}
+
+// downloadWithRetries retries downloadOnce for transient failures (unexpected
+// EOF, connection reset, stalls) up to downloadMaxAttempts, backing off
+// between attempts and honoring ctx cancellation. This is the shared retry
+// harness behind DownloadHTTP; source-specific download logic (e.g. GitLab's
+// interstitial resolution) can supply its own fetch function to gain the same
+// size limit, stall detection, and bounded retries.
+func downloadWithRetries(ctx context.Context, destPath string, expectedSize int64, progress DownloadProgress, fetch func(context.Context) (*http.Response, error)) error {
+	var lastErr error
+	for attempt := 1; attempt <= downloadMaxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if attempt > 1 {
+			backoff := downloadRetryBackoff * time.Duration(attempt-1)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+		}
+
+		err := downloadOnce(ctx, destPath, expectedSize, progress, fetch)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isTransientDownloadError(err) || attempt == downloadMaxAttempts {
+			return err
+		}
+		os.Remove(destPath)
+	}
+	return lastErr
+}
+
+// DownloadHTTP downloads a file from a URL to destPath with optional progress
+// reporting. This is the shared pipeline for all HTTP-based sources: it
+// enforces the size limit, validates the URL and every redirect hop, applies
+// stall-based timeout detection (fails only if no data is received for 30s,
+// not after a fixed total time), and retries transient failures (unexpected
+// EOF, connection reset) up to downloadMaxAttempts. headers are attached to
+// every request attempt, e.g. a source's Authorization token; pass nil when
+// none are needed.
+func DownloadHTTP(ctx context.Context, rawURL, destPath string, expectedSize int64, headers map[string]string, progress DownloadProgress) error {
+	if err := validateDownloadURL(rawURL); err != nil {
+		return err
+	}
+	fetch := func(ctx context.Context) (*http.Response, error) {
+		return doGet(ctx, newDownloadHTTPClient(), rawURL, headers)
+	}
+	return downloadWithRetries(ctx, destPath, expectedSize, progress, fetch)
 }
 
 // isTransientDownloadError reports whether err is worth retrying.
 func isTransientDownloadError(err error) bool {
 	if err == nil {
+		return false
+	}
+	if errors.Is(err, errUnsafeDownloadURL) {
 		return false
 	}
 	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
@@ -638,80 +683,4 @@ func HasValidAPKs(assets []*Asset) bool {
 		}
 	}
 	return false
-}
-
-// DownloadCacheDir returns the directory for caching downloaded APKs.
-func DownloadCacheDir() string {
-	cacheDir, err := os.UserCacheDir()
-	if err != nil {
-		cacheDir = os.TempDir()
-	}
-	return filepath.Join(cacheDir, "zsp", "downloads")
-}
-
-// DownloadCacheKey generates a cache key for a download URL.
-// The key is a hex-encoded SHA256 hash prefix of the URL.
-func DownloadCacheKey(downloadURL string) string {
-	h := sha256.Sum256([]byte(downloadURL))
-	return hex.EncodeToString(h[:16]) // 32 hex chars
-}
-
-// GetCachedDownload checks if a download is already cached.
-// Returns the path if cached and valid, empty string otherwise.
-func GetCachedDownload(downloadURL, filename string) string {
-	cacheDir := DownloadCacheDir()
-	cacheKey := DownloadCacheKey(downloadURL)
-	cachedPath := filepath.Join(cacheDir, cacheKey+"_"+filepath.Base(filename))
-
-	info, err := os.Stat(cachedPath)
-	if err != nil || info.Size() == 0 {
-		return "" // Not cached or invalid
-	}
-	return cachedPath
-}
-
-// DeleteCachedDownload removes a cached download file.
-// Returns nil if the file doesn't exist or was successfully deleted.
-func DeleteCachedDownload(downloadURL, filename string) error {
-	cacheDir := DownloadCacheDir()
-	cacheKey := DownloadCacheKey(downloadURL)
-	cachedPath := filepath.Join(cacheDir, cacheKey+"_"+filepath.Base(filename))
-
-	err := os.Remove(cachedPath)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	return err
-}
-
-// SaveToDownloadCache saves a downloaded file to the cache.
-// Returns the cached path on success.
-func SaveToDownloadCache(downloadURL, filename, srcPath string) (string, error) {
-	cacheDir := DownloadCacheDir()
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
-		return "", err
-	}
-
-	cacheKey := DownloadCacheKey(downloadURL)
-	cachedPath := filepath.Join(cacheDir, cacheKey+"_"+filepath.Base(filename))
-
-	// Copy file to cache
-	src, err := os.Open(srcPath)
-	if err != nil {
-		return "", err
-	}
-	defer src.Close()
-
-	dst, err := os.Create(cachedPath)
-	if err != nil {
-		return "", err
-	}
-	defer dst.Close()
-
-	if _, err := io.Copy(dst, src); err != nil {
-		os.Remove(cachedPath)
-		return "", err
-	}
-
-	return cachedPath, nil
 }

@@ -3,7 +3,6 @@ package source
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -90,7 +89,6 @@ func DefaultMetadataSources(cfg *config.Config) []string {
 		for _, s := range cfg.MetadataSources {
 			addSource(strings.ToLower(strings.TrimSpace(s)))
 		}
-		sortMetadataSourcesByPriority(sources)
 		return sources
 	}
 
@@ -104,37 +102,6 @@ func DefaultMetadataSources(cfg *config.Config) []string {
 		return []string{"fastlane"}
 	default:
 		return nil
-	}
-}
-
-// metadataSourcePriority defines the priority order for metadata sources.
-// Lower values = higher priority (processed first, wins for empty fields).
-var metadataSourcePriority = map[string]int{
-	"playstore": 1,
-	"fastlane":  2,
-	"fdroid":    3,
-	"gitlab":    4,
-	"github":    5,
-}
-
-// sortMetadataSourcesByPriority sorts metadata sources by priority.
-// Sources not in the priority map get lowest priority.
-func sortMetadataSourcesByPriority(sources []string) {
-	for i := 0; i < len(sources)-1; i++ {
-		for j := i + 1; j < len(sources); j++ {
-			pi := metadataSourcePriority[sources[i]]
-			pj := metadataSourcePriority[sources[j]]
-			// If not in map, use a high default priority (low precedence)
-			if pi == 0 {
-				pi = 100
-			}
-			if pj == 0 {
-				pj = 100
-			}
-			if pj < pi {
-				sources[i], sources[j] = sources[j], sources[i]
-			}
-		}
 	}
 }
 
@@ -174,6 +141,10 @@ func (f *MetadataFetcher) FetchMetadataWithResult(ctx context.Context, sources [
 	result := &MetadataResult{}
 
 	for _, source := range sources {
+		if err := ctx.Err(); err != nil {
+			result.Errors = append(result.Errors, &MetadataError{Source: source, Err: err})
+			break
+		}
 		source = strings.TrimSpace(strings.ToLower(source))
 		meta, err := f.fetchMetadataSource(ctx, source)
 		if err != nil {
@@ -181,6 +152,9 @@ func (f *MetadataFetcher) FetchMetadataWithResult(ctx context.Context, sources [
 				Source: source,
 				Err:    err,
 			})
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				break
+			}
 			continue
 		}
 
@@ -229,6 +203,8 @@ func (f *MetadataFetcher) fetchMetadataSource(ctx context.Context, source string
 		return f.fetchGitHubMetadata(ctx)
 	case "gitlab":
 		return f.fetchGitLabMetadata(ctx)
+	case "gitea":
+		return f.fetchGiteaMetadata(ctx)
 	case "fdroid":
 		return f.fetchFDroidMetadata(ctx)
 	case "playstore":
@@ -266,7 +242,7 @@ func (f *MetadataFetcher) fetchGitHubMetadata(ctx context.Context) (*AppMetadata
 	}
 
 	req.Header.Set("Accept", "application/vnd.github+json")
-	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+	if token := config.GetEnv("GITHUB_TOKEN"); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
@@ -290,7 +266,7 @@ func (f *MetadataFetcher) fetchGitHubMetadata(ctx context.Context) (*AppMetadata
 		} `json:"license"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&repoInfo); err != nil {
+	if err := decodeJSONResponse(resp, MaxJSONResponseSize, &repoInfo); err != nil {
 		return nil, fmt.Errorf("failed to parse repo info: %w", err)
 	}
 
@@ -330,7 +306,7 @@ func (f *MetadataFetcher) fetchGitHubReadme(ctx context.Context, owner, repo str
 
 	// Request raw content
 	req.Header.Set("Accept", "application/vnd.github.raw")
-	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+	if token := config.GetEnv("GITHUB_TOKEN"); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
@@ -402,7 +378,7 @@ func (f *MetadataFetcher) fetchGitLabMetadata(ctx context.Context) (*AppMetadata
 		} `json:"license"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&projectInfo); err != nil {
+	if err := decodeJSONResponse(resp, MaxJSONResponseSize, &projectInfo); err != nil {
 		return nil, fmt.Errorf("failed to parse project info: %w", err)
 	}
 
@@ -465,6 +441,54 @@ func (f *MetadataFetcher) fetchGitLabReadme(ctx context.Context, baseURL, encode
 	}
 
 	return "", fmt.Errorf("no README found")
+}
+
+// fetchGiteaMetadata fetches native repository metadata from a
+// Gitea/Forgejo/Codeberg-compatible API.
+func (f *MetadataFetcher) fetchGiteaMetadata(ctx context.Context) (*AppMetadata, error) {
+	baseURL, repoPath := config.GetGiteaRepo(f.cfg.Repository)
+	if repoPath == "" && f.cfg.ReleaseSource != nil {
+		baseURL, repoPath = config.GetGiteaRepo(f.cfg.ReleaseSource.URL)
+	}
+	parts := strings.Split(repoPath, "/")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("no Gitea repository configured")
+	}
+
+	apiURL := fmt.Sprintf("%s/api/v1/repos/%s/%s", baseURL, parts[0], parts[1])
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	if token := config.GetEnv("GITEA_TOKEN"); token != "" {
+		req.Header.Set("Authorization", "token "+token)
+	}
+
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch repository info: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Gitea API error: %d", resp.StatusCode)
+	}
+
+	var repoInfo struct {
+		Name        string   `json:"name"`
+		Description string   `json:"description"`
+		Website     string   `json:"website"`
+		Topics      []string `json:"topics"`
+	}
+	if err := decodeJSONResponse(resp, MaxJSONResponseSize, &repoInfo); err != nil {
+		return nil, fmt.Errorf("failed to parse repository info: %w", err)
+	}
+	return &AppMetadata{
+		Name:        repoInfo.Name,
+		Description: repoInfo.Description,
+		Website:     repoInfo.Website,
+		Tags:        repoInfo.Topics,
+	}, nil
 }
 
 // fetchFDroidMetadata fetches metadata from F-Droid by scraping the website.
@@ -713,7 +737,9 @@ func (f *MetadataFetcher) mergeMetadata(meta *AppMetadata) {
 		f.cfg.Summary = meta.Summary
 	}
 	if f.cfg.Website == "" && meta.Website != "" {
-		f.cfg.Website = meta.Website
+		if config.ValidateURL(meta.Website) == nil {
+			f.cfg.Website = meta.Website
+		}
 	}
 	if f.cfg.License == "" && meta.License != "" {
 		f.cfg.License = meta.License
@@ -722,10 +748,16 @@ func (f *MetadataFetcher) mergeMetadata(meta *AppMetadata) {
 		f.cfg.Tags = meta.Tags
 	}
 	if len(f.cfg.Images) == 0 && len(meta.ImageURLs) > 0 {
-		f.cfg.Images = meta.ImageURLs
+		for _, imageURL := range meta.ImageURLs {
+			if config.ValidateURL(imageURL) == nil {
+				f.cfg.Images = append(f.cfg.Images, imageURL)
+			}
+		}
 	}
 	if f.cfg.Icon == "" && meta.IconURL != "" {
-		f.cfg.Icon = meta.IconURL
+		if config.ValidateURL(meta.IconURL) == nil {
+			f.cfg.Icon = meta.IconURL
+		}
 	}
 }
 

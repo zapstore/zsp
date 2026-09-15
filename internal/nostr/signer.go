@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -21,9 +20,7 @@ type SignerType int
 
 const (
 	SignerNsec SignerType = iota
-	SignerNpub
 	SignerBunker
-	SignerNIP07
 )
 
 // Signer handles event signing.
@@ -41,18 +38,8 @@ type Signer interface {
 	Close() error
 }
 
-// SignerOptions contains options for creating a signer.
-type SignerOptions struct {
-	Port int // Custom port for browser signer (0 = default)
-}
-
 // NewSigner creates a signer from a SIGN_WITH value.
 func NewSigner(ctx context.Context, signWith string) (Signer, error) {
-	return NewSignerWithOptions(ctx, signWith, SignerOptions{})
-}
-
-// NewSignerWithOptions creates a signer from a SIGN_WITH value with options.
-func NewSignerWithOptions(ctx context.Context, signWith string, opts SignerOptions) (Signer, error) {
 	signWith = strings.TrimSpace(signWith)
 
 	if strings.HasPrefix(signWith, "nsec1") {
@@ -60,15 +47,11 @@ func NewSignerWithOptions(ctx context.Context, signWith string, opts SignerOptio
 	}
 
 	if strings.HasPrefix(signWith, "npub1") {
-		return NewNpubSigner(signWith)
+		return nil, fmt.Errorf("npub cannot sign publication")
 	}
 
 	if strings.HasPrefix(signWith, "bunker://") {
 		return NewBunkerSigner(ctx, signWith)
-	}
-
-	if signWith == "browser" {
-		return NewNIP07Signer(ctx, opts.Port)
 	}
 
 	// Check if it's a hex private key (pad to 64 hex characters = 32 bytes if shorter)
@@ -83,7 +66,7 @@ func NewSignerWithOptions(ctx context.Context, signWith string, opts SignerOptio
 		return NewNsecSigner(nsec)
 	}
 
-	return nil, fmt.Errorf("invalid SIGN_WITH format: must be nsec1..., npub1..., hex private key, bunker://..., or browser")
+	return nil, fmt.Errorf("invalid SIGN_WITH format: must be nsec1..., npub1..., hex private key, or bunker://...")
 }
 
 // isValidHex checks if a string is valid hexadecimal.
@@ -152,36 +135,6 @@ func (s *NsecSigner) Close() error {
 	return nil
 }
 
-// NpubSigner is a "signer" that sets the pubkey and computes event IDs without signing.
-// Used for deferred-signing workflows: events are built with the correct pubkey so e tag
-// references are valid, then output for signing by an external tool.
-type NpubSigner struct {
-	publicKey string // hex
-}
-
-// NewNpubSigner creates a signer from an npub.
-func NewNpubSigner(npub string) (*NpubSigner, error) {
-	prefix, data, err := nip19.Decode(npub)
-	if err != nil {
-		return nil, fmt.Errorf("invalid npub: %w", err)
-	}
-	if prefix != "npub" {
-		return nil, fmt.Errorf("expected npub, got %s", prefix)
-	}
-	return &NpubSigner{publicKey: data.(string)}, nil
-}
-
-func (s *NpubSigner) Type() SignerType { return SignerNpub }
-func (s *NpubSigner) PublicKey() string { return s.publicKey }
-
-func (s *NpubSigner) Sign(_ context.Context, event *nostr.Event) error {
-	event.PubKey = s.publicKey
-	event.ID = event.GetID()
-	return nil
-}
-
-func (s *NpubSigner) Close() error { return nil }
-
 // BunkerSigner signs events via NIP-46 remote signer.
 type BunkerSigner struct {
 	bunker    *nip46.BunkerClient
@@ -209,10 +162,7 @@ func NewBunkerSigner(ctx context.Context, bunkerURL string) (*BunkerSigner, erro
 	}
 
 	// Connect to bunker
-	bunker, err := nip46.ConnectBunker(ctx, clientSecretKey, bunkerURL, nil, func(s string) {
-		// This is called when user needs to approve the connection
-		fmt.Printf("Bunker connection request: %s\n", s)
-	})
+	bunker, err := nip46.ConnectBunker(ctx, clientSecretKey, bunkerURL, nil, func(string) {})
 	if err != nil {
 		if !strings.Contains(err.Error(), "already connected") {
 			return nil, fmt.Errorf("failed to connect to bunker: %w", err)
@@ -267,11 +217,14 @@ func getOrCreateBunkerClientKey(targetPubkey string) (string, error) {
 		return "", err
 	}
 
-	// Try to read existing key
+	// Try to read an existing owner-only key.
 	data, err := os.ReadFile(keyPath)
 	if err == nil {
 		key := strings.TrimSpace(string(data))
 		if len(key) == 64 && isValidHex(key) {
+			if err := os.Chmod(keyPath, 0o600); err != nil {
+				return "", fmt.Errorf("secure bunker client key: %w", err)
+			}
 			return key, nil
 		}
 		// Invalid key file, regenerate
@@ -289,12 +242,36 @@ func getOrCreateBunkerClientKey(targetPubkey string) (string, error) {
 		return "", fmt.Errorf("failed to create key directory: %w", err)
 	}
 
-	// Write key with restrictive permissions (owner read/write only)
-	if err := os.WriteFile(keyPath, []byte(clientKey+"\n"), 0600); err != nil {
+	if err := WriteSecretFile(keyPath, []byte(clientKey+"\n")); err != nil {
 		return "", fmt.Errorf("failed to save client key: %w", err)
 	}
 
 	return clientKey, nil
+}
+
+// WriteSecretFile atomically replaces a secret file with owner-only mode.
+func WriteSecretFile(path string, data []byte) error {
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".secret-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(data); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
 
 // bunkerKeyPath returns the file path for storing a bunker client key.
@@ -326,46 +303,26 @@ func (s *BunkerSigner) Close() error {
 	return nil
 }
 
-// BatchSigner is an optional interface for signers that support batch signing.
-type BatchSigner interface {
-	SignBatch(ctx context.Context, events []*nostr.Event) error
-}
-
-// SignEventSet signs all events in an event set.
-// It signs the Software Assets first to get their IDs, adds the references to Software Release,
-// then signs Software Release and Software Application.
-func SignEventSet(ctx context.Context, signer Signer, events *EventSet, relayHint string) error {
-	// Use batch signing if available (e.g., NIP-07 browser signer)
-	// For batch signing, we need to pre-compute the asset IDs before signing
-	if batchSigner, ok := signer.(BatchSigner); ok {
-		return signEventSetBatch(ctx, batchSigner, events, relayHint)
-	}
-
-	// Sequential signing: sign assets first, add references to release, then sign rest
-	// 1. Sign all Software Assets first to get their event IDs
+// SignEventSet signs a finalized event set without changing any event body.
+func SignEventSet(ctx context.Context, signer Signer, events *EventSet) error {
 	for i, asset := range events.SoftwareAssets {
-		if err := signer.Sign(ctx, asset); err != nil {
+		if err := signFinalizedEvent(ctx, signer, asset); err != nil {
 			return fmt.Errorf("failed to sign Software Asset event %d: %w", i+1, err)
 		}
-		// 2. Add the asset event ID reference to the Software Release event
-		events.AddAssetReference(asset.ID, relayHint)
 	}
 
-	// 3. Sign the Software Release event (now with asset references)
-	if err := signer.Sign(ctx, events.Release); err != nil {
+	if err := signFinalizedEvent(ctx, signer, events.Release); err != nil {
 		return fmt.Errorf("failed to sign Software Release event: %w", err)
 	}
 
-	// 4. Sign the Software Application event (nil when --skip-app-event is used)
 	if events.AppMetadata != nil {
-		if err := signer.Sign(ctx, events.AppMetadata); err != nil {
+		if err := signFinalizedEvent(ctx, signer, events.AppMetadata); err != nil {
 			return fmt.Errorf("failed to sign Software Application event: %w", err)
 		}
 	}
 
-	// 5. Sign the IdentityProof event if present
 	if events.IdentityProof != nil {
-		if err := signer.Sign(ctx, events.IdentityProof); err != nil {
+		if err := signFinalizedEvent(ctx, signer, events.IdentityProof); err != nil {
 			return fmt.Errorf("failed to sign IdentityProof event: %w", err)
 		}
 	}
@@ -373,61 +330,19 @@ func SignEventSet(ctx context.Context, signer Signer, events *EventSet, relayHin
 	return nil
 }
 
-// signEventSetBatch handles batch signing for signers like NIP-07.
-// For batch signing, we need a different approach since all events are signed at once.
-func signEventSetBatch(ctx context.Context, batchSigner BatchSigner, events *EventSet, relayHint string) error {
-	// For batch signing, we can't sign Software Assets first and then update Software Release.
-	// Instead, we pre-compute what the Software Asset event IDs will be.
-	// The ID is SHA256 of the serialized event, so we can compute it before signing.
-
-	// Compute what each Software Asset event ID will be (based on unsigned content)
-	for _, asset := range events.SoftwareAssets {
-		asset.PubKey = events.Release.PubKey // Ensure pubkey is set
-		assetID := asset.GetID()
-		// Add the asset reference to Software Release before batch signing
-		events.AddAssetReference(assetID, relayHint)
+func signFinalizedEvent(ctx context.Context, signer Signer, event *nostr.Event) error {
+	if event == nil || event.ID == "" || event.ID != event.GetID() {
+		return fmt.Errorf("event must be finalized before signing")
 	}
-
-	// Now batch sign all events (AppMetadata may be nil when --skip-app-event is used)
-	var allEvents []*nostr.Event
-	if events.AppMetadata != nil {
-		allEvents = append(allEvents, events.AppMetadata)
+	if err := signer.Sign(ctx, event); err != nil {
+		return err
 	}
-	allEvents = append(allEvents, events.Release)
-	allEvents = append(allEvents, events.SoftwareAssets...)
-	if err := batchSigner.SignBatch(ctx, allEvents); err != nil {
-		return fmt.Errorf("failed to batch sign events: %w", err)
+	if event.ID != event.GetID() {
+		return fmt.Errorf("signer changed event body")
 	}
-
+	valid, err := event.CheckSignature()
+	if err != nil || !valid {
+		return fmt.Errorf("signer produced an invalid event signature")
+	}
 	return nil
-}
-
-// EventsToJSON converts events to JSON Lines format.
-func EventsToJSON(events *EventSet) ([]byte, error) {
-	var result []byte
-
-	// Add app metadata (nil when --skip-app-event is used) and release
-	for _, event := range []*nostr.Event{events.AppMetadata, events.Release} {
-		if event == nil {
-			continue
-		}
-		data, err := json.Marshal(event)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, data...)
-		result = append(result, '\n')
-	}
-
-	// Add all software assets
-	for _, asset := range events.SoftwareAssets {
-		data, err := json.Marshal(asset)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, data...)
-		result = append(result, '\n')
-	}
-
-	return result, nil
 }

@@ -2,19 +2,26 @@ package nostr
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
 )
 
-// KindProfile is the kind for profile metadata events (NIP-01).
-const KindProfile = 0
-
 const (
 	// DefaultRelay is the default relay URL.
 	DefaultRelay = "wss://relay.zapstore.dev"
+	// DefaultIndexerPubkey identifies Zapstore's default catalog for display
+	// only. It is never used as a publication authorization decision.
+	DefaultIndexerPubkey = "78ce6faa72264387284e647ba6938995735ec8c7d5c5a65737e55130f026307d"
 
 	// RelayTimeout is the timeout for relay operations.
 	RelayTimeout = 30 * time.Second
@@ -25,30 +32,30 @@ type Publisher struct {
 	relayURLs []string
 }
 
+// AppEventLocations records the relays that have events for one application.
+type AppEventLocations struct {
+	ApplicationRelays []string
+	ReleaseRelays     []string
+	AssetRelays       []string
+	CheckedRelays     []string
+	ApplicationCount  int
+	ReleaseCount      int
+	AssetCount        int
+}
+
+// RelayClassification is advisory relay metadata used by the wizard.
+type RelayClassification struct {
+	RelayURL         string
+	PublisherPubkey  string
+	IsDefaultIndexer bool
+}
+
 // NewPublisher creates a new publisher.
 func NewPublisher(relayURLs []string) *Publisher {
 	if len(relayURLs) == 0 {
 		relayURLs = []string{DefaultRelay}
 	}
 	return &Publisher{relayURLs: relayURLs}
-}
-
-// NewPublisherFromEnv creates a publisher from the RELAY_URLS environment variable.
-func NewPublisherFromEnv(relaysEnv string) *Publisher {
-	if relaysEnv == "" {
-		return NewPublisher(nil)
-	}
-
-	urls := strings.Split(relaysEnv, ",")
-	var cleaned []string
-	for _, url := range urls {
-		url = strings.TrimSpace(url)
-		if url != "" {
-			cleaned = append(cleaned, url)
-		}
-	}
-
-	return NewPublisher(cleaned)
 }
 
 // PublishResult contains the result of publishing to a single relay.
@@ -95,8 +102,9 @@ func (p *Publisher) publishToRelay(ctx context.Context, url string, event *nostr
 
 	err = relay.Publish(ctx, *event)
 	if err != nil {
-		// Check if this is a duplicate error (event already exists)
-		if isDuplicateError(err) {
+		// A relay's free-form duplicate wording is not authoritative. Confirm
+		// the exact signed event is present before treating it as accepted.
+		if isDuplicateError(err) && eventExists(ctx, relay, event.ID) {
 			result.Success = true
 			result.IsDuplicate = true
 			result.Error = err // Keep error for informational purposes
@@ -110,29 +118,17 @@ func (p *Publisher) publishToRelay(ctx context.Context, url string, event *nostr
 	return result
 }
 
-// PublishEventSet publishes all events in an event set.
-// AppMetadata may be nil when --skip-app-event is used.
-func (p *Publisher) PublishEventSet(ctx context.Context, events *EventSet) (map[string][]PublishResult, error) {
-	results := make(map[string][]PublishResult)
-
-	// Publish Software Application (skipped when --skip-app-event is used)
-	if events.AppMetadata != nil {
-		results["software_application"] = p.Publish(ctx, events.AppMetadata)
+func eventExists(ctx context.Context, relay *nostr.Relay, eventID string) bool {
+	events, err := relay.QuerySync(ctx, nostr.Filter{IDs: []string{eventID}, Limit: 1})
+	if err != nil {
+		return false
 	}
-
-	// Publish Software Release
-	results["software_release"] = p.Publish(ctx, events.Release)
-
-	// Publish all Software Assets
-	for i, asset := range events.SoftwareAssets {
-		key := "software_asset"
-		if len(events.SoftwareAssets) > 1 {
-			key = fmt.Sprintf("software_asset_%d", i+1)
+	for _, event := range events {
+		if event != nil && event.ID == eventID {
+			return true
 		}
-		results[key] = p.Publish(ctx, asset)
 	}
-
-	return results, nil
+	return false
 }
 
 // PublishIdentityProof publishes a single kind 30509 event to all relays.
@@ -140,226 +136,372 @@ func (p *Publisher) PublishIdentityProof(ctx context.Context, event *nostr.Event
 	return p.Publish(ctx, event), nil
 }
 
-// RelayURLs returns the configured relay URLs.
-func (p *Publisher) RelayURLs() []string {
-	return p.relayURLs
-}
-
-// CheckExistingRelease queries all relays for the latest Software Release event (kind 30063).
-// It searches by pubkey and d tag (identifier@version).
-// Returns the CreatedAt of the most recent existing release, or zero time if none exists.
-func (p *Publisher) CheckExistingRelease(ctx context.Context, pubkey, identifier, version string) (time.Time, error) {
-	dTag := identifier + "@" + version
+// FetchIdentityProofsByCertificate returns current matching proofs reported by
+// each configured relay. ZSP applies its certificate-global selection rule
+// after strict local validation.
+func (p *Publisher) FetchIdentityProofsByCertificate(ctx context.Context, certHash string) ([]*nostr.Event, []error, error) {
 	filter := nostr.Filter{
-		Kinds:   []int{KindRelease},
-		Authors: []string{pubkey},
-		Tags: nostr.TagMap{
-			"d": []string{dTag},
-		},
-		Limit: 1,
+		Kinds: []int{KindIdentityProof},
+		Tags:  nostr.TagMap{"d": []string{certHash}},
+		// Kind 30509 is parameterized replaceable by author and d tag. Fetch
+		// enough current author variants to select the latest valid proof
+		// locally; limiting this query to one lets one malformed event hide a
+		// valid proof from another author.
+		Limit: 100,
 	}
-
-	var latest nostr.Timestamp
-	for _, url := range p.relayURLs {
-		event, err := p.queryRelay(ctx, url, filter)
+	proofsByID := make(map[string]*nostr.Event)
+	var warnings []error
+	completed := 0
+	for _, relayURL := range p.relayURLs {
+		events, err := p.queryRelayMultiple(ctx, relayURL, filter)
 		if err != nil {
+			warnings = append(warnings, fmt.Errorf("%s: %w", relayURL, err))
 			continue
 		}
-		if event != nil && event.CreatedAt > latest {
-			latest = event.CreatedAt
+		completed++
+		for _, event := range events {
+			if event != nil {
+				proofsByID[event.ID] = event
+			}
 		}
 	}
-
-	if latest == 0 {
-		return time.Time{}, nil
+	if completed == 0 && len(p.relayURLs) > 0 {
+		return nil, warnings, relayQueryError("C1", warnings)
 	}
-	return latest.Time(), nil
-}
-
-// ExistingAsset contains information about an existing software asset on relays.
-type ExistingAsset struct {
-	Event    *nostr.Event
-	RelayURL string
-	Version  string
-}
-
-// CheckExistingAssetAny queries all relays to check if a Software Asset already exists
-// from any publisher. Used by --check mode (zindex) where pubkey is not known.
-// Returns the first existing Software Asset found, or nil if none exists.
-func (p *Publisher) CheckExistingAssetAny(ctx context.Context, identifier, version string) (*ExistingAsset, error) {
-	filter := nostr.Filter{
-		Kinds: []int{KindSoftwareAsset},
-		Tags: nostr.TagMap{
-			"i":       []string{identifier},
-			"version": []string{version},
-		},
-		Limit: 1,
+	current := make([]*nostr.Event, 0, len(proofsByID))
+	for _, event := range proofsByID {
+		current = append(current, event)
 	}
-	return p.checkExistingAssetWithFilter(ctx, filter)
-}
-
-// CheckExistingAsset queries all relays to check if a Software Asset already exists
-// for the given publisher. It searches for kind 3063 events scoped to pubkey with
-// matching `i` tag (identifier) and `version` tag.
-// Returns the first existing Software Asset found, or nil if none exists.
-func (p *Publisher) CheckExistingAsset(ctx context.Context, pubkey, identifier, version string) (*ExistingAsset, error) {
-	filter := nostr.Filter{
-		Kinds:   []int{KindSoftwareAsset},
-		Authors: []string{pubkey},
-		Tags: nostr.TagMap{
-			"i":       []string{identifier},
-			"version": []string{version},
-		},
-		Limit: 1,
-	}
-	return p.checkExistingAssetWithFilter(ctx, filter)
-}
-
-func (p *Publisher) checkExistingAssetWithFilter(ctx context.Context, filter nostr.Filter) (*ExistingAsset, error) {
-
-	// Query each relay until we find an existing asset
-	for _, url := range p.relayURLs {
-		event, err := p.queryRelay(ctx, url, filter)
-		if err != nil {
-			// Log error but continue to other relays
-			continue
+	sort.Slice(current, func(i, j int) bool {
+		if current[i].CreatedAt == current[j].CreatedAt {
+			return current[i].ID < current[j].ID
 		}
-		if event != nil {
-			// Extract version from the event for confirmation
-			existingVersion := ""
-			for _, tag := range event.Tags {
-				if len(tag) >= 2 && tag[0] == "version" {
-					existingVersion = tag[1]
-					break
+		return current[i].CreatedAt > current[j].CreatedAt
+	})
+	return current, warnings, nil
+}
+
+// FetchApplicationEvents returns deduplicated application events for appID
+// from each explicitly authorized author on every completed relay query.
+func (p *Publisher) FetchApplicationEvents(ctx context.Context, appID string, authors []string) ([]*nostr.Event, []error, error) {
+	sort.Strings(authors)
+	byID := make(map[string]*nostr.Event)
+	var warnings []error
+	completed := 0
+	for _, relayURL := range p.relayURLs {
+		relayCompleted := false
+		for _, author := range authors {
+			filter := nostr.Filter{
+				Kinds: []int{KindAppMetadata}, Authors: []string{author},
+				Tags: nostr.TagMap{"d": []string{appID}}, Limit: 100,
+			}
+			events, err := p.queryRelayMultiple(ctx, relayURL, filter)
+			if err != nil {
+				warnings = append(warnings, fmt.Errorf("%s: %w", relayURL, err))
+				continue
+			}
+			relayCompleted = true
+			for _, event := range events {
+				byID[event.ID] = event
+			}
+		}
+		if relayCompleted {
+			completed++
+		}
+	}
+	if completed == 0 && len(p.relayURLs) > 0 {
+		return nil, warnings, relayQueryError("application", warnings)
+	}
+	events := make([]*nostr.Event, 0, len(byID))
+	for _, event := range byID {
+		events = append(events, event)
+	}
+	sort.Slice(events, func(i, j int) bool {
+		if events[i].CreatedAt == events[j].CreatedAt {
+			return events[i].ID < events[j].ID
+		}
+		return events[i].CreatedAt > events[j].CreatedAt
+	})
+	return events, warnings, nil
+}
+
+// HasAppEvents reports whether any application, release, or asset event for
+// appID exists on a configured relay. A successful empty query is definitive;
+// individual relay failures are returned as warnings.
+func (p *Publisher) HasAppEvents(ctx context.Context, appID string) (bool, []error, error) {
+	locations, warnings, err := p.FindAppEvents(ctx, appID)
+	return len(locations.ApplicationRelays) > 0 || len(locations.ReleaseRelays) > 0 || len(locations.AssetRelays) > 0, warnings, err
+}
+
+// FindAppEvents returns the configured relay URLs that contain application,
+// release, or asset events for appID.
+func (p *Publisher) FindAppEvents(ctx context.Context, appID string) (AppEventLocations, []error, error) {
+	filters := []nostr.Filter{
+		{Kinds: []int{KindAppMetadata}, Tags: nostr.TagMap{"d": []string{appID}}, Limit: 1},
+		{Kinds: []int{KindRelease, KindSoftwareAsset}, Tags: nostr.TagMap{"i": []string{appID}}, Limit: 1},
+	}
+	var locations AppEventLocations
+	var warnings []error
+	completed := 0
+	for _, relayURL := range p.relayURLs {
+		relayCompleted := false
+		for filterIndex, filter := range filters {
+			events, err := p.queryRelayMultiple(ctx, relayURL, filter)
+			if err != nil {
+				warnings = append(warnings, fmt.Errorf("%s: %w", relayURL, err))
+				continue
+			}
+			relayCompleted = true
+			for _, event := range events {
+				switch {
+				case filterIndex == 0:
+					locations.ApplicationRelays = append(locations.ApplicationRelays, relayURL)
+					locations.ApplicationCount++
+				case event.Kind == KindRelease:
+					locations.ReleaseRelays = append(locations.ReleaseRelays, relayURL)
+					locations.ReleaseCount++
+				case event.Kind == KindSoftwareAsset:
+					locations.AssetRelays = append(locations.AssetRelays, relayURL)
+					locations.AssetCount++
 				}
 			}
-			return &ExistingAsset{
-				Event:    event,
-				RelayURL: url,
-				Version:  existingVersion,
-			}, nil
+		}
+		if relayCompleted {
+			completed++
+			locations.CheckedRelays = append(locations.CheckedRelays, relayURL)
 		}
 	}
-
-	return nil, nil
+	if completed == 0 && len(p.relayURLs) > 0 {
+		return AppEventLocations{}, warnings, relayQueryError("app", warnings)
+	}
+	locations.ApplicationRelays = uniqueRelayURLs(locations.ApplicationRelays)
+	locations.ReleaseRelays = uniqueRelayURLs(locations.ReleaseRelays)
+	locations.AssetRelays = uniqueRelayURLs(locations.AssetRelays)
+	return locations, warnings, nil
 }
 
-// queryRelay queries a single relay for events matching the filter.
-func (p *Publisher) queryRelay(ctx context.Context, url string, filter nostr.Filter) (*nostr.Event, error) {
-	ctx, cancel := context.WithTimeout(ctx, RelayTimeout)
-	defer cancel()
-
-	relay, err := nostr.RelayConnect(ctx, url)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect: %w", err)
+// RelayClassifications obtains the optional NIP-11 administrative pubkey for
+// each configured relay. The result is display metadata, not authorization.
+func (p *Publisher) RelayClassifications(ctx context.Context) []RelayClassification {
+	result := make([]RelayClassification, 0, len(p.relayURLs))
+	client := &http.Client{Timeout: RelayTimeout}
+	for _, relayURL := range p.relayURLs {
+		classification := RelayClassification{RelayURL: relayURL}
+		httpURL, err := relayInfoURL(relayURL)
+		if err == nil {
+			request, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, httpURL, nil)
+			if requestErr == nil {
+				request.Header.Set("Accept", "application/nostr+json")
+				response, responseErr := client.Do(request)
+				if responseErr == nil {
+					var document struct {
+						Pubkey string `json:"pubkey"`
+					}
+					if response.StatusCode == http.StatusOK {
+						_ = json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&document)
+					}
+					_ = response.Body.Close()
+					classification.PublisherPubkey = document.Pubkey
+					classification.IsDefaultIndexer = document.Pubkey == DefaultIndexerPubkey
+				}
+			}
+		}
+		result = append(result, classification)
 	}
-	defer relay.Close()
-
-	events, err := relay.QuerySync(ctx, filter)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query: %w", err)
-	}
-
-	if len(events) > 0 {
-		return events[0], nil
-	}
-
-	return nil, nil
+	return result
 }
 
-// ExistingApp contains information about an existing app on relays.
-type ExistingApp struct {
-	Event    *nostr.Event
-	RelayURL string
+func relayInfoURL(relayURL string) (string, error) {
+	parsed, err := url.Parse(relayURL)
+	if err != nil || parsed.Host == "" {
+		return "", fmt.Errorf("invalid relay URL")
+	}
+	switch parsed.Scheme {
+	case "wss":
+		parsed.Scheme = "https"
+	case "ws":
+		parsed.Scheme = "http"
+	default:
+		return "", fmt.Errorf("invalid relay scheme")
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
 }
 
-// CheckExistingApp queries all relays to check if an App Metadata event already exists.
-// It searches for kind 32267 events with a matching `d` tag (identifier).
-// Returns the first existing App found, or nil if none exists.
-func (p *Publisher) CheckExistingApp(ctx context.Context, identifier string) (*ExistingApp, error) {
-	filter := nostr.Filter{
-		Kinds: []int{KindAppMetadata},
-		Tags: nostr.TagMap{
-			"d": []string{identifier},
-		},
-		Limit: 1,
+// ProfileName returns the display_name or name from a signed kind 0 profile.
+func (p *Publisher) ProfileName(ctx context.Context, pubkey string) string {
+	if pubkey == "" {
+		return ""
 	}
-
-	// Query each relay until we find an existing app
-	for _, url := range p.relayURLs {
-		event, err := p.queryRelay(ctx, url, filter)
-		if err != nil {
-			// Log error but continue to other relays
-			continue
-		}
-		if event != nil {
-			return &ExistingApp{
-				Event:    event,
-				RelayURL: url,
-			}, nil
-		}
-	}
-
-	return nil, nil
-}
-
-// FetchIdentityProof queries relays for a kind 30509 identity proof event.
-// If certHash is provided, looks for that specific identity; otherwise returns any identity proof.
-// Returns nil if no matching event is found.
-func (p *Publisher) FetchIdentityProof(ctx context.Context, pubkey, certHash string) (*nostr.Event, error) {
-	filter := nostr.Filter{
-		Kinds:   []int{KindIdentityProof},
-		Authors: []string{pubkey},
-		Limit:   1,
-	}
-
-	if certHash != "" {
-		filter.Tags = nostr.TagMap{
-			"d": []string{certHash},
-		}
-	}
-
-	// Query each relay until we find an identity proof
-	for _, url := range p.relayURLs {
-		event, err := p.queryRelay(ctx, url, filter)
-		if err != nil {
-			// Log error but continue to other relays
-			continue
-		}
-		if event != nil {
-			return event, nil
-		}
-	}
-
-	return nil, nil
-}
-
-// FetchAllIdentityProofs queries relays for all kind 30509 identity proof events from a pubkey.
-func (p *Publisher) FetchAllIdentityProofs(ctx context.Context, pubkey string) ([]*nostr.Event, error) {
-	filter := nostr.Filter{
-		Kinds:   []int{KindIdentityProof},
-		Authors: []string{pubkey},
-		Limit:   100,
-	}
-
-	var allEvents []*nostr.Event
-	seen := make(map[string]bool)
-
-	// Query each relay
-	for _, url := range p.relayURLs {
-		events, err := p.queryRelayMultiple(ctx, url, filter)
+	for _, relayURL := range p.relayURLs {
+		events, err := p.queryRelayMultiple(ctx, relayURL, nostr.Filter{Kinds: []int{0}, Authors: []string{pubkey}, Limit: 1})
 		if err != nil {
 			continue
 		}
 		for _, event := range events {
-			if !seen[event.ID] {
-				seen[event.ID] = true
-				allEvents = append(allEvents, event)
+			if event == nil || event.PubKey != pubkey {
+				continue
+			}
+			valid, signatureErr := event.CheckSignature()
+			if signatureErr != nil || !valid {
+				continue
+			}
+			var profile struct {
+				DisplayName string `json:"display_name"`
+				Name        string `json:"name"`
+			}
+			if json.Unmarshal([]byte(event.Content), &profile) == nil {
+				if profile.DisplayName != "" {
+					return profile.DisplayName
+				}
+				if profile.Name != "" {
+					return profile.Name
+				}
 			}
 		}
 	}
+	return ""
+}
 
-	return allEvents, nil
+func uniqueRelayURLs(values []string) []string {
+	if len(values) < 2 {
+		return values
+	}
+	sort.Strings(values)
+	return append(values[:0:0], compactStrings(values)...)
+}
+
+func compactStrings(values []string) []string {
+	result := values[:1]
+	for _, value := range values[1:] {
+		if value != result[len(result)-1] {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+// HighestReleaseVersionCode returns the greatest version_code among assets
+// linked by valid main-channel releases from authorized publishers for appID.
+// Releases and assets are queried independently for each publisher so a
+// delegate's release can link an owner's asset.
+func (p *Publisher) HighestReleaseVersionCode(ctx context.Context, publishers map[string]struct{}, appID, certificateHash, channel string) (int64, time.Time, []error, error) {
+	if channel == "" {
+		channel = "main"
+	}
+	authors := make([]string, 0, len(publishers))
+	for pubkey := range publishers {
+		authors = append(authors, pubkey)
+	}
+	sort.Strings(authors)
+	eventsByID := make(map[string]*nostr.Event)
+	var warnings []error
+	completed := 0
+	for _, relayURL := range p.relayURLs {
+		relayCompleted := false
+		for _, pubkey := range authors {
+			for _, kind := range []int{KindRelease, KindSoftwareAsset} {
+				tags := nostr.TagMap{"i": []string{appID}}
+				if kind == KindRelease {
+					tags["c"] = []string{channel}
+				}
+				filter := nostr.Filter{
+					Kinds:   []int{kind},
+					Authors: []string{pubkey},
+					Tags:    tags,
+				}
+				events, err := p.queryRelayMultiple(ctx, relayURL, filter)
+				if err != nil {
+					warnings = append(warnings, fmt.Errorf("%s: %w", relayURL, err))
+					continue
+				}
+				relayCompleted = true
+				for _, event := range events {
+					if event == nil {
+						continue
+					}
+					identifier, validIdentifier := singleTagValue(event.Tags, "i")
+					valid, signatureErr := event.CheckSignature()
+					if signatureErr == nil && valid && event.PubKey == pubkey &&
+						validIdentifier && identifier == appID {
+						eventsByID[event.ID] = event
+					}
+				}
+			}
+		}
+		if relayCompleted {
+			completed++
+		}
+	}
+	if completed == 0 && len(p.relayURLs) > 0 {
+		return 0, time.Time{}, warnings, relayQueryError("release", warnings)
+	}
+	maximum, latestTimestamp := highestLinkedReleaseVersion(eventsByID, certificateHash, channel)
+	return maximum, latestTimestamp, warnings, nil
+}
+
+func highestLinkedReleaseVersion(eventsByID map[string]*nostr.Event, certificateHash, channel string) (int64, time.Time) {
+	if channel == "" {
+		channel = "main"
+	}
+	var maximum int64
+	var latestTimestamp time.Time
+	for _, release := range eventsByID {
+		releaseChannel, validChannel := singleTagValue(release.Tags, "c")
+		if release.Kind != KindRelease || !validChannel || releaseChannel != channel {
+			continue
+		}
+		for _, tag := range release.Tags {
+			if len(tag) < 2 || tag[0] != "e" {
+				continue
+			}
+			asset := eventsByID[tag[1]]
+			if asset == nil || asset.Kind != KindSoftwareAsset {
+				continue
+			}
+			assetCertificate, validCertificate := singleTagValue(asset.Tags, "apk_certificate_hash")
+			if !validCertificate || assetCertificate != certificateHash {
+				continue
+			}
+			versionValue, validVersion := singleTagValue(asset.Tags, "version_code")
+			if !validVersion {
+				continue
+			}
+			versionCode, err := strconv.ParseInt(versionValue, 10, 64)
+			releasedAt := time.Unix(int64(release.CreatedAt), 0)
+			if err == nil && strconv.FormatInt(versionCode, 10) == versionValue && (versionCode > maximum ||
+				(versionCode == maximum && releasedAt.After(latestTimestamp))) {
+				maximum = versionCode
+				latestTimestamp = releasedAt
+			}
+		}
+	}
+	return maximum, latestTimestamp
+}
+
+func singleTagValue(tags nostr.Tags, name string) (string, bool) {
+	var value string
+	found := false
+	for _, tag := range tags {
+		if len(tag) == 0 || tag[0] != name {
+			continue
+		}
+		if found || len(tag) != 2 || tag[1] == "" {
+			return "", false
+		}
+		found = true
+		value = tag[1]
+	}
+	return value, found
+}
+
+func relayQueryError(operation string, warnings []error) error {
+	if err := errors.Join(warnings...); err != nil {
+		return fmt.Errorf("no relay completed %s query: %w", operation, err)
+	}
+	return fmt.Errorf("no relay completed %s query", operation)
 }
 
 // queryRelayMultiple queries a single relay and returns all matching events.

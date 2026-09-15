@@ -21,6 +21,7 @@ const (
 	IconMaxWidth       = 512
 	ScreenshotMaxWidth = 1440
 	jpegQuality        = 88
+	maxDecodedPixels   = 40_000_000
 )
 
 // Result contains the final bytes and metadata for an image asset.
@@ -54,6 +55,9 @@ func Process(data []byte, mimeType string, maxWidth int, compress bool) (Result,
 	result.MimeType = format.mimeType
 	if format.mimeType != "image/png" && format.mimeType != "image/jpeg" {
 		return withHash(result), nil
+	}
+	if format.width <= 0 || format.height <= 0 || int64(format.width)*int64(format.height) > maxDecodedPixels {
+		return Result{}, fmt.Errorf("image dimensions %dx%d exceed processing limit", format.width, format.height)
 	}
 
 	src, _, err := image.Decode(bytes.NewReader(data))
@@ -100,24 +104,26 @@ func withHash(result Result) Result {
 type imageFormat struct {
 	name     string
 	mimeType string
+	width    int
+	height   int
 }
 
 func detectFormat(data []byte) (imageFormat, error) {
-	_, format, err := image.DecodeConfig(bytes.NewReader(data))
+	config, format, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
 		return imageFormat{}, err
 	}
 	switch format {
 	case "png":
-		return imageFormat{name: "PNG", mimeType: "image/png"}, nil
+		return imageFormat{name: "PNG", mimeType: "image/png", width: config.Width, height: config.Height}, nil
 	case "jpeg":
-		return imageFormat{name: "JPEG", mimeType: "image/jpeg"}, nil
+		return imageFormat{name: "JPEG", mimeType: "image/jpeg", width: config.Width, height: config.Height}, nil
 	case "webp":
-		return imageFormat{name: "WebP", mimeType: "image/webp"}, nil
+		return imageFormat{name: "WebP", mimeType: "image/webp", width: config.Width, height: config.Height}, nil
 	case "gif":
-		return imageFormat{name: "GIF", mimeType: "image/gif"}, nil
+		return imageFormat{name: "GIF", mimeType: "image/gif", width: config.Width, height: config.Height}, nil
 	default:
-		return imageFormat{name: format, mimeType: normalizeMimeType("")}, nil
+		return imageFormat{name: format, mimeType: normalizeMimeType(""), width: config.Width, height: config.Height}, nil
 	}
 }
 

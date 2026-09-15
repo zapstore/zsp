@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	gonostr "github.com/nbd-wtf/go-nostr"
 	keystore "github.com/pavlo-v-chernykh/keystore-go/v4"
 )
 
@@ -79,7 +80,7 @@ func TestGenerateIdentityProof(t *testing.T) {
 	}{
 		{name: "rsa happy path self-verifies", key: rsaKey, cert: rsaCert},
 		{name: "ecdsa happy path self-verifies", key: ecKey, cert: ecCert},
-		{name: "ed25519 happy path self-verifies", key: edKey, cert: edCert},
+		{name: "ed25519 is unsupported", key: edKey, cert: edCert, wantErr: true},
 		{name: "mismatched rsa key and cert", key: mismatchKey, cert: mismatchCert, wantErr: true},
 		{name: "nil certificate", key: rsaKey, cert: nil, wantErr: true},
 	}
@@ -119,6 +120,41 @@ func TestGenerateIdentityProof(t *testing.T) {
 				t.Fatal("CertHashMatch = false")
 			}
 		})
+	}
+}
+
+func TestValidateActiveProofEvent(t *testing.T) {
+	certificateKey, certificate := mustGenerateRSA(t)
+	secret := gonostr.GeneratePrivateKey()
+	pubkey, err := gonostr.GetPublicKey(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := GenerateIdentityProof(certificateKey, certificate, pubkey, &IdentityProofOptions{Expiry: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := &gonostr.Event{
+		Kind:      30509,
+		PubKey:    pubkey,
+		CreatedAt: gonostr.Timestamp(proof.CreatedAt),
+		Tags:      proof.ToEventTags(),
+		Content:   "",
+	}
+	if err := event.Sign(secret); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ValidateActiveProofEvent(event, certificate, time.Unix(proof.CreatedAt, 0)); err != nil {
+		t.Fatalf("ValidateActiveProofEvent() error = %v", err)
+	}
+
+	event.Tags = append(event.Tags, gonostr.Tag{"delegation", pubkey}, gonostr.Tag{"delegation", pubkey})
+	if err := event.Sign(secret); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateActiveProofEvent(event, certificate, time.Unix(proof.CreatedAt, 0)); err == nil {
+		t.Fatal("ValidateActiveProofEvent() accepted duplicate delegation")
 	}
 }
 

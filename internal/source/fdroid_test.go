@@ -1,60 +1,52 @@
 package source
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"testing"
-
-	"github.com/zapstore/zsp/internal/config"
 )
 
-func TestFDroidCacheRoundtrip(t *testing.T) {
-	dir := t.TempDir()
+// TestFDroidDownloadUsesSharedPipeline confirms F-Droid's Download method
+// routes through the shared DownloadHTTP pipeline (size limit, stall
+// detection, bounded retries) with no authentication, matching F-Droid
+// repositories' unauthenticated access model.
+func TestFDroidDownloadUsesSharedPipeline(t *testing.T) {
+	var gotAuth string
+	payload := []byte("apk-bytes-ok")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
 
-	f := &FDroid{
-		repoInfo: &config.FDroidRepoInfo{
-			IndexURL:  "https://f-droid.org/repo/index-v1.json",
-			PackageID: "de.danoeh.antennapod",
-		},
-		cacheDir: dir,
-	}
+	f := &FDroid{}
+	asset := &Asset{Name: "app.apk", URL: srv.URL + "/app.apk"}
 
-	// No cache yet
-	if got := f.GetPublishedVersion(); got != "" {
-		t.Fatalf("expected empty version before any publish, got %q", got)
+	path, err := f.Download(context.Background(), asset, t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("Download() error = %v", err)
 	}
+	if gotAuth != "" {
+		t.Fatalf("Authorization header = %q, want none", gotAuth)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("downloaded %q, want %q", got, payload)
+	}
+}
 
-	// Simulate FetchLatestRelease setting pending
-	f.pending = &fdroidIndexCache{
-		ETag:                          `"abc123"`,
-		LatestPublishedReleaseVersion: "3.4.2",
-	}
+// TestFDroidDownloadRejectsInsecureURL confirms F-Droid asset downloads
+// inherit the shared pipeline's HTTPS-outside-loopback validation.
+func TestFDroidDownloadRejectsInsecureURL(t *testing.T) {
+	f := &FDroid{}
+	asset := &Asset{Name: "app.apk", URL: "http://evil.example.com/app.apk"}
 
-	// CommitCache should write to disk and clear pending
-	if err := f.CommitCache(); err != nil {
-		t.Fatalf("CommitCache() error: %v", err)
-	}
-	if f.pending != nil {
-		t.Fatal("expected pending to be nil after CommitCache")
-	}
-
-	// GetPublishedVersion should read the written version
-	if got := f.GetPublishedVersion(); got != "3.4.2" {
-		t.Fatalf("GetPublishedVersion() = %q, want %q", got, "3.4.2")
-	}
-
-	// Commit with a new version (simulating a second publish)
-	f.pending = &fdroidIndexCache{
-		ETag:                          `"def456"`,
-		LatestPublishedReleaseVersion: "3.5.0",
-	}
-	if err := f.CommitCache(); err != nil {
-		t.Fatalf("CommitCache() error on second publish: %v", err)
-	}
-	if got := f.GetPublishedVersion(); got != "3.5.0" {
-		t.Fatalf("GetPublishedVersion() after update = %q, want %q", got, "3.5.0")
-	}
-
-	// CommitCache with no pending is a no-op
-	if err := f.CommitCache(); err != nil {
-		t.Fatalf("CommitCache() with nil pending should not error: %v", err)
+	if _, err := f.Download(context.Background(), asset, t.TempDir(), nil); err == nil {
+		t.Fatal("Download() error = nil, want rejection of insecure URL")
 	}
 }

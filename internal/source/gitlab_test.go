@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/zapstore/zsp/internal/config"
@@ -30,50 +31,19 @@ func TestNewGitLabNestedProjectPath(t *testing.T) {
 	}
 }
 
-func TestGitLabCacheRoundtrip(t *testing.T) {
-	dir := t.TempDir()
-
-	g := &GitLab{
-		projectID: "AuroraOSS%2FAuroraStore",
-		cacheDir:  dir,
+func TestNewWithOptionsPassesPreReleaseSettingToGitLab(t *testing.T) {
+	source, err := NewWithOptions(&config.Config{
+		Repository: "https://gitlab.example.com/group/project",
+	}, Options{IncludePreReleases: true})
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	// No cache yet
-	if got := g.GetPublishedVersion(); got != "" {
-		t.Fatalf("expected empty version before any publish, got %q", got)
+	gitlab, ok := source.(*GitLab)
+	if !ok {
+		t.Fatalf("source = %T, want *GitLab", source)
 	}
-
-	// Simulate FetchLatestRelease setting pendingVersion
-	g.pendingVersion = "4.3.2"
-
-	// CommitCache should write to disk and clear pendingVersion
-	if err := g.CommitCache(); err != nil {
-		t.Fatalf("CommitCache() error: %v", err)
-	}
-	if g.pendingVersion != "" {
-		t.Fatal("expected pendingVersion to be empty after CommitCache")
-	}
-
-	// GetPublishedVersion should read the written version
-	if got := g.GetPublishedVersion(); got != "4.3.2" {
-		t.Fatalf("GetPublishedVersion() = %q, want %q", got, "4.3.2")
-	}
-
-	// Commit with a new version
-	g.pendingVersion = "4.4.0"
-	if err := g.CommitCache(); err != nil {
-		t.Fatalf("CommitCache() error on second publish: %v", err)
-	}
-	if got := g.GetPublishedVersion(); got != "4.4.0" {
-		t.Fatalf("GetPublishedVersion() after update = %q, want %q", got, "4.4.0")
-	}
-
-	// CommitCache with empty pendingVersion is a no-op
-	if err := g.CommitCache(); err != nil {
-		t.Fatalf("CommitCache() with empty pendingVersion should not error: %v", err)
-	}
-	if got := g.GetPublishedVersion(); got != "4.4.0" {
-		t.Fatalf("GetPublishedVersion() after no-op CommitCache = %q, want %q", got, "4.4.0")
+	if !gitlab.IncludePreReleases {
+		t.Fatal("GitLab IncludePreReleases = false, want true")
 	}
 }
 
@@ -137,6 +107,11 @@ func TestParseGitLabExternalRedirect(t *testing.T) {
 	if _, ok := parseGitLabExternalRedirect([]byte(gitlabExternalRedirectMarker + `<a href="javascript:alert(1)">x</a>`)); ok {
 		t.Fatal("should reject non-http(s) href")
 	}
+
+	insecureBody := []byte(gitlabExternalRedirectMarker + `<a href="http://evil.example.com/app.apk">x</a>`)
+	if _, ok := parseGitLabExternalRedirect(insecureBody); ok {
+		t.Fatal("should reject a plain-http external redirect target outside loopback")
+	}
 }
 
 func TestGitLabDownloadFollowsExternalInterstitial(t *testing.T) {
@@ -163,8 +138,7 @@ func TestGitLabDownloadFollowsExternalInterstitial(t *testing.T) {
 	defer srv.Close()
 
 	g := &GitLab{
-		cfg:               &config.Config{},
-		SkipDownloadCache: true,
+		cfg: &config.Config{},
 	}
 	destDir := t.TempDir()
 	asset := &Asset{
@@ -191,6 +165,58 @@ func TestGitLabDownloadFollowsExternalInterstitial(t *testing.T) {
 	}
 	if !strings.HasSuffix(filepath.Base(path), "app.apk") {
 		t.Fatalf("unexpected path %q", path)
+	}
+}
+
+// TestGitLabDownloadRejectsInsecureURL confirms GitLab's own Download entry
+// point applies the same HTTPS-outside-loopback validation as the shared
+// DownloadHTTP pipeline, before attempting interstitial resolution.
+func TestGitLabDownloadRejectsInsecureURL(t *testing.T) {
+	g := &GitLab{cfg: &config.Config{}}
+	asset := &Asset{Name: "app.apk", URL: "http://evil.example.com/app.apk"}
+
+	if _, err := g.Download(context.Background(), asset, t.TempDir(), nil); err == nil {
+		t.Fatal("Download() error = nil, want rejection of insecure URL")
+	}
+}
+
+// TestGitLabDownloadRetriesTransientFailure confirms GitLab downloads inherit
+// the shared bounded-retry behavior (not just the size limit and stall
+// detection) despite resolving the asset URL through GitLab-specific
+// interstitial handling.
+func TestGitLabDownloadRetriesTransientFailure(t *testing.T) {
+	var hits atomic.Int32
+	payload := []byte("apk-bytes-ok")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := hits.Add(1)
+		if n == 1 {
+			w.Header().Set("Content-Length", "100")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("truncated"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/vnd.android.package-archive")
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	g := &GitLab{cfg: &config.Config{}}
+	asset := &Asset{Name: "app.apk", URL: srv.URL + "/app.apk"}
+
+	path, err := g.Download(context.Background(), asset, t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("Download() error = %v", err)
+	}
+	if hits.Load() < 2 {
+		t.Fatalf("expected retry after truncated response, hits=%d", hits.Load())
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("downloaded %q, want %q", got, payload)
 	}
 }
 
@@ -404,7 +430,6 @@ func TestFetchLatestReleaseUsesDescriptionUploads(t *testing.T) {
 		baseURL:   srv.URL,
 		projectID: "AuroraOSS%2FAuroraStore",
 		client:    srv.Client(),
-		cacheDir:  t.TempDir(),
 	}
 
 	release, err := g.FetchLatestRelease(context.Background())

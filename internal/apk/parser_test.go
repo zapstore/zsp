@@ -1,12 +1,28 @@
 package apk
 
 import (
+	"archive/zip"
 	"bytes"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/hex"
+	"encoding/pem"
 	"image"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestReadZipFileRejectsOversizedResource(t *testing.T) {
+	file := &zip.File{FileHeader: zip.FileHeader{
+		Name:               "res/mipmap/icon.png",
+		UncompressedSize64: maxAPKResourceSize + 1,
+	}}
+	if _, err := readZipFile(file); err == nil {
+		t.Fatal("readZipFile() error = nil, want size-limit rejection")
+	}
+}
 
 func TestParse(t *testing.T) {
 	// Find testdata directory
@@ -205,6 +221,138 @@ func TestIsWatch(t *testing.T) {
 				t.Errorf("IsWatch() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// certFingerprintFromPEM reads an x509 PEM certificate and returns its
+// lowercase hex SHA-256 fingerprint, matching APKInfo.CertFingerprint's
+// format. Fixtures under testdata/*.x509.pem come from the AOSP apksig
+// project's test resources (Apache 2.0), used upstream by apkverifier's own
+// test suite (https://android.googlesource.com/platform/tools/apksig).
+func certFingerprintFromPEM(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		t.Fatalf("decode PEM %s: no block found", path)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse certificate %s: %v", path, err)
+	}
+	sum := sha256.Sum256(cert.Raw)
+	return hex.EncodeToString(sum[:])
+}
+
+func TestParseRejectsMultipleCurrentSigners(t *testing.T) {
+	// two-signers.apk is v1/v2 signed by two independent signers (rsa-2048
+	// and ec-p256). apkverifier itself accepts this as valid; zsp must
+	// additionally reject it because it has more than one current signer.
+	path := filepath.Join("testdata", "two-signers.apk")
+
+	if _, err := Parse(path); err == nil {
+		t.Fatal("Parse() succeeded, want error for multiple current signers")
+	} else if !strings.Contains(err.Error(), "current signer") {
+		t.Errorf("Parse() error = %q, want it to mention multiple current signers", err.Error())
+	}
+
+	if _, err := ExtractCertificate(path); err == nil {
+		t.Fatal("ExtractCertificate() succeeded, want error for multiple current signers")
+	} else if !strings.Contains(err.Error(), "current signer") {
+		t.Errorf("ExtractCertificate() error = %q, want it to mention multiple current signers", err.Error())
+	}
+}
+
+func TestParseRejectsMalformedSignatures(t *testing.T) {
+	tests := []struct {
+		name string
+		file string
+	}{
+		{"v2 signature does not verify", "v2-only-with-rsa-pkcs1-sha256-2048-sig-does-not-verify.apk"},
+		{"v3 signature does not verify", "v3-only-with-rsa-pkcs1-sha256-3072-sig-does-not-verify.apk"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join("testdata", tt.file)
+
+			if _, err := Parse(path); err == nil {
+				t.Fatal("Parse() succeeded, want error for malformed signature")
+			}
+
+			if _, err := ExtractCertificate(path); err == nil {
+				t.Fatal("ExtractCertificate() succeeded, want error for malformed signature")
+			}
+		})
+	}
+}
+
+func TestParseExposesValidatedV3SigningAncestors(t *testing.T) {
+	// v1v2v3-with-rsa-2048-lineage-3-signers.apk rotates through three
+	// certificates: rsa-2048 (oldest) -> rsa-2048_2 -> rsa-2048_3 (current).
+	path := filepath.Join("testdata", "v1v2v3-with-rsa-2048-lineage-3-signers.apk")
+
+	info, err := Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	current := certFingerprintFromPEM(t, filepath.Join("testdata", "rsa-2048_3.x509.pem"))
+	oldest := certFingerprintFromPEM(t, filepath.Join("testdata", "rsa-2048.x509.pem"))
+	middle := certFingerprintFromPEM(t, filepath.Join("testdata", "rsa-2048_2.x509.pem"))
+
+	if info.CertFingerprint != current {
+		t.Errorf("CertFingerprint = %q, want current signer %q", info.CertFingerprint, current)
+	}
+
+	wantAncestors := []string{oldest, middle}
+	if len(info.SigningAncestors) != len(wantAncestors) {
+		t.Fatalf("SigningAncestors = %v, want %v", info.SigningAncestors, wantAncestors)
+	}
+	for i, want := range wantAncestors {
+		if info.SigningAncestors[i] != want {
+			t.Errorf("SigningAncestors[%d] = %q, want %q", i, info.SigningAncestors[i], want)
+		}
+	}
+
+	// The current certificate must not be repeated in the ancestor lineage.
+	for _, ancestor := range info.SigningAncestors {
+		if ancestor == info.CertFingerprint {
+			t.Errorf("SigningAncestors contains the current certificate %q", ancestor)
+		}
+	}
+
+	cert, err := ExtractCertificate(path)
+	if err != nil {
+		t.Fatalf("ExtractCertificate() error = %v", err)
+	}
+	sum := sha256.Sum256(cert.Raw)
+	if got := hex.EncodeToString(sum[:]); got != current {
+		t.Errorf("ExtractCertificate() cert fingerprint = %q, want %q", got, current)
+	}
+}
+
+func TestParseNoRotationHasNoSigningAncestors(t *testing.T) {
+	// None of the non-rotated fixtures should report ancestors; current
+	// certificate semantics (CertFingerprint) must be unaffected.
+	testdataDir := filepath.Join("..", "..", "testdata", "apks")
+	path := filepath.Join(testdataDir, "sample.apk")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		t.Skipf("test APK not found: %s", path)
+	}
+
+	info, err := Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if info.SigningAncestors != nil {
+		t.Errorf("SigningAncestors = %v, want nil for a non-rotated APK", info.SigningAncestors)
+	}
+	if info.CertFingerprint == "" {
+		t.Error("CertFingerprint is empty")
 	}
 }
 

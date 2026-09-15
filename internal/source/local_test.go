@@ -87,4 +87,3 @@ func TestLocalSource(t *testing.T) {
 		}
 	})
 }
-

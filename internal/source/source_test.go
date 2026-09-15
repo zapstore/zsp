@@ -1,6 +1,7 @@
 package source
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -17,6 +18,19 @@ import (
 	"github.com/zapstore/zsp/internal/config"
 )
 
+func TestDecodeJSONResponseRejectsOversizedBody(t *testing.T) {
+	resp := &http.Response{
+		Body:          io.NopCloser(bytes.NewReader([]byte(`{"value":"too long"}`))),
+		ContentLength: -1,
+	}
+	var value struct {
+		Value string `json:"value"`
+	}
+	if err := decodeJSONResponse(resp, 8, &value); err == nil {
+		t.Fatal("decodeJSONResponse() error = nil, want size-limit rejection")
+	}
+}
+
 func TestDoWithTorFallback(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -27,29 +41,16 @@ func TestDoWithTorFallback(t *testing.T) {
 		wantTorCalls int
 		wantTorAuth  string
 	}{
+		{name: "successful direct request does not use Tor", directStatus: http.StatusOK},
 		{
-			name:         "successful direct request does not use Tor",
-			directStatus: http.StatusOK,
-			wantTorCalls: 0,
+			name: "forbidden request retries unauthenticated through Tor", directStatus: http.StatusForbidden,
+			torStatus: http.StatusOK, wantTorCalls: 1,
 		},
+		{name: "non-forbidden response does not use Tor", directStatus: http.StatusInternalServerError},
 		{
-			name:         "forbidden request retries unauthenticated through Tor",
-			directStatus: http.StatusForbidden,
-			torStatus:    http.StatusOK,
-			wantTorCalls: 1,
-			wantTorAuth:  "",
-		},
-		{
-			name:         "non-forbidden response does not use Tor",
-			directStatus: http.StatusInternalServerError,
-			wantTorCalls: 0,
-		},
-		{
-			name:         "unavailable Tor reports actionable error",
-			directStatus: http.StatusForbidden,
+			name: "unavailable Tor reports actionable error", directStatus: http.StatusForbidden,
 			torClientErr: errors.New("connection refused"),
 			wantErr:      "start Tor with SOCKS5 on 127.0.0.1:9050",
-			wantTorCalls: 0,
 		},
 	}
 
@@ -278,12 +279,12 @@ func TestNewWithOptions(t *testing.T) {
 			wantErr:  false,
 		},
 		{
-			name: "github with skip cache",
+			name: "github with include pre-releases",
 			cfg: &config.Config{
 				Repository: "https://github.com/AeonBTC/mempal",
 			},
 			opts: Options{
-				SkipCache: true,
+				IncludePreReleases: true,
 			},
 			wantType: config.SourceGitHub,
 			wantErr:  false,
@@ -312,11 +313,11 @@ func TestNewWithOptions(t *testing.T) {
 				t.Errorf("NewWithOptions() source type = %v, want %v", src.Type(), tt.wantType)
 			}
 
-			// For GitHub source, check that SkipCache was applied
-			if tt.opts.SkipCache {
+			// For GitHub source, check that IncludePreReleases was applied
+			if tt.opts.IncludePreReleases {
 				if gh, ok := src.(*GitHub); ok {
-					if !gh.SkipCache {
-						t.Error("NewWithOptions() GitHub SkipCache not set")
+					if !gh.IncludePreReleases {
+						t.Error("NewWithOptions() GitHub IncludePreReleases not set")
 					}
 				}
 			}
@@ -409,6 +410,23 @@ func TestReleaseFields(t *testing.T) {
 	}
 }
 
+func TestForgeConvertersPreserveReleaseName(t *testing.T) {
+	tests := []struct {
+		forge string
+		got   *Release
+		want  string
+	}{
+		{"github", (&GitHub{}).convertRelease(&githubRelease{TagName: "v1.0.0", Name: "GitHub release"}), "GitHub release"},
+		{"gitlab", (&GitLab{}).convertRelease(&gitlabRelease{TagName: "v1.0.0", Name: "GitLab release"}), "GitLab release"},
+		{"gitea", (&Gitea{}).convertRelease(&giteaRelease{TagName: "v1.0.0", Name: "Gitea release"}), "Gitea release"},
+	}
+	for _, test := range tests {
+		if test.got.Name != test.want {
+			t.Errorf("%s converter release name = %q, want %q", test.forge, test.got.Name, test.want)
+		}
+	}
+}
+
 // bytesReaderImpl implements io.Reader for testing
 type bytesReaderImpl struct {
 	data []byte
@@ -436,9 +454,9 @@ func TestHasUnsupportedArchitecture(t *testing.T) {
 		{"bunny-6.0-803-x86.apk", true},
 		{"app_x86_64_release.apk", true},
 		{"app.x86.release.apk", true},
-		{"app-i686.apk", true},
-		{"app-i386.apk", true},
-		{"app-amd64.apk", true},
+		{"app-i686.apk", false},
+		{"app-i386.apk", false},
+		{"app-amd64.apk", false},
 
 		// Unsupported 32-bit ARM - should be filtered
 		{"app-armeabi-v7a.apk", true},
@@ -453,7 +471,7 @@ func TestHasUnsupportedArchitecture(t *testing.T) {
 		{"app.apk", false},                  // no arch indicator
 		{"app-universal.apk", false},        // universal
 		{"app-v1.0.0.apk", false},           // version, not arch
-		{"x86_64-app.apk", false},           // arch at start, not in middle
+		{"x86_64-app.apk", true},            // unsupported arch token at start
 		{"app-arm64-v8a-fdroid.apk", false}, // arm64 with fdroid suffix
 
 		// Non-APK files - should NOT be filtered
@@ -553,7 +571,7 @@ func TestDownloadHTTPRetriesTransientEOF(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	dest := filepath.Join(t.TempDir(), "app.apk")
-	err := DownloadHTTP(context.Background(), nil, srv.URL, dest, 0, nil)
+	err := DownloadHTTP(context.Background(), srv.URL, dest, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("DownloadHTTP() error = %v", err)
 	}
@@ -569,89 +587,115 @@ func TestDownloadHTTPRetriesTransientEOF(t *testing.T) {
 	}
 }
 
-type stubPublishedSource struct {
-	version string
-}
-
-func (s stubPublishedSource) Type() config.SourceType { return config.SourceGitHub }
-func (s stubPublishedSource) FetchLatestRelease(context.Context) (*Release, error) {
-	return nil, nil
-}
-func (s stubPublishedSource) Download(context.Context, *Asset, string, DownloadProgress) (string, error) {
-	return "", nil
-}
-func (s stubPublishedSource) GetPublishedVersion() string { return s.version }
-
-type stubPlainSource struct{}
-
-func (stubPlainSource) Type() config.SourceType { return config.SourceLocal }
-func (stubPlainSource) FetchLatestRelease(context.Context) (*Release, error) {
-	return nil, nil
-}
-func (stubPlainSource) Download(context.Context, *Asset, string, DownloadProgress) (string, error) {
-	return "", nil
-}
-
-func TestIsAlreadyPublished(t *testing.T) {
-	src := stubPublishedSource{version: "1.2.3"}
-
+func TestValidateDownloadURL(t *testing.T) {
 	tests := []struct {
-		name     string
-		src      Source
-		release  *Release
-		fetchErr error
-		want     bool
+		url     string
+		wantErr bool
 	}{
-		{
-			name:     "ErrNotModified means already published",
-			src:      src,
-			fetchErr: ErrNotModified,
-			want:     true,
-		},
-		{
-			name:    "matching published version",
-			src:     src,
-			release: &Release{Version: "1.2.3"},
-			want:    true,
-		},
-		{
-			name:    "different published version",
-			src:     src,
-			release: &Release{Version: "1.2.4"},
-			want:    false,
-		},
-		{
-			name:    "empty published version cache",
-			src:     stubPublishedSource{version: ""},
-			release: &Release{Version: "1.2.3"},
-			want:    false,
-		},
-		{
-			name:    "source without PublishedVersionReader",
-			src:     stubPlainSource{},
-			release: &Release{Version: "1.2.3"},
-			want:    false,
-		},
-		{
-			name:     "real fetch error is not already published",
-			src:      src,
-			fetchErr: errors.New("network down"),
-			want:     false,
-		},
-		{
-			name:    "nil release without ErrNotModified",
-			src:     src,
-			release: nil,
-			want:    false,
-		},
+		{"https://github.com/user/app.apk", false},
+		{"http://github.com/user/app.apk", true}, // HTTP disallowed for remote hosts
+		{"http://localhost/app.apk", false},
+		{"http://127.0.0.1:8080/app.apk", false},
+		{"javascript:alert(1)", true},
+		{"", true},
 	}
-
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := IsAlreadyPublished(tt.src, tt.release, tt.fetchErr)
-			if got != tt.want {
-				t.Fatalf("IsAlreadyPublished() = %v, want %v", got, tt.want)
+		t.Run(tt.url, func(t *testing.T) {
+			if err := validateDownloadURL(tt.url); (err != nil) != tt.wantErr {
+				t.Errorf("validateDownloadURL(%q) error = %v, wantErr %v", tt.url, err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestDownloadHTTPRejectsInsecureURL confirms the shared pipeline refuses an
+// insecure initial URL before making any request, so callers of DownloadHTTP
+// (all remote APK sources) inherit this check for free.
+func TestDownloadHTTPRejectsInsecureURL(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "app.apk")
+	err := DownloadHTTP(context.Background(), "http://example.com/app.apk", dest, 0, nil, nil)
+	if err == nil {
+		t.Fatal("DownloadHTTP() error = nil, want rejection of insecure URL")
+	}
+	if !strings.Contains(err.Error(), "refusing unsafe download URL") {
+		t.Fatalf("DownloadHTTP() error = %v, want unsafe URL rejection", err)
+	}
+	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no file written, stat err = %v", statErr)
+	}
+}
+
+// TestDownloadHTTPClientRejectsUnsafeRedirect exercises the CheckRedirect hook
+// directly (rather than through a real multi-hop request, which would also
+// exercise the retry loop) to confirm every redirect hop is held to the same
+// HTTPS-outside-loopback rule as an explicit URL, and that redirect depth is
+// bounded.
+func TestDownloadHTTPClientRejectsUnsafeRedirect(t *testing.T) {
+	client := newDownloadHTTPClient()
+
+	insecure, err := http.NewRequest(http.MethodGet, "http://evil.example.com/app.apk", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if err := client.CheckRedirect(insecure, nil); err == nil {
+		t.Fatal("CheckRedirect() = nil, want rejection of insecure redirect target")
+	}
+
+	safe, err := http.NewRequest(http.MethodGet, "https://cdn.example.com/app.apk", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if err := client.CheckRedirect(safe, nil); err != nil {
+		t.Fatalf("CheckRedirect() = %v, want nil for safe https target", err)
+	}
+
+	loopback, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:8080/app.apk", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if err := client.CheckRedirect(loopback, nil); err != nil {
+		t.Fatalf("CheckRedirect() = %v, want nil for loopback http target", err)
+	}
+
+	tenHops := make([]*http.Request, 10)
+	if err := client.CheckRedirect(safe, tenHops); err == nil {
+		t.Fatal("CheckRedirect() = nil, want too-many-redirects rejection at depth 10")
+	}
+}
+
+// TestDownloadHTTPAttachesHeaders confirms per-source headers (e.g. a GitHub
+// or Gitea Authorization token) reach the actual download request.
+func TestDownloadHTTPAttachesHeaders(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Length", "4")
+		_, _ = w.Write([]byte("data"))
+	}))
+	t.Cleanup(srv.Close)
+
+	dest := filepath.Join(t.TempDir(), "app.apk")
+	err := DownloadHTTP(context.Background(), srv.URL, dest, 0, map[string]string{"Authorization": "Bearer secret"}, nil)
+	if err != nil {
+		t.Fatalf("DownloadHTTP() error = %v", err)
+	}
+	if gotAuth != "Bearer secret" {
+		t.Fatalf("Authorization header = %q, want %q", gotAuth, "Bearer secret")
+	}
+}
+
+func TestCheckHTTPStatusDoesNotExposeResponseBody(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "https://example.com/releases", nil)
+	response := &http.Response{
+		StatusCode: http.StatusInternalServerError,
+		Request:    request,
+		Body:       io.NopCloser(strings.NewReader("Authorization: Bearer secret-token")),
+	}
+	err := checkHTTPStatus(response, "test service")
+	if err == nil {
+		t.Fatal("checkHTTPStatus() error = nil")
+	}
+	if strings.Contains(err.Error(), "secret-token") {
+		t.Fatalf("error leaked response body: %v", err)
 	}
 }

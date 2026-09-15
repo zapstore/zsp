@@ -11,70 +11,6 @@ import (
 	"github.com/zapstore/zsp/internal/config"
 )
 
-func TestWebCacheRoundtrip(t *testing.T) {
-	dir := t.TempDir()
-
-	w := &Web{
-		cfg: &config.Config{
-			ReleaseSource: &config.ReleaseSource{
-				URL: "https://example.com/releases/app",
-			},
-		},
-		cacheDir: dir,
-	}
-
-	// No cache yet
-	if got := w.GetPublishedVersion(); got != "" {
-		t.Fatalf("expected empty version before any publish, got %q", got)
-	}
-
-	// Simulate FetchLatestRelease setting pendingCache (version extractor mode)
-	w.pendingCache = &webCache{
-		Version:                       "2.1.0",
-		AssetURL:                      "https://example.com/releases/app-2.1.0.apk",
-		LatestPublishedReleaseVersion: "2.1.0",
-	}
-
-	// CommitCache should write to disk and clear pendingCache
-	if err := w.CommitCache(); err != nil {
-		t.Fatalf("CommitCache() error: %v", err)
-	}
-	if w.pendingCache != nil {
-		t.Fatal("expected pendingCache to be nil after CommitCache")
-	}
-
-	// GetPublishedVersion should read the written version
-	if got := w.GetPublishedVersion(); got != "2.1.0" {
-		t.Fatalf("GetPublishedVersion() = %q, want %q", got, "2.1.0")
-	}
-
-	// Commit with a new version
-	w.pendingCache = &webCache{
-		Version:                       "2.2.0",
-		AssetURL:                      "https://example.com/releases/app-2.2.0.apk",
-		LatestPublishedReleaseVersion: "2.2.0",
-	}
-	if err := w.CommitCache(); err != nil {
-		t.Fatalf("CommitCache() error on second publish: %v", err)
-	}
-	if got := w.GetPublishedVersion(); got != "2.2.0" {
-		t.Fatalf("GetPublishedVersion() after update = %q, want %q", got, "2.2.0")
-	}
-
-	// ClearCache should delete the file
-	if err := w.ClearCache(); err != nil {
-		t.Fatalf("ClearCache() error: %v", err)
-	}
-	if got := w.GetPublishedVersion(); got != "" {
-		t.Fatalf("expected empty version after ClearCache, got %q", got)
-	}
-
-	// CommitCache with nil pendingCache is a no-op
-	if err := w.CommitCache(); err != nil {
-		t.Fatalf("CommitCache() with nil pendingCache should not error: %v", err)
-	}
-}
-
 func TestWebDirectURLKeepsOriginalDownloadURL(t *testing.T) {
 	// Simulates telegram.org-style redirect: stable entry URL → tokenized CDN URL.
 	mux := http.NewServeMux()
@@ -100,9 +36,7 @@ func TestWebDirectURLKeepsOriginalDownloadURL(t *testing.T) {
 				AssetURL:    entryURL,
 			},
 		},
-		client:    newSecureHTTPClient(5 * time.Second),
-		cacheDir:  t.TempDir(),
-		SkipCache: true,
+		client: newSecureHTTPClient(5 * time.Second),
 	}
 
 	rel, err := w.FetchLatestRelease(context.Background())
@@ -121,5 +55,75 @@ func TestWebDirectURLKeepsOriginalDownloadURL(t *testing.T) {
 	}
 	if strings.Contains(asset.URL, "token=") {
 		t.Errorf("download URL should not be the tokenized CDN URL: %s", asset.URL)
+	}
+}
+
+func TestWebDirectURLFallsBackToGETWhenHEADIsNotAllowed(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/download", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		http.Redirect(w, r, "/files/app.apk", http.StatusFound)
+	})
+	mux.HandleFunc("/files/app.apk", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	w := &Web{client: newSecureHTTPClient(5 * time.Second)}
+	finalURL, err := w.resolveRedirects(context.Background(), srv.URL+"/download")
+	if err != nil {
+		t.Fatalf("resolveRedirects() error = %v", err)
+	}
+	if finalURL != srv.URL+"/files/app.apk" {
+		t.Fatalf("resolveRedirects() = %q, want redirected URL", finalURL)
+	}
+}
+
+// TestExtractAssetURLRejectsInsecureExtractedURL confirms a dynamically
+// extracted asset URL (e.g. from a JSON API response) is held to the same
+// HTTPS-outside-loopback rule as an explicit configuration URL.
+func TestExtractAssetURLRejectsInsecureExtractedURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"url":"http://evil.example.com/app.apk"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	w := &Web{client: newSecureHTTPClient(5 * time.Second)}
+	repo := &config.ReleaseSource{
+		IsWebSource: true,
+		Asset:       &config.VersionExtractor{URL: srv.URL, Path: "$.url"},
+	}
+
+	if _, err := w.extractAssetURL(context.Background(), repo); err == nil {
+		t.Fatal("extractAssetURL() error = nil, want rejection of insecure extracted URL")
+	}
+}
+
+// TestExtractAssetURLAcceptsSafeExtractedURL confirms a safe (HTTPS) extracted
+// asset URL still passes through unchanged.
+func TestExtractAssetURLAcceptsSafeExtractedURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"url":"https://cdn.example.com/app.apk"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	w := &Web{client: newSecureHTTPClient(5 * time.Second)}
+	repo := &config.ReleaseSource{
+		IsWebSource: true,
+		Asset:       &config.VersionExtractor{URL: srv.URL, Path: "$.url"},
+	}
+
+	got, err := w.extractAssetURL(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("extractAssetURL() error = %v", err)
+	}
+	if got != "https://cdn.example.com/app.apk" {
+		t.Fatalf("extractAssetURL() = %q, want %q", got, "https://cdn.example.com/app.apk")
 	}
 }
