@@ -69,7 +69,7 @@ type FetchOptions struct {
 
 // APK is a downloaded and verified publication candidate.
 type APK struct {
-	Hash            string   `json:"sha256"`
+	Hash            string   `json:"hash"`
 	Filename        string   `json:"filename"`
 	SourceURL       string   `json:"source_url,omitempty"`
 	Size            int64    `json:"size"`
@@ -79,8 +79,8 @@ type APK struct {
 	MinSDK          int32    `json:"min_sdk"`
 	TargetSDK       int32    `json:"target_sdk"`
 	Name            string   `json:"name"`
-	CertificateHash string   `json:"certificate_sha256"`
-	LineageHashes   []string `json:"lineage_sha256,omitempty"`
+	CertificateHash string   `json:"certificate_hash"`
+	LineageHashes   []string `json:"lineage_hashes,omitempty"`
 	Architectures   []string `json:"architectures"`
 
 	ownership   *apkOwnership
@@ -163,8 +163,8 @@ type PublishResult struct {
 	ID              string        `json:"id"`
 	Status          string        `json:"status"`
 	AppID           string        `json:"app_id"`
-	CertificateHash string        `json:"certificate_sha256"`
-	LineageHashes   []string      `json:"lineage_sha256,omitempty"`
+	CertificateHash string        `json:"certificate_hash"`
+	LineageHashes   []string      `json:"lineage_hashes,omitempty"`
 	Events          EventIDs      `json:"events"`
 	Uploads         []BlobResult  `json:"uploads"`
 	Relays          []RelayResult `json:"relays"`
@@ -174,7 +174,7 @@ type PublishResult struct {
 // BlobResult records one Blossom upload outcome.
 type BlobResult struct {
 	URL      string `json:"url"`
-	Hash     string `json:"sha256"`
+	Hash     string `json:"hash"`
 	Size     int64  `json:"size"`
 	Type     string `json:"type"`
 	Uploaded int64  `json:"uploaded"`

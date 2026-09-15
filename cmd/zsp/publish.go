@@ -292,7 +292,7 @@ func writePublishError(opts *cli.Options, err error, candidates []*publiczsp.APK
 	body := cliErrorBody{Code: code, Summary: safeSummary(code), Retryable: retryable, NextSteps: []cliNextStep{}}
 	if code == "proof_required" {
 		if len(candidates) == 1 {
-			body.Context = map[string]any{"certificate_sha256": candidates[0].CertificateHash}
+			body.Context = map[string]any{"certificate_hash": candidates[0].CertificateHash}
 		}
 		body.NextSteps = []cliNextStep{{
 			Command:       "zsp",

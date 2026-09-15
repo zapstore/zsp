@@ -165,7 +165,7 @@ type apkMetadataDocument struct {
 	Label           string   `json:"label"`
 	Architectures   []string `json:"architectures"`
 	CertificateHash string   `json:"certificate_hash"`
-	SHA256          string   `json:"sha256"`
+	Hash            string   `json:"hash"`
 	Size            int64    `json:"size"`
 }
 
@@ -178,7 +178,7 @@ func extractAPKMetadata(path string, envelope bool) error {
 		PackageID: info.PackageID, VersionName: info.VersionName, VersionCode: info.VersionCode,
 		MinSDK: info.MinSDK, TargetSDK: info.TargetSDK, Label: info.Label,
 		Architectures: info.Architectures, CertificateHash: info.CertFingerprint,
-		SHA256: info.SHA256, Size: info.FileSize,
+		Hash: info.SHA256, Size: info.FileSize,
 	}
 	if envelope {
 		return json.NewEncoder(os.Stdout).Encode(struct {
