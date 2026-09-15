@@ -26,12 +26,12 @@ Guidelines are symlinked into `.cursor/rules/` and auto-load.
 | `spec/features/*` | Human | No (unless asked) |
 | `spec/work/*.md` | AI | Yes |
 | `spec/knowledge/*.md` | AI | Yes |
-| `internal/**`, `main.go` | Shared | Yes |
+| `*.go`, `internal/**`, `cmd/zsp/**` | Shared | Yes |
 
 ## Key Commands
 
 ```bash
-go build -o zsp .     # Build
+go build -o zsp ./cmd/zsp # Build
 go test ./...         # Tests
 go vet ./...          # Lint
 go mod tidy           # After dependency changes

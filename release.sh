@@ -33,7 +33,7 @@ LDFLAGS="-s -w -X main.version=${VERSION#v}"
 for target in "${TARGETS[@]}"; do
     OS="${target%/*}" ARCH="${target#*/}"
     echo "  ${OS}/${ARCH}"
-    GOOS="$OS" GOARCH="$ARCH" go build -ldflags "$LDFLAGS" -o "dist/${BINARY_NAME}-${VERSION#v}-${OS}-${ARCH}" .
+    GOOS="$OS" GOARCH="$ARCH" go build -ldflags "$LDFLAGS" -o "dist/${BINARY_NAME}-${VERSION#v}-${OS}-${ARCH}" ./cmd/zsp
 done
 
 (cd dist && shasum -a 256 * > checksums.txt)

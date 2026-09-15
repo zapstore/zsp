@@ -1,5 +1,7 @@
 BINARY_NAME := zsp
-CMD_PATH    := .
+TEST_RELAY  := test-relay
+CMD_PATH    := ./cmd/zsp
+TEST_RELAY_PATH := ./cmd/test-relay
 DIST        := dist
 
 GOFLAGS := -trimpath
@@ -8,10 +10,11 @@ LDFLAGS := -s -w
 HOST_OS   := $(shell go env GOOS)
 HOST_ARCH := $(shell go env GOARCH)
 
-.PHONY: all build build-darwin-arm64 build-linux-amd64 build-linux-arm64 clean test install fmt vet
+.PHONY: all build build-darwin-arm64 build-linux-amd64 build-linux-arm64 clean test test-remote test-relay install fmt vet
 
 build:
 	CGO_ENABLED=1 go build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $(BINARY_NAME) $(CMD_PATH)
+	CGO_ENABLED=1 go build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $(TEST_RELAY) $(TEST_RELAY_PATH)
 
 all: build-darwin-arm64 build-linux-amd64 build-linux-arm64
 
@@ -34,12 +37,20 @@ build-linux-arm64:
 		-o $(DIST)/$(BINARY_NAME)-linux-arm64 $(CMD_PATH)
 
 clean:
-	rm -f $(BINARY_NAME)
+	rm -f $(BINARY_NAME) $(TEST_RELAY)
 	rm -rf $(DIST)
 	go clean
 
 test:
 	go test -v ./...
+
+test-remote:
+	CGO_ENABLED=1 go build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $(TEST_RELAY) $(TEST_RELAY_PATH)
+	TEST_RELAY_BINARY=$(CURDIR)/$(TEST_RELAY) go test -v -count=1 -tags=remote -timeout=20m ./tests/remote
+
+test-relay:
+	CGO_ENABLED=1 go build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $(TEST_RELAY) $(TEST_RELAY_PATH)
+	./$(TEST_RELAY)
 
 install:
 	go install $(CMD_PATH)
