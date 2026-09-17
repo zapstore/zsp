@@ -16,9 +16,9 @@ import (
 // Fetch resolves and verifies usable APK candidates. The caller owns each
 // returned APK and must call Close when it will not be published.
 //
-// When SkipHTTPCache is false, Fetch sends stored HTTP validators and
-// returns ErrNoNewAPK if the source reports that nothing has changed. A
-// failed Publish deletes that cache so the next Fetch can retry.
+// When options.SkipHTTPCache is false, Fetch sends stored HTTP validators
+// and returns ErrNoNewAPK if the source reports that nothing has changed.
+// A failed Publish deletes that cache so the next Fetch can retry.
 func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*APK, error) {
 	internal, err := fetchInternalConfig(config)
 	if err != nil {
@@ -26,7 +26,7 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 	}
 	src, err := source.NewWithOptions(internal, source.Options{
 		IncludePreReleases: config.PrereleaseChannel != "",
-		SkipHTTPCache:      config.SkipHTTPCache,
+		SkipHTTPCache:      options.SkipHTTPCache,
 	})
 	if err != nil {
 		return nil, wrapOperationError(ErrInvalidConfig, err, false, "create source")
@@ -178,7 +178,7 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 		}
 		return nil, operationErr(ErrNoAPK, false, "no candidate passed APK verification")
 	}
-	if !config.SkipHTTPCache {
+	if !options.SkipHTTPCache {
 		if committer, ok := src.(source.CacheCommitter); ok {
 			_ = committer.CommitCache()
 		}

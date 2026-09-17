@@ -66,12 +66,9 @@ func publishCommand(ctx context.Context, opts *cli.Options) int {
 			reporter.Report(progress)
 		}
 	}
-	fetchConfig := config.FetchConfig
-	if opts.Publish.OverwriteRelease || opts.Publish.Check {
-		fetchConfig.SkipHTTPCache = true
-	}
-	candidates, err := zsp.Fetch(ctx, fetchConfig, zsp.FetchOptions{
-		OnProgress: progress,
+	candidates, err := zsp.Fetch(ctx, config.FetchConfig, zsp.FetchOptions{
+		OnProgress:    progress,
+		SkipHTTPCache: opts.Publish.OverwriteRelease || opts.Publish.Check,
 	})
 	if err != nil {
 		return writePublishError(opts, err, nil)

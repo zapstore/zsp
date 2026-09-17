@@ -38,11 +38,11 @@ func TestPublicStructFieldsMatchContract(t *testing.T) {
 		want  []string
 	}{
 		{Config{}, []string{"FetchConfig", "PublishConfig"}},
-		{FetchConfig{}, []string{"Repository", "ReleaseSource", "ReleaseFilter", "Match", "PrereleaseChannel", "SkipHTTPCache"}},
+		{FetchConfig{}, []string{"Repository", "ReleaseSource", "ReleaseFilter", "Match", "PrereleaseChannel"}},
 		{PublishConfig{}, []string{"Name", "Summary", "Description", "Tags", "License", "Website", "Icon", "Images", "ReleaseNotes", "SupportedNIPs", "MinAllowedVersion", "MinAllowedVersionCode", "MetadataSources", "Channel"}},
 		{ReleaseSource{}, []string{"URL", "LocalPath", "Type", "AssetURL", "VersionExtractor", "AssetExtractor"}},
 		{Extractor{}, []string{"URL", "Selector", "Attribute", "Path", "Header", "Match"}},
-		{FetchOptions{}, []string{"OnProgress"}},
+		{FetchOptions{}, []string{"OnProgress", "SkipHTTPCache"}},
 		{APK{}, []string{"Hash", "Filename", "SourceURL", "Size", "AppID", "VersionName", "VersionCode", "MinSDK", "TargetSDK", "Name", "CertificateHash", "LineageHashes", "Architectures"}},
 		{Progress{}, []string{"Operation", "Phase", "Target", "Completed", "Total"}},
 		{PublishOptions{}, []string{"BlossomURL", "Relays", "Channel", "Commit", "SkipAppEvent", "SkipMediaCompression", "SkipProofCheck", "OverwriteRelease", "Preview", "BrowserPort", "OnProgress"}},
@@ -782,8 +782,7 @@ func TestFetchReturnsErrNoNewAPKWhenETagUnchanged(t *testing.T) {
 		t.Fatalf("Fetch after failed Publish len(candidates) = %d, want 1", len(retried))
 	}
 
-	config.SkipHTTPCache = true
-	forced, err := Fetch(t.Context(), config, FetchOptions{})
+	forced, err := Fetch(t.Context(), config, FetchOptions{SkipHTTPCache: true})
 	if err != nil {
 		t.Fatalf("SkipHTTPCache Fetch() = %v", err)
 	}

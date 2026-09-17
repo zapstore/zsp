@@ -20,12 +20,7 @@ type FetchConfig struct {
 	ReleaseFilter     string         `json:"release_filter"`
 	Match             string         `json:"match"`
 	PrereleaseChannel string         `json:"prerelease_channel"`
-	// SkipHTTPCache disables conditional requests. When false (the default),
-	// Fetch sends stored validators (ETag, Last-Modified, Content-Length) and
-	// returns ErrNoNewAPK if the source reports no change. Publish deletes
-	// that cache if publication fails.
-	SkipHTTPCache bool `json:"skip_http_cache"`
-	baseDir       string
+	baseDir           string
 }
 
 // PublishConfig contains application metadata used to build NIP-82 events.
@@ -69,9 +64,14 @@ type Extractor struct {
 	Match     string `json:"match"`
 }
 
-// FetchOptions controls source resolution and progress reporting.
+// FetchOptions controls per-fetch behavior such as HTTP cache use and progress reporting.
 type FetchOptions struct {
 	OnProgress func(Progress) `json:"-"`
+	// SkipHTTPCache disables conditional requests. When false (the default),
+	// Fetch sends stored validators (ETag, Last-Modified, Content-Length) and
+	// returns ErrNoNewAPK if the source reports no change. Publish deletes
+	// that cache if publication fails.
+	SkipHTTPCache bool `json:"skip_http_cache"`
 }
 
 // APK is a downloaded and verified publication candidate.
