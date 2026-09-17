@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/zapstore/zsp/internal/apk"
 	"github.com/zapstore/zsp/internal/source"
@@ -172,9 +171,6 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 			},
 		})
 	}
-	for _, candidate := range results {
-		candidate.startLifetime()
-	}
 	if len(results) == 0 {
 		if lastDownloadError != nil {
 			sentinel, retryable := sourceErrorClassification(lastDownloadError)
@@ -227,31 +223,8 @@ func isPublishableSourceURL(value string) bool {
 		parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == ""
 }
 
-const apkLifetime = 5 * time.Minute
-
 func newAPKOwnership(path, tempDir string, managed bool) *apkOwnership {
 	return &apkOwnership{path: path, tempDir: tempDir, managed: managed}
-}
-
-func (apk *APK) startLifetime() {
-	if apk == nil || apk.ownership == nil {
-		return
-	}
-	apk.ownership.mu.Lock()
-	defer apk.ownership.mu.Unlock()
-	apk.ownership.startTimerLocked()
-}
-
-func (state *apkOwnership) startTimerLocked() {
-	if state.closed || state.publishing {
-		return
-	}
-	if state.timer != nil {
-		state.timer.Stop()
-	}
-	state.timer = scheduleAPKExpiry(apkLifetime, func() {
-		_ = state.expire()
-	})
 }
 
 // Close releases temporary files owned by ZSP. It never deletes a local APK.
@@ -278,21 +251,8 @@ func (state *apkOwnership) close() error {
 	return state.cleanupLocked()
 }
 
-func (state *apkOwnership) expire() error {
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.closed || state.publishing {
-		return nil
-	}
-	return state.cleanupLocked()
-}
-
 func (state *apkOwnership) cleanupLocked() error {
 	state.closed = true
-	if state.timer != nil {
-		state.timer.Stop()
-		state.timer = nil
-	}
 	if !state.managed || state.path == "" {
 		return nil
 	}
@@ -318,9 +278,6 @@ func (apk *APK) beginPublish() (string, bool) {
 		return "", false
 	}
 	state.publishing = true
-	if state.timer != nil {
-		state.timer.Stop()
-	}
 	return state.path, true
 }
 
@@ -349,7 +306,6 @@ func (apk *APK) finishPublish(success bool) error {
 	}
 	state.publishing = false
 	if !success && !state.closeRequested {
-		state.startTimerLocked()
 		state.mu.Unlock()
 		return nil
 	}

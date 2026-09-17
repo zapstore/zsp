@@ -121,16 +121,7 @@ type apkOwnership struct {
 	closed         bool
 	publishing     bool
 	closeRequested bool
-	timer          apkTimer
 	clearHTTPCache func() error
-}
-
-type apkTimer interface {
-	Stop() bool
-}
-
-var scheduleAPKExpiry = func(after time.Duration, expire func()) apkTimer {
-	return time.AfterFunc(after, expire)
 }
 
 // Progress reports a synchronous operation update.
