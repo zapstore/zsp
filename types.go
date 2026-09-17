@@ -20,10 +20,12 @@ type FetchConfig struct {
 	ReleaseFilter     string         `json:"release_filter"`
 	Match             string         `json:"match"`
 	PrereleaseChannel string         `json:"prerelease_channel"`
-	// SkipETag disables conditional requests. When false (the default), Fetch
-	// sends stored ETags and returns ErrNoNewAPK if the source reports no change.
-	SkipETag bool `json:"skip_etag"`
-	baseDir  string
+	// SkipHTTPCache disables conditional requests. When false (the default),
+	// Fetch sends stored validators (ETag, Last-Modified, Content-Length) and
+	// returns ErrNoNewAPK if the source reports no change. Publish deletes
+	// that cache if publication fails.
+	SkipHTTPCache bool `json:"skip_http_cache"`
+	baseDir       string
 }
 
 // PublishConfig contains application metadata used to build NIP-82 events.
@@ -120,6 +122,7 @@ type apkOwnership struct {
 	publishing     bool
 	closeRequested bool
 	timer          apkTimer
+	clearCache     func() error
 }
 
 type apkTimer interface {

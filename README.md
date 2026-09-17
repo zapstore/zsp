@@ -147,8 +147,9 @@ result, err := zsp.Publish(ctx, cfg.PublishConfig, apks[0], zsp.PublishOptions{}
 Call `APK.Close` for candidates that will not be published. `Publish` closes a
 successfully published candidate. Use `errors.Is` with exported sentinels and
 `errors.As` to inspect `zsp.Error.Retryable()`. `Fetch` returns `ErrNoNewAPK`
-when a stored ETag shows the source is unchanged; set `FetchConfig.SkipETag` to
-always download.
+when a stored HTTP cache shows the source is unchanged; set
+`FetchConfig.SkipHTTPCache` to always download. A failed `Publish` deletes that
+cache so the next `Fetch` can retry.
 
 ## License
 

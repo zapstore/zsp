@@ -38,7 +38,7 @@ func TestPublicStructFieldsMatchContract(t *testing.T) {
 		want  []string
 	}{
 		{Config{}, []string{"FetchConfig", "PublishConfig"}},
-		{FetchConfig{}, []string{"Repository", "ReleaseSource", "ReleaseFilter", "Match", "PrereleaseChannel", "SkipETag"}},
+		{FetchConfig{}, []string{"Repository", "ReleaseSource", "ReleaseFilter", "Match", "PrereleaseChannel", "SkipHTTPCache"}},
 		{PublishConfig{}, []string{"Name", "Summary", "Description", "Tags", "License", "Website", "Icon", "Images", "ReleaseNotes", "SupportedNIPs", "MinAllowedVersion", "MinAllowedVersionCode", "MetadataSources", "Channel"}},
 		{ReleaseSource{}, []string{"URL", "LocalPath", "Type", "AssetURL", "VersionExtractor", "AssetExtractor"}},
 		{Extractor{}, []string{"URL", "Selector", "Attribute", "Path", "Header", "Match"}},
@@ -835,14 +835,26 @@ func TestFetchReturnsErrNoNewAPKWhenETagUnchanged(t *testing.T) {
 		t.Fatalf("second Fetch() = %v, want ErrNoNewAPK", err)
 	}
 
-	config.SkipETag = true
+	if _, err := Publish(t.Context(), PublishConfig{}, candidates[0], PublishOptions{}); err == nil {
+		t.Fatal("Publish() = nil, want error")
+	}
+	retried, err := Fetch(t.Context(), config, FetchOptions{})
+	if err != nil {
+		t.Fatalf("Fetch after failed Publish() = %v", err)
+	}
+	t.Cleanup(func() { closeAPKs(retried) })
+	if len(retried) != 1 {
+		t.Fatalf("Fetch after failed Publish len(candidates) = %d, want 1", len(retried))
+	}
+
+	config.SkipHTTPCache = true
 	forced, err := Fetch(t.Context(), config, FetchOptions{})
 	if err != nil {
-		t.Fatalf("SkipETag Fetch() = %v", err)
+		t.Fatalf("SkipHTTPCache Fetch() = %v", err)
 	}
 	t.Cleanup(func() { closeAPKs(forced) })
 	if len(forced) != 1 {
-		t.Fatalf("SkipETag len(candidates) = %d, want 1", len(forced))
+		t.Fatalf("SkipHTTPCache len(candidates) = %d, want 1", len(forced))
 	}
 }
 

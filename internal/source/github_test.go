@@ -154,16 +154,23 @@ func TestGitHubFetchLatestReleaseUsesETag(t *testing.T) {
 		t.Fatalf("second FetchLatestRelease() = %v, want ErrNotModified", err)
 	}
 
-	github.SkipCache = true
+	if err := github.ClearCache(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := github.FetchLatestRelease(t.Context()); err != nil {
+		t.Fatalf("FetchLatestRelease after ClearCache() = %v", err)
+	}
+
+	github.SkipHTTPCache = true
 	release, err = github.FetchLatestRelease(t.Context())
 	if err != nil {
-		t.Fatalf("SkipCache FetchLatestRelease() = %v", err)
+		t.Fatalf("SkipHTTPCache FetchLatestRelease() = %v", err)
 	}
 	if release.Version != "1.0.0" {
-		t.Fatalf("SkipCache version = %q, want 1.0.0", release.Version)
+		t.Fatalf("SkipHTTPCache version = %q, want 1.0.0", release.Version)
 	}
-	if len(ifNone) != 3 || ifNone[0] != "" || ifNone[1] != etag || ifNone[2] != "" {
-		t.Fatalf("If-None-Match headers = %v, want [\"\", %q, \"\"]", ifNone, etag)
+	if len(ifNone) != 4 || ifNone[0] != "" || ifNone[1] != etag || ifNone[2] != "" || ifNone[3] != "" {
+		t.Fatalf("If-None-Match headers = %v, want [\"\", %q, \"\", \"\"]", ifNone, etag)
 	}
 }
 

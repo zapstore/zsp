@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -28,7 +29,7 @@ type GitHub struct {
 	client             *http.Client
 	cacheDir           string
 	apiBase            string
-	SkipCache          bool // Set to true to bypass ETag checks
+	SkipHTTPCache      bool // Set to true to bypass ETag checks
 	IncludePreReleases bool // Set to true to include pre-releases (--pre-release)
 	pendingETag        string
 }
@@ -120,6 +121,16 @@ func (g *GitHub) CommitCache() error {
 	return nil
 }
 
+// ClearCache deletes the persisted ETag so the next fetch is unconditional.
+func (g *GitHub) ClearCache() error {
+	g.pendingETag = ""
+	err := os.Remove(g.cacheFilePath())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
 func (g *GitHub) apiURL(format string, args ...any) string {
 	base := g.apiBase
 	if base == "" {
@@ -142,7 +153,7 @@ func (g *GitHub) setGitHubHeaders(req *http.Request) {
 // the most recent releases list to find one that qualifies.
 // Uses conditional requests (ETag/If-None-Match) on the fast path. Returns
 // ErrNotModified if the latest release has not changed since the last fetch.
-// Set SkipCache to true to bypass the ETag check and always fetch fresh data.
+// Set SkipHTTPCache to true to bypass the ETag check and always fetch fresh data.
 //
 // Note: /releases/latest always returns the latest stable release — GitHub excludes
 // prereleases from that endpoint by design. When IncludePreReleases is set we skip
@@ -158,7 +169,7 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		return nil, err
 	}
 	g.setGitHubHeaders(req)
-	if !g.SkipCache {
+	if !g.SkipHTTPCache {
 		if cache := g.loadCache(); cache != nil {
 			req.Header.Set("If-None-Match", cache.ETag)
 		}

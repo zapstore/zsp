@@ -163,12 +163,19 @@ func TestWebDirectURLReturnsErrNotModifiedForUnchangedETag(t *testing.T) {
 		t.Fatalf("second FetchLatestRelease() = %v, want ErrNotModified", err)
 	}
 
-	web.SkipCache = true
+	if err := web.ClearCache(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := web.FetchLatestRelease(t.Context()); err != nil {
+		t.Fatalf("FetchLatestRelease after ClearCache() = %v", err)
+	}
+
+	web.SkipHTTPCache = true
 	release, err := web.FetchLatestRelease(t.Context())
 	if err != nil {
-		t.Fatalf("SkipCache FetchLatestRelease() = %v", err)
+		t.Fatalf("SkipHTTPCache FetchLatestRelease() = %v", err)
 	}
 	if len(release.Assets) != 1 || release.Assets[0].URL != server.URL+"/app.apk" {
-		t.Fatalf("SkipCache assets = %+v", release.Assets)
+		t.Fatalf("SkipHTTPCache assets = %+v", release.Assets)
 	}
 }

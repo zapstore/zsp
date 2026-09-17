@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,11 +30,11 @@ type webCache struct {
 
 // Web implements Source for web scraping with version extraction.
 type Web struct {
-	cfg          *config.Config
-	client       *http.Client
-	cacheDir     string
-	SkipCache    bool
-	pendingCache *webCache
+	cfg           *config.Config
+	client        *http.Client
+	cacheDir      string
+	SkipHTTPCache bool
+	pendingCache  *webCache
 }
 
 // NewWeb creates a new web scraping source.
@@ -162,7 +163,7 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		// Filename from redirect target (e.g. Telegram.apk); download still uses assetURL
 		nameURL = finalURL
 
-		if !w.SkipCache {
+		if !w.SkipHTTPCache {
 			cache := w.loadCache()
 			if cache != nil {
 				modified, etag, lastMod, contentLen, cacheErr := w.checkHTTPCacheHeaders(ctx, finalURL, cache.ETag, cache.LastModified, cache.ContentLength)
@@ -466,6 +467,16 @@ func (w *Web) CommitCache() error {
 	}
 	w.pendingCache = nil
 	return nil
+}
+
+// ClearCache deletes persisted HTTP cache headers so the next fetch is unconditional.
+func (w *Web) ClearCache() error {
+	w.pendingCache = nil
+	err := os.Remove(w.cacheFilePath())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 // checkHTTPCacheHeaders reports whether a resource has changed using

@@ -17,8 +17,9 @@ import (
 // Fetch resolves and verifies usable APK candidates. The caller owns each
 // returned APK and must call Close when it will not be published.
 //
-// When SkipETag is false, Fetch sends stored ETags and returns ErrNoNewAPK
-// if the source reports that nothing has changed.
+// When SkipHTTPCache is false, Fetch sends stored HTTP validators and
+// returns ErrNoNewAPK if the source reports that nothing has changed. A
+// failed Publish deletes that cache so the next Fetch can retry.
 func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*APK, error) {
 	internal, err := fetchInternalConfig(config)
 	if err != nil {
@@ -26,7 +27,7 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 	}
 	src, err := source.NewWithOptions(internal, source.Options{
 		IncludePreReleases: config.PrereleaseChannel != "",
-		SkipCache:          config.SkipETag,
+		SkipHTTPCache:      config.SkipHTTPCache,
 	})
 	if err != nil {
 		return nil, wrapOperationError(ErrInvalidConfig, err, false, "create source")
@@ -70,6 +71,10 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 	results := make([]*APK, 0, len(candidates))
 	seen := make(map[string]struct{})
 	var lastDownloadError error
+	var clearCache func() error
+	if clearer, ok := src.(source.CacheClearer); ok {
+		clearCache = clearer.ClearCache
+	}
 	for _, candidate := range candidates {
 		if err := ctx.Err(); err != nil {
 			closeAPKs(results)
@@ -135,6 +140,8 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 		if candidate.ExcludeURL || !isPublishableSourceURL(eventSourceURL) {
 			eventSourceURL = ""
 		}
+		ownership := newAPKOwnership(path, tempDir, managed)
+		ownership.clearCache = clearCache
 		results = append(results, &APK{
 			Hash:            parsed.SHA256,
 			Filename:        candidate.Name,
@@ -149,7 +156,7 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 			CertificateHash: parsed.CertFingerprint,
 			LineageHashes:   append([]string(nil), parsed.SigningAncestors...),
 			Architectures:   append([]string(nil), parsed.Architectures...),
-			ownership:       newAPKOwnership(path, tempDir, managed),
+			ownership:       ownership,
 			fetchConfig:     cloneFetchConfig(config),
 			verified: verifiedAPK{
 				hash:            parsed.SHA256,
@@ -175,7 +182,7 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 		}
 		return nil, operationErr(ErrNoAPK, false, "no candidate passed APK verification")
 	}
-	if !config.SkipETag {
+	if !config.SkipHTTPCache {
 		if committer, ok := src.(source.CacheCommitter); ok {
 			_ = committer.CommitCache()
 		}
@@ -315,6 +322,19 @@ func (apk *APK) beginPublish() (string, bool) {
 		state.timer.Stop()
 	}
 	return state.path, true
+}
+
+func (apk *APK) clearSourceCache() {
+	if apk == nil || apk.ownership == nil {
+		return
+	}
+	state := apk.ownership
+	state.mu.Lock()
+	clear := state.clearCache
+	state.mu.Unlock()
+	if clear != nil {
+		_ = clear()
+	}
 }
 
 func (apk *APK) finishPublish(success bool) error {

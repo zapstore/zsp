@@ -681,7 +681,7 @@ type wizardPublishConfig struct {
 }
 
 func wizardFetchConfig(config zsp.FetchConfig) zsp.FetchConfig {
-	config.SkipETag = true
+	config.SkipHTTPCache = true
 	return config
 }
 

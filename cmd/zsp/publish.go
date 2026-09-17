@@ -68,7 +68,7 @@ func publishCommand(ctx context.Context, opts *cli.Options) int {
 	}
 	fetchConfig := config.FetchConfig
 	if opts.Publish.OverwriteRelease || opts.Publish.Check {
-		fetchConfig.SkipETag = true
+		fetchConfig.SkipHTTPCache = true
 	}
 	candidates, err := zsp.Fetch(ctx, fetchConfig, zsp.FetchOptions{
 		OnProgress: progress,
