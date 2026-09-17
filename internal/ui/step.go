@@ -33,10 +33,10 @@ func (s *StepTracker) StartStep(name string) {
 func (s *StepTracker) printStepHeader(name string) {
 	fmt.Fprintln(s.writer)
 	if NoColor {
-		fmt.Fprintf(s.writer, "✦ %s\n", name)
+		fmt.Fprintf(s.writer, "%s\n", name)
 		return
 	}
-	fmt.Fprintf(s.writer, "%s %s\n", Success("✦"), BoldStyle.Render(name))
+	fmt.Fprintf(s.writer, "%s\n", BoldStyle.Render(name))
 }
 
 // SetTotal updates the total number of steps (useful when steps are conditional).

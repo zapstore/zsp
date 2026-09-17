@@ -87,6 +87,25 @@ func SelectField(title, description string, values []string) (string, error) {
 	for i, value := range values {
 		options[i] = huh.NewOption(value, value)
 	}
+	return selectField(title, description, options)
+}
+
+// SelectChoice is an item whose displayed label differs from its returned value.
+type SelectChoice struct {
+	Label string
+	Value string
+}
+
+// SelectChoiceField presents a terminal selection and returns its selected value.
+func SelectChoiceField(title, description string, choices []SelectChoice) (string, error) {
+	options := make([]huh.Option[string], len(choices))
+	for i, choice := range choices {
+		options[i] = huh.NewOption(choice.Label, choice.Value)
+	}
+	return selectField(title, description, options)
+}
+
+func selectField(title, description string, options []huh.Option[string]) (string, error) {
 	var selected string
 	if err := huh.NewForm(huh.NewGroup(
 		huh.NewSelect[string]().

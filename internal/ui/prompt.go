@@ -168,13 +168,28 @@ func SelectMultiple(message string, options []string) ([]int, error) {
 // SelectMultipleWithDefaults presents a list of options with some pre-selected.
 // preselected is a list of indices to pre-select.
 func SelectMultipleWithDefaults(message string, options []string, preselected []int) ([]int, error) {
+	return SelectMultipleWithDefaultsDescription(message, "", options, preselected)
+}
+
+// SelectMultipleWithDefaultsDescription presents a multi-select list with
+// supporting copy and some pre-selected options.
+func SelectMultipleWithDefaultsDescription(message, description string, options []string, preselected []int) ([]int, error) {
 	choices := make([]huh.Option[string], len(options))
 	for index, option := range options {
 		choices[index] = huh.NewOption(option, option)
 	}
-	var values []string
+	values := make([]string, 0, len(preselected))
+	for _, index := range preselected {
+		if index >= 0 && index < len(options) {
+			values = append(values, options[index])
+		}
+	}
 	if err := huh.NewForm(huh.NewGroup(
-		huh.NewMultiSelect[string]().Title(message).Options(choices...).Value(&values),
+		huh.NewMultiSelect[string]().
+			Title(message).
+			Description(description).
+			Options(choices...).
+			Value(&values),
 	)).Run(); err != nil {
 		return nil, err
 	}
@@ -300,19 +315,12 @@ func PrintHeader(message string) {
 // PrintSuccess prints a success message.
 func PrintSuccess(message string) {
 	checkmark := "✓"
-	if NoColor {
-		checkmark = "[OK]"
-	}
-	fmt.Printf("%s %s\n", Success(checkmark), message)
+	fmt.Printf("%s %s\n", Success(checkmark), trimMessage(message))
 }
 
 // ErrorMessage formats an error consistently across CLI commands.
 func ErrorMessage(message string) string {
-	cross := "✗"
-	if NoColor {
-		cross = "[ERROR]"
-	}
-	return fmt.Sprintf("%s %s", Error(cross), message)
+	return fmt.Sprintf("%s %s", Error("×"), trimMessage(message))
 }
 
 // WriteError writes a consistently formatted error to writer.
@@ -328,22 +336,16 @@ func PrintError(message string) {
 // PrintWarning prints a warning message.
 func PrintWarning(message string) {
 	warning := "⚠"
-	if NoColor {
-		warning = "[WARN]"
-	}
-	fmt.Printf("%s %s\n", Warning(warning), message)
+	fmt.Printf("%s %s\n", Warning(warning), trimMessage(message))
 }
 
 // PrintInfo prints an info message.
 func PrintInfo(message string) {
 	info := "ℹ"
-	if NoColor {
-		info = "[INFO]"
-	}
-	fmt.Printf("%s %s\n", Info(info), message)
+	fmt.Printf("%s %s\n", Info(info), trimMessage(message))
 }
 
 // PrintKeyValue prints a key-value pair.
 func PrintKeyValue(key, value string) {
-	fmt.Printf("  %s: %s\n", Bold(key), value)
+	fmt.Printf("%s: %s\n", Bold(key), value)
 }

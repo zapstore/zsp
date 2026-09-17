@@ -9,10 +9,7 @@ import (
 )
 
 var (
-	panelBorderStyle lipgloss.Style
-	panelTitleStyle  lipgloss.Style
-	labelStyle       lipgloss.Style
-	commandStyle     lipgloss.Style
+	commandStyle lipgloss.Style
 )
 
 func init() {
@@ -21,16 +18,10 @@ func init() {
 
 func initPresentationStyles() {
 	if NoColor {
-		panelBorderStyle = lipgloss.NewStyle()
-		panelTitleStyle = lipgloss.NewStyle().Bold(true)
-		labelStyle = lipgloss.NewStyle().Bold(true)
 		commandStyle = lipgloss.NewStyle()
 		return
 	}
 
-	panelBorderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#303235"))
-	panelTitleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#dedede")).Bold(true)
-	labelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#818284"))
 	commandStyle = lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#00d892")).
 		Background(lipgloss.Color("#002923")).
@@ -49,34 +40,33 @@ func StatusLine(kind, message string) string {
 	case "error":
 		mark, style = "×", ErrorStyle
 	default:
-		mark, style = "→", InfoStyle
+		mark, style = "ℹ", InfoStyle
 	}
+	message = trimMessage(message)
 	if NoColor {
-		return fmt.Sprintf("[%s] %s", strings.ToUpper(kind), message)
+		return fmt.Sprintf("%s %s", mark, message)
 	}
 	return style.Render(mark) + " " + message
 }
 
-// RenderPanel groups a terminal result into a readable, copy-safe summary.
-// It deliberately uses no borders in plain mode so redirected output stays stable.
+// RenderPanel renders a readable, copy-safe summary without nested output.
 func RenderPanel(kind, title string, fields []KeyValue, notes []string) string {
 	var b strings.Builder
+	title = trimMessage(title)
+	if len(fields) == 1 {
+		title += ": " + fields[0].Value
+		fields = nil
+	}
 	b.WriteString(StatusLine(kind, title))
 	for _, field := range fields {
-		b.WriteString("\n  ")
-		b.WriteString(labelStyle.Render(field.Key + ":"))
-		b.WriteString(" ")
-		b.WriteString(field.Value)
+		b.WriteString("\n")
+		b.WriteString(StatusLine("info", field.Key+": "+field.Value))
 	}
 	for _, note := range notes {
-		b.WriteString("\n  ")
-		b.WriteString(Dim("→ "))
-		b.WriteString(note)
+		b.WriteString("\n")
+		b.WriteString(StatusLine("info", note))
 	}
-	if NoColor {
-		return b.String()
-	}
-	return panelBorderStyle.Copy().Padding(0, 1).Render(b.String())
+	return b.String()
 }
 
 // RenderCommand formats a shell command as a distinct, copyable terminal token.
@@ -90,4 +80,8 @@ func RenderCommand(command string) string {
 // WritePanel writes a human-facing result panel.
 func WritePanel(w io.Writer, kind, title string, fields []KeyValue, notes []string) {
 	fmt.Fprintln(w, RenderPanel(kind, title, fields, notes))
+}
+
+func trimMessage(message string) string {
+	return strings.TrimRight(strings.TrimSpace(message), ".")
 }

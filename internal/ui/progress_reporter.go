@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	publiczsp "github.com/zapstore/zsp"
+	"github.com/zapstore/zsp"
 )
 
 // ProgressReporter translates library progress events into terminal output.
@@ -24,7 +24,7 @@ func NewProgressReporter(writer io.Writer, interactive bool) *ProgressReporter {
 }
 
 // Report renders a single progress event.
-func (r *ProgressReporter) Report(update publiczsp.Progress) {
+func (r *ProgressReporter) Report(update zsp.Progress) {
 	if update.Phase == "warning" {
 		r.finishActive()
 		fmt.Fprintln(r.writer, StatusLine("warning", update.Target))
@@ -74,7 +74,7 @@ func (r *ProgressReporter) Finish() {
 	r.finishActive()
 }
 
-func progressMessage(update publiczsp.Progress) string {
+func progressMessage(update zsp.Progress) string {
 	phase := strings.TrimSpace(update.Phase)
 	target := strings.TrimSpace(update.Target)
 	if target == "" {
