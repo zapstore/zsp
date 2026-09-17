@@ -735,6 +735,106 @@ func TestPublishRejectsClosedAPK(t *testing.T) {
 }
 
 func TestFetchReturnsErrNoNewAPKWhenETagUnchanged(t *testing.T) {
+	config, _ := fetchCachedTestAPK(t)
+
+	forced, err := Fetch(t.Context(), config, FetchOptions{SkipHTTPCache: true})
+	if err != nil {
+		t.Fatalf("SkipHTTPCache Fetch() = %v", err)
+	}
+	t.Cleanup(func() { closeAPKs(forced) })
+	if len(forced) != 1 {
+		t.Fatalf("SkipHTTPCache len(candidates) = %d, want 1", len(forced))
+	}
+}
+
+func TestShouldClearHTTPCacheFollowsRetryability(t *testing.T) {
+	cancelled := contextOperationError(context.Canceled, "publish")
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"success", nil, false},
+		{"already published", operationCodeErr(ErrAlreadyPublished, "release_already_published", false, "live"), false},
+		{"downgrade", operationErr(ErrReleaseDowngrade, false, "behind"), false},
+		{"proof required", operationErr(ErrProofRequired, false, "unclaimed"), false},
+		{"proof unauthorized", operationErr(ErrProofUnauthorized, false, "delegate"), false},
+		{"missing signer", operationErr(ErrSigner, false, "SIGN_WITH"), false},
+		{"invalid config", operationErr(ErrInvalidConfig, false, "relays"), false},
+		{"invalid APK", operationErr(ErrInvalidAPK, false, "facts"), false},
+		{"cancelled", cancelled, false},
+		{"upload rejected", operationErr(ErrUploadRejected, false, "blossom"), false},
+		{"publish rejected", operationErr(ErrPublishRejected, false, "relay"), false},
+		{"preview rejected", operationErr(nil, false, "publication rejected in preview"), false},
+		{"rate limited", operationErr(ErrRateLimited, true, "429"), true},
+		{"temporary failure", operationErr(ErrTemporaryFailure, true, "timeout"), true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldClearHTTPCache(test.err); got != test.want {
+				t.Fatalf("shouldClearHTTPCache(%v) = %v, want %v", test.err, got, test.want)
+			}
+		})
+	}
+}
+
+func TestPublishKeepsHTTPCacheOnPermanentFailure(t *testing.T) {
+	config, candidates := fetchCachedTestAPK(t)
+	t.Setenv("SIGN_WITH", "")
+
+	_, err := Publish(t.Context(), PublishConfig{}, candidates[0], PublishOptions{})
+	if err == nil {
+		t.Fatal("Publish() = nil, want error")
+	}
+	var operationError Error
+	if !errors.As(err, &operationError) || operationError.Retryable() {
+		t.Fatalf("Publish() error must not be retryable: %#v", err)
+	}
+	if _, err := Fetch(t.Context(), config, FetchOptions{}); !errors.Is(err, ErrNoNewAPK) {
+		t.Fatalf("Fetch after permanent Publish failure = %v, want ErrNoNewAPK", err)
+	}
+}
+
+func TestPublishKeepsHTTPCacheOnCancel(t *testing.T) {
+	config, candidates := fetchCachedTestAPK(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := Publish(ctx, PublishConfig{}, candidates[0], PublishOptions{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Publish() = %v, want context.Canceled", err)
+	}
+	if _, err := Fetch(t.Context(), config, FetchOptions{}); !errors.Is(err, ErrNoNewAPK) {
+		t.Fatalf("Fetch after cancelled Publish = %v, want ErrNoNewAPK", err)
+	}
+}
+
+func TestPublishClearsHTTPCacheOnRetryableFailure(t *testing.T) {
+	config, candidates := fetchCachedTestAPK(t)
+	t.Setenv("SIGN_WITH", gonostr.GeneratePrivateKey())
+
+	_, err := Publish(t.Context(), PublishConfig{}, candidates[0], PublishOptions{
+		Relays: []string{"ws://127.0.0.1:1"},
+	})
+	if err == nil {
+		t.Fatal("Publish() = nil, want error")
+	}
+	var operationError Error
+	if !errors.As(err, &operationError) || !operationError.Retryable() {
+		t.Fatalf("Publish() error must be retryable: %#v", err)
+	}
+	retried, err := Fetch(t.Context(), config, FetchOptions{})
+	if err != nil {
+		t.Fatalf("Fetch after retryable Publish failure = %v", err)
+	}
+	t.Cleanup(func() { closeAPKs(retried) })
+	if len(retried) != 1 {
+		t.Fatalf("Fetch after retryable Publish failure len(candidates) = %d, want 1", len(retried))
+	}
+}
+
+func fetchCachedTestAPK(t *testing.T) (FetchConfig, []*APK) {
+	t.Helper()
 	t.Cleanup(source.SetCacheDirForTest(t.TempDir()))
 	path := buildSignedTestAPK(t)
 	payload, err := os.ReadFile(path)
@@ -759,37 +859,16 @@ func TestFetchReturnsErrNoNewAPKWhenETagUnchanged(t *testing.T) {
 	config := FetchConfig{ReleaseSource: &ReleaseSource{URL: server.URL + "/app.apk"}}
 	candidates, err := Fetch(t.Context(), config, FetchOptions{})
 	if err != nil {
-		t.Fatalf("first Fetch() = %v", err)
+		t.Fatalf("Fetch() = %v", err)
 	}
 	t.Cleanup(func() { closeAPKs(candidates) })
 	if len(candidates) != 1 {
 		t.Fatalf("len(candidates) = %d, want 1", len(candidates))
 	}
-
 	if _, err := Fetch(t.Context(), config, FetchOptions{}); !errors.Is(err, ErrNoNewAPK) {
-		t.Fatalf("second Fetch() = %v, want ErrNoNewAPK", err)
+		t.Fatalf("cached Fetch() = %v, want ErrNoNewAPK", err)
 	}
-
-	if _, err := Publish(t.Context(), PublishConfig{}, candidates[0], PublishOptions{}); err == nil {
-		t.Fatal("Publish() = nil, want error")
-	}
-	retried, err := Fetch(t.Context(), config, FetchOptions{})
-	if err != nil {
-		t.Fatalf("Fetch after failed Publish() = %v", err)
-	}
-	t.Cleanup(func() { closeAPKs(retried) })
-	if len(retried) != 1 {
-		t.Fatalf("Fetch after failed Publish len(candidates) = %d, want 1", len(retried))
-	}
-
-	forced, err := Fetch(t.Context(), config, FetchOptions{SkipHTTPCache: true})
-	if err != nil {
-		t.Fatalf("SkipHTTPCache Fetch() = %v", err)
-	}
-	t.Cleanup(func() { closeAPKs(forced) })
-	if len(forced) != 1 {
-		t.Fatalf("SkipHTTPCache len(candidates) = %d, want 1", len(forced))
-	}
+	return config, candidates
 }
 
 func TestFetchLocalAPKReturnsVerifiedIdentity(t *testing.T) {

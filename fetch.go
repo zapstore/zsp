@@ -18,7 +18,9 @@ import (
 //
 // When options.SkipHTTPCache is false, Fetch sends stored HTTP validators
 // and returns ErrNoNewAPK if the source reports that nothing has changed.
-// A failed Publish deletes that cache so the next Fetch can retry.
+// Publish deletes that cache only for Retryable failures so the next Fetch
+// can retry the same source. Permanent outcomes keep the cache;
+// SkipHTTPCache is the caller's lever when their inputs changed.
 func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*APK, error) {
 	internal, err := fetchInternalConfig(config)
 	if err != nil {

@@ -70,7 +70,8 @@ type FetchOptions struct {
 	// SkipHTTPCache disables conditional requests. When false (the default),
 	// Fetch sends stored validators (ETag, Last-Modified, Content-Length) and
 	// returns ErrNoNewAPK if the source reports no change. Publish deletes
-	// that cache if publication fails.
+	// that cache only for Retryable failures. Use SkipHTTPCache when caller
+	// or developer state changed.
 	SkipHTTPCache bool `json:"skip_http_cache"`
 }
 

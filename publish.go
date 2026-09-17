@@ -20,20 +20,19 @@ import (
 )
 
 // Publish uploads one verified APK and publishes its NIP-82 events.
-func Publish(ctx context.Context, config PublishConfig, candidate *APK, options PublishOptions) (*PublishResult, error) {
+func Publish(ctx context.Context, config PublishConfig, candidate *APK, options PublishOptions) (result *PublishResult, err error) {
 	path, open := candidate.beginPublish()
 	if !open {
 		return nil, operationErr(ErrAPKNotChecked, false, "APK was not returned by Fetch")
 	}
 	verified := candidate.verified
 	published := false
-	var publicationResult *PublishResult
 	defer func() {
-		if !published {
+		if shouldClearHTTPCache(err) {
 			candidate.clearHTTPCache()
 		}
-		if err := candidate.finishPublish(published); err != nil && publicationResult != nil {
-			publicationResult.Warnings = append(publicationResult.Warnings, "temporary APK cleanup failed")
+		if cleanupErr := candidate.finishPublish(published); cleanupErr != nil && result != nil {
+			result.Warnings = append(result.Warnings, "temporary APK cleanup failed")
 		}
 	}()
 	if verified.hash == "" {
@@ -76,11 +75,10 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 		return nil, operationErr(ErrSigner, false, "create signer")
 	}
 	defer signer.Close()
-	result := &PublishResult{
+	result = &PublishResult{
 		AppID: verified.appID, CertificateHash: verified.certificateHash,
 		LineageHashes: append([]string(nil), verified.lineageHashes...),
 	}
-	publicationResult = result
 	publisher := internalnostr.NewPublisher(relayURLs)
 	unreachable, err := publisher.EnsureReachable(ctx)
 	if err != nil {
@@ -327,6 +325,15 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 	result.Status = "published"
 	published = true
 	return result, nil
+}
+
+// shouldClearHTTPCache reports whether a Publish error means the next Fetch
+// should ignore stored validators. The cache answers "did the source change?",
+// not "did we publish?". Permanent caller, developer, or config outcomes keep
+// the cache; SkipHTTPCache is the lever when those inputs change.
+func shouldClearHTTPCache(err error) bool {
+	var operationError Error
+	return errors.As(err, &operationError) && operationError.Retryable()
 }
 
 func blossomErrorClassification(err error) (error, bool) {

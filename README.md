@@ -148,8 +148,9 @@ Call `APK.Close` for candidates that will not be published. `Publish` closes a
 successfully published candidate. Use `errors.Is` with exported sentinels and
 `errors.As` to inspect `zsp.Error.Retryable()`. `Fetch` returns `ErrNoNewAPK`
 when a stored HTTP cache shows the source is unchanged; set
-`FetchOptions.SkipHTTPCache` to always download. A failed `Publish` deletes that
-cache so the next `Fetch` can retry.
+`FetchOptions.SkipHTTPCache` to always download. `Publish` deletes that cache
+only when the failure is `Retryable()`, so the next `Fetch` can retry the same
+source. Permanent outcomes keep the cache.
 
 ## License
 
