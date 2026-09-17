@@ -47,7 +47,8 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 	if len(candidates) == 0 {
 		return nil, operationErr(ErrNoAPK, false, "no APK candidates")
 	}
-	if len(candidates) > 10 {
+	isLocalSource := config.ReleaseSource != nil && config.ReleaseSource.LocalPath != ""
+	if len(candidates) > 10 && !isLocalSource {
 		return nil, operationErr(ErrTooManyCandidates, false, "found %d candidates; narrow match", len(candidates))
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
@@ -344,13 +345,59 @@ func filterCandidates(assets []*source.Asset, match string) ([]*source.Asset, er
 		}
 		result = append(result, asset)
 	}
-	return result, nil
+	result = omitGooglePlayCandidates(result)
+	result = preferNonFDroidCandidates(result)
+	return omitUniversalCandidatesWhenArm64Exists(result), nil
 }
 
 var excludedFilenamePattern = regexp.MustCompile(`(?i)(^|[^a-z0-9])(x86_64|x86|armeabi-v7a|armeabi|unsigned|split|config)([^a-z0-9]|$)`)
+var (
+	fdroidFilenamePattern     = regexp.MustCompile(`(?i)(^|[^a-z0-9])f-?droid([^a-z0-9]|$)`)
+	googlePlayFilenamePattern = regexp.MustCompile(`(?i)(^|[^a-z0-9])(google|play|playstore)([^a-z0-9]|$)`)
+	arm64FilenamePattern      = regexp.MustCompile(`(?i)(^|[^a-z0-9])arm64-v8a([^a-z0-9]|$)`)
+	universalFilenamePattern  = regexp.MustCompile(`(?i)(^|[^a-z0-9])universal([^a-z0-9]|$)`)
+)
 
 func excludedFilename(name string) bool {
 	return excludedFilenamePattern.MatchString(name)
+}
+
+func omitGooglePlayCandidates(candidates []*source.Asset) []*source.Asset {
+	return filterAssets(candidates, func(candidate *source.Asset) bool {
+		return !googlePlayFilenamePattern.MatchString(candidate.Name)
+	})
+}
+
+func preferNonFDroidCandidates(candidates []*source.Asset) []*source.Asset {
+	for _, candidate := range candidates {
+		if !fdroidFilenamePattern.MatchString(candidate.Name) {
+			return filterAssets(candidates, func(candidate *source.Asset) bool {
+				return !fdroidFilenamePattern.MatchString(candidate.Name)
+			})
+		}
+	}
+	return candidates
+}
+
+func omitUniversalCandidatesWhenArm64Exists(candidates []*source.Asset) []*source.Asset {
+	for _, candidate := range candidates {
+		if arm64FilenamePattern.MatchString(candidate.Name) {
+			return filterAssets(candidates, func(candidate *source.Asset) bool {
+				return !universalFilenamePattern.MatchString(candidate.Name)
+			})
+		}
+	}
+	return candidates
+}
+
+func filterAssets(candidates []*source.Asset, keep func(*source.Asset) bool) []*source.Asset {
+	filtered := make([]*source.Asset, 0, len(candidates))
+	for _, candidate := range candidates {
+		if keep(candidate) {
+			filtered = append(filtered, candidate)
+		}
+	}
+	return filtered
 }
 
 func releaseMatches(release *source.Release, filter string) bool {
