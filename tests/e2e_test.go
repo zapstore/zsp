@@ -55,6 +55,46 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+func startTestRelay(t *testing.T) string {
+	t.Helper()
+	relayAddress := unusedAddress(t)
+	blossomAddress := unusedAddress(t)
+	command := exec.Command(testRelayBinary)
+	command.Dir = moduleRoot()
+	command.Env = append(os.Environ(),
+		"RELAY_ADDRESS="+relayAddress,
+		"RELAY_BLOSSOM_ADDRESS="+blossomAddress,
+		"RELAY_BLOSSOM_HOSTNAME=127.0.0.1",
+		"CATALOG_FIXTURE_DIR="+t.TempDir(),
+		"CATALOG_SOURCE_DB="+filepath.Join(t.TempDir(), "missing.db"),
+	)
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := command.Process.Signal(os.Interrupt); err != nil {
+			t.Errorf("interrupt test relay: %v", err)
+			return
+		}
+		done := make(chan error, 1)
+		go func() { done <- command.Wait() }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("stop test relay: %v; stderr=%s", err, stderr.String())
+			}
+		case <-time.After(5 * time.Second):
+			_ = command.Process.Kill()
+			<-done
+			t.Errorf("test relay did not stop; stderr=%s", stderr.String())
+		}
+	})
+	waitForHTTP(t, "http://"+relayAddress+"/_test/state")
+	return "ws://" + relayAddress
+}
+
 func TestCLI(t *testing.T) {
 	t.Run("version", func(t *testing.T) {
 		result := runZSP(t, context.Background(), "--version")
@@ -151,8 +191,13 @@ func TestCLI(t *testing.T) {
 }
 
 func TestWizard(t *testing.T) {
+	relayURL := startTestRelay(t)
 	command := exec.Command(zspBinary)
 	command.Dir = t.TempDir()
+	if err := os.Mkdir(filepath.Join(command.Dir, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command.Env = append(os.Environ(), "RELAYS="+relayURL)
 	terminal, err := pty.StartWithSize(command, &pty.Winsize{Rows: 40, Cols: 120})
 	if err != nil {
 		t.Fatal(err)
@@ -171,7 +216,7 @@ func TestWizard(t *testing.T) {
 	defer deadline.Stop()
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
-	for !strings.Contains(output.String(), "App source") {
+	for !strings.Contains(output.String(), "Where is the source code published?") {
 		select {
 		case <-deadline.C:
 			_ = command.Process.Kill()
