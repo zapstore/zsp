@@ -20,6 +20,7 @@ type FetchConfig struct {
 	ReleaseFilter     string         `json:"release_filter"`
 	Match             string         `json:"match"`
 	PrereleaseChannel string         `json:"prerelease_channel"`
+	baseDir           string
 }
 
 // PublishConfig contains application metadata used to build NIP-82 events.
@@ -40,6 +41,7 @@ type PublishConfig struct {
 	// MetadataSources is nil for automatic source selection, empty to disable
 	// metadata fetching, or non-empty to select explicit sources.
 	MetadataSources []string `json:"metadata_sources"`
+	baseDir         string
 }
 
 // ReleaseSource describes a local, forge, F-Droid, or web release source.

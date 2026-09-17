@@ -374,6 +374,11 @@ func TestValidate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:    "recognized forge without repository path",
+			config:  Config{Repository: "https://github.com/user"},
+			wantErr: true,
+		},
+		{
 			name: "with release_source",
 			config: Config{
 				ReleaseSource: &ReleaseSource{URL: "https://github.com/user/releases"},
@@ -589,6 +594,56 @@ func TestGetGitHubRepo(t *testing.T) {
 		t.Run(tt.url, func(t *testing.T) {
 			if got := GetGitHubRepo(tt.url); got != tt.want {
 				t.Errorf("GetGitHubRepo(%q) = %q, want %q", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCanonicalForgeRepositoryURL(t *testing.T) {
+	tests := []struct {
+		name       string
+		source     string
+		sourceType string
+		want       string
+		wantOK     bool
+	}{
+		{
+			name:   "GitHub release page",
+			source: "https://github.com/GreenArt7c3/Amber/releases",
+			want:   "https://github.com/greenart7c3/amber",
+			wantOK: true,
+		},
+		{
+			name:   "GitLab release page",
+			source: "https://gitlab.com/group/app/-/releases",
+			want:   "https://gitlab.com/group/app",
+			wantOK: true,
+		},
+		{
+			name:   "Codeberg release page",
+			source: "https://codeberg.org/forge/app/releases",
+			want:   "https://codeberg.org/forge/app",
+			wantOK: true,
+		},
+		{
+			name:       "explicit self-hosted Forgejo",
+			source:     "https://forge.example.com/team/app/releases",
+			sourceType: "gitea",
+			want:       "https://forge.example.com/team/app",
+			wantOK:     true,
+		},
+		{
+			name:   "unrecognized host",
+			source: "https://example.com/releases",
+			want:   "https://example.com/releases",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := CanonicalForgeRepositoryURL(test.source, test.sourceType)
+			if got != test.want || ok != test.wantOK {
+				t.Errorf("CanonicalForgeRepositoryURL(%q, %q) = %q, %t; want %q, %t", test.source, test.sourceType, got, ok, test.want, test.wantOK)
 			}
 		})
 	}

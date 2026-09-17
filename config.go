@@ -60,6 +60,7 @@ func fromInternalConfig(config *internalconfig.Config) Config {
 			ReleaseFilter:     config.ReleaseFilter,
 			Match:             config.Match,
 			PrereleaseChannel: config.PrereleaseChannel,
+			baseDir:           config.BaseDir,
 		},
 		PublishConfig: PublishConfig{
 			Channel: config.Channel, Name: config.Name, Summary: config.Summary, Description: config.Description,
@@ -68,6 +69,7 @@ func fromInternalConfig(config *internalconfig.Config) Config {
 			SupportedNIPs:     append([]string(nil), config.SupportedNIPs...),
 			MinAllowedVersion: config.MinAllowedVersion, MinAllowedVersionCode: config.MinAllowedVersionCode,
 			MetadataSources: cloneOptionalStrings(config.MetadataSources),
+			baseDir:         config.BaseDir,
 		},
 	}
 	if config.ReleaseSource != nil {
@@ -97,7 +99,7 @@ func fetchInternalConfig(config FetchConfig) (*internalconfig.Config, error) {
 	}
 	internal := &internalconfig.Config{
 		Repository: config.Repository, ReleaseFilter: config.ReleaseFilter, Match: config.Match,
-		PrereleaseChannel: config.PrereleaseChannel,
+		PrereleaseChannel: config.PrereleaseChannel, BaseDir: config.baseDir,
 	}
 	if strings.HasPrefix(config.Repository, "naddr1") {
 		if config.ReleaseSource == nil {
@@ -148,6 +150,7 @@ func fetchInternalConfig(config FetchConfig) (*internalconfig.Config, error) {
 			internal.ReleaseSource.Asset = toInternalExtractor(config.ReleaseSource.AssetExtractor)
 		}
 	}
+	internal.CanonicalizeForgeURLs()
 	if err := internal.Validate(); err != nil {
 		return nil, wrapOperationError(ErrInvalidConfig, err, false, "validate fetch configuration")
 	}

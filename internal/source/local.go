@@ -45,6 +45,11 @@ func (l *Local) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		pattern = filepath.Join(l.baseDir, pattern)
 	}
 
+	// A directory release source means all APKs directly within that directory.
+	if info, statErr := os.Stat(pattern); statErr == nil && info.IsDir() {
+		pattern = filepath.Join(pattern, "*")
+	}
+
 	// Expand glob pattern
 	matches, err := filepath.Glob(pattern)
 	if err != nil {

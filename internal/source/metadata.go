@@ -749,16 +749,21 @@ func (f *MetadataFetcher) mergeMetadata(meta *AppMetadata) {
 	}
 	if len(f.cfg.Images) == 0 && len(meta.ImageURLs) > 0 {
 		for _, imageURL := range meta.ImageURLs {
-			if config.ValidateURL(imageURL) == nil {
+			if config.ValidateURL(imageURL) == nil || isLocalMetadataFile(imageURL) {
 				f.cfg.Images = append(f.cfg.Images, imageURL)
 			}
 		}
 	}
 	if f.cfg.Icon == "" && meta.IconURL != "" {
-		if config.ValidateURL(meta.IconURL) == nil {
+		if config.ValidateURL(meta.IconURL) == nil || isLocalMetadataFile(meta.IconURL) {
 			f.cfg.Icon = meta.IconURL
 		}
 	}
+}
+
+func isLocalMetadataFile(value string) bool {
+	info, err := os.Stat(value)
+	return err == nil && !info.IsDir()
 }
 
 // extractFirstParagraph extracts the first meaningful paragraph from markdown.

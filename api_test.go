@@ -218,6 +218,18 @@ func TestDirectStructuredLocalSourceUsesAbsoluteURLPath(t *testing.T) {
 	}
 }
 
+func TestFetchConfigCanonicalizesForgeReleaseURL(t *testing.T) {
+	internal, err := fetchInternalConfig(FetchConfig{
+		Repository: "https://github.com/GreenArt7c3/Amber/releases",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if internal.Repository != "https://github.com/greenart7c3/amber" {
+		t.Fatalf("Repository = %q", internal.Repository)
+	}
+}
+
 func TestConfigurationConversionDoesNotMutateCallerValues(t *testing.T) {
 	fetchConfig := FetchConfig{
 		ReleaseSource: &ReleaseSource{

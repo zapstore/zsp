@@ -68,6 +68,20 @@ func TestLocalSource(t *testing.T) {
 		}
 	})
 
+	t.Run("directory", func(t *testing.T) {
+		src, err := NewLocal(testdataDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		release, err := src.FetchLatestRelease(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(release.Assets) == 0 {
+			t.Fatal("expected APKs from directory")
+		}
+	})
+
 	t.Run("non-existent file", func(t *testing.T) {
 		src, err := NewLocal("/nonexistent/path/app.apk")
 		if err != nil {

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -33,6 +34,13 @@ type fastlaneEntry struct {
 // source repository. GitHub, GitLab, and Gitea-compatible forges (Codeberg,
 // Forgejo, self-hosted Gitea) are supported.
 func (f *MetadataFetcher) fetchFastlaneMetadata(ctx context.Context) (*AppMetadata, error) {
+	if f.cfg.BaseDir != "" {
+		if metadata, err := f.fetchLocalFastlaneMetadata(); err == nil {
+			return metadata, nil
+		} else if !errors.Is(err, errFastlaneUnavailable) {
+			return nil, err
+		}
+	}
 	switch repositoryMetadataHost(f.cfg) {
 	case config.SourceGitHub:
 		return f.fetchGitHubFastlaneMetadata(ctx)
@@ -43,6 +51,60 @@ func (f *MetadataFetcher) fetchFastlaneMetadata(ctx context.Context) (*AppMetada
 	default:
 		return nil, fmt.Errorf("%w: repository must be GitHub, GitLab, or Gitea/Codeberg", errFastlaneUnavailable)
 	}
+}
+
+func (f *MetadataFetcher) fetchLocalFastlaneMetadata() (*AppMetadata, error) {
+	root := filepath.Join(f.cfg.BaseDir, fastlaneMetadataPath)
+	locales, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("%w: %s", errFastlaneUnavailable, root)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read local Fastlane metadata: %w", err)
+	}
+	var names []string
+	for _, locale := range locales {
+		if locale.IsDir() {
+			names = append(names, locale.Name())
+		}
+	}
+	locale, err := selectFastlaneLocaleFromNames(names)
+	if err != nil {
+		return nil, err
+	}
+	base := filepath.Join(root, locale)
+	meta := &AppMetadata{}
+	for _, field := range []struct {
+		name string
+		set  func(string)
+	}{
+		{"title.txt", func(value string) { meta.Name = value }},
+		{"short_description.txt", func(value string) { meta.Summary = value }},
+		{"full_description.txt", func(value string) { meta.Description = value }},
+	} {
+		data, readErr := os.ReadFile(filepath.Join(base, field.name))
+		if errors.Is(readErr, os.ErrNotExist) {
+			continue
+		}
+		if readErr != nil {
+			return nil, fmt.Errorf("read local Fastlane %s: %w", field.name, readErr)
+		}
+		field.set(strings.TrimSpace(string(data)))
+	}
+	icon := filepath.Join(base, "images", "icon.png")
+	if info, statErr := os.Stat(icon); statErr == nil && !info.IsDir() {
+		meta.IconURL = icon
+	}
+	screenshots, globErr := filepath.Glob(filepath.Join(base, "images", "phoneScreenshots", "*"))
+	if globErr != nil {
+		return nil, fmt.Errorf("find local Fastlane screenshots: %w", globErr)
+	}
+	for _, screenshot := range screenshots {
+		if info, statErr := os.Stat(screenshot); statErr == nil && !info.IsDir() {
+			meta.ImageURLs = append(meta.ImageURLs, screenshot)
+		}
+	}
+	return meta, nil
 }
 
 func (f *MetadataFetcher) fetchGitHubFastlaneMetadata(ctx context.Context) (*AppMetadata, error) {
@@ -344,6 +406,10 @@ func selectFastlaneLocale(entries []fastlaneEntry) (string, error) {
 			locales = append(locales, entry.Name)
 		}
 	}
+	return selectFastlaneLocaleFromNames(locales)
+}
+
+func selectFastlaneLocaleFromNames(locales []string) (string, error) {
 	if len(locales) == 0 {
 		return "", fmt.Errorf("%w: no Android locales", errFastlaneUnavailable)
 	}

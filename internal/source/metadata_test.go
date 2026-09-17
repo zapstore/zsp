@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -175,6 +177,39 @@ func TestMetadataFetcherCreation(t *testing.T) {
 	}
 	if fetcherWithPkg.PackageID != "com.aeonbtc.mempal" {
 		t.Errorf("PackageID = %q, want %q", fetcherWithPkg.PackageID, "com.aeonbtc.mempal")
+	}
+}
+
+func TestFetchLocalFastlaneMetadata(t *testing.T) {
+	root := t.TempDir()
+	base := filepath.Join(root, fastlaneMetadataPath, "en-US")
+	if err := os.MkdirAll(filepath.Join(base, "images", "phoneScreenshots"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for path, contents := range map[string]string{
+		filepath.Join(base, "title.txt"):                            "Example\n",
+		filepath.Join(base, "short_description.txt"):                "Short description\n",
+		filepath.Join(base, "full_description.txt"):                 "Long description\n",
+		filepath.Join(base, "images", "icon.png"):                   "icon",
+		filepath.Join(base, "images", "phoneScreenshots", "01.png"): "screenshot",
+	} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	metadata, err := NewMetadataFetcher(&config.Config{BaseDir: root}).fetchFastlaneMetadata(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Name != "Example" || metadata.Summary != "Short description" || metadata.Description != "Long description" {
+		t.Fatalf("metadata = %#v", metadata)
+	}
+	if metadata.IconURL != filepath.Join(base, "images", "icon.png") {
+		t.Errorf("icon = %q", metadata.IconURL)
+	}
+	if len(metadata.ImageURLs) != 1 || metadata.ImageURLs[0] != filepath.Join(base, "images", "phoneScreenshots", "01.png") {
+		t.Errorf("screenshots = %v", metadata.ImageURLs)
 	}
 }
 

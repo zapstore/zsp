@@ -13,6 +13,9 @@ func preparePublishMetadata(ctx context.Context, config PublishConfig, candidate
 	if err != nil {
 		return PublishConfig{}, nil, nil, err
 	}
+	if config.baseDir != "" {
+		internal.BaseDir = config.baseDir
+	}
 	overrides := toPublishInternalConfig(config)
 	internal.Name = overrides.Name
 	internal.Summary = overrides.Summary

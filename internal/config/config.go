@@ -104,7 +104,7 @@ type ReleaseSource struct {
 	// Simple URL mode (GitHub, GitLab, Gitea, F-Droid)
 	URL string
 
-	// LocalPath is set when the release source is a local file or glob pattern.
+	// LocalPath is set when the release source is a local APK, directory, or glob pattern.
 	// When set, URL is empty and this takes precedence.
 	LocalPath string
 
@@ -285,6 +285,7 @@ func Parse(r io.Reader) (*Config, error) {
 	if err := cfg.parseReleaseSource(); err != nil {
 		return nil, err
 	}
+	cfg.CanonicalizeForgeURLs()
 
 	// Parse repository if it's an naddr
 	if err := cfg.parseRepository(); err != nil {
@@ -313,6 +314,60 @@ func (c *Config) parseRepository() error {
 		c.NIP34Repo = pointer
 	}
 
+	return nil
+}
+
+// CanonicalizeForgeURLs reduces recognized forge repository and release URLs
+// to their API repository roots. Direct APK and web release sources retain
+// their explicit asset URL semantics.
+func (c *Config) CanonicalizeForgeURLs() {
+	c.Repository, _ = CanonicalForgeRepositoryURL(c.Repository, "")
+	if c.ReleaseSource == nil || c.ReleaseSource.URL == "" || c.ReleaseSource.IsWebSource {
+		return
+	}
+	c.ReleaseSource.URL, _ = CanonicalForgeRepositoryURL(c.ReleaseSource.URL, c.ReleaseSource.Type)
+}
+
+// CanonicalForgeRepositoryURL reduces a recognized forge URL to its
+// repository root. The sourceType hint supports explicitly configured
+// self-hosted GitLab and Gitea-compatible forges.
+func CanonicalForgeRepositoryURL(source, sourceType string) (string, bool) {
+	detected := DetectSourceType(source)
+	if hint := ParseSourceType(sourceType); hint != SourceUnknown {
+		detected = hint
+	}
+	switch detected {
+	case SourceGitHub:
+		if repository := GetGitHubRepo(source); repository != "" {
+			return "https://github.com/" + strings.ToLower(repository), true
+		}
+	case SourceGitLab:
+		baseURL, repository := GetGitLabRepoWithBase(source)
+		if repository != "" {
+			return baseURL + "/" + repository, true
+		}
+	case SourceGitea:
+		baseURL, repository := GetGiteaRepo(source)
+		if repository != "" {
+			return baseURL + "/" + strings.TrimSuffix(repository, ".git"), true
+		}
+	}
+	return source, false
+}
+
+// ValidateForgeRepositoryURL verifies that a recognized forge URL identifies
+// a repository. URLs for unrecognized hosts are validated as general URLs.
+func ValidateForgeRepositoryURL(source, sourceType string) error {
+	detected := DetectSourceType(source)
+	if hint := ParseSourceType(sourceType); hint != SourceUnknown {
+		detected = hint
+	}
+	switch detected {
+	case SourceGitHub, SourceGitLab, SourceGitea:
+		if _, ok := CanonicalForgeRepositoryURL(source, sourceType); !ok {
+			return fmt.Errorf("must include an owner and repository path")
+		}
+	}
 	return nil
 }
 
@@ -416,7 +471,7 @@ func isLocalPath(value string) bool {
 		return false
 	}
 	// Starts with ./ or ../ or /
-	if strings.HasPrefix(value, "./") || strings.HasPrefix(value, "../") || strings.HasPrefix(value, "/") {
+	if value == "." || strings.HasPrefix(value, "./") || strings.HasPrefix(value, "../") || strings.HasPrefix(value, "/") {
 		return true
 	}
 	// Contains glob patterns but no URL scheme
@@ -441,11 +496,17 @@ func (c *Config) Validate() error {
 		if err := ValidateURL(c.Repository); err != nil {
 			return fmt.Errorf("invalid repository URL: %w", err)
 		}
+		if err := ValidateForgeRepositoryURL(c.Repository, ""); err != nil {
+			return fmt.Errorf("invalid repository URL: %w", err)
+		}
 	}
 
 	// Validate release_source URL if it's a simple string URL
 	if c.ReleaseSource != nil && !c.ReleaseSource.IsWebSource && c.ReleaseSource.URL != "" {
 		if err := ValidateURL(c.ReleaseSource.URL); err != nil {
+			return fmt.Errorf("invalid release_source URL: %w", err)
+		}
+		if err := ValidateForgeRepositoryURL(c.ReleaseSource.URL, c.ReleaseSource.Type); err != nil {
 			return fmt.Errorf("invalid release_source URL: %w", err)
 		}
 	}
