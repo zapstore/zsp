@@ -283,8 +283,8 @@ func TestLoadJKS(t *testing.T) {
 			key, cert, err := LoadJKS(data, []byte(tt.loadStore), []byte(tt.loadKey), tt.alias)
 
 			if tt.name == "wrong store password" || tt.name == "wrong key password" {
-				if err == nil {
-					t.Fatalf("LoadJKS() expected error for %s", tt.name)
+				if !errors.Is(err, ErrInvalidPassword) {
+					t.Fatalf("LoadJKS() error = %v, want %v", err, ErrInvalidPassword)
 				}
 				return
 			}

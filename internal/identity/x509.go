@@ -40,6 +40,10 @@ var ErrJKSKeyAliasRequired = errors.New("JKS contains multiple private-key entri
 // ErrKeyCertMismatch is returned when a private key does not correspond to a certificate.
 var ErrKeyCertMismatch = errors.New("private key does not match certificate")
 
+// ErrInvalidPassword is returned when a keystore password does not open the store
+// or decrypt its private-key entry.
+var ErrInvalidPassword = errors.New("keystore password is incorrect")
+
 // IdentityProof contains the NIP-C1 cryptographic identity components.
 type IdentityProof struct {
 	CertHash  string // SHA-256 hash of DER-encoded certificate, lowercase hex
@@ -435,7 +439,7 @@ func LoadPKCS12(data []byte, password string) (crypto.PrivateKey, *x509.Certific
 
 	privateKey, cert, err := pkcs12.Decode(data, password)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse PKCS12: %w", err)
+		return nil, nil, fmt.Errorf("failed to parse PKCS12: %w", wrapKeystorePasswordError(err))
 	}
 	return privateKey, cert, nil
 }
@@ -453,7 +457,7 @@ func LoadPKCS12WithSecurePassword(data []byte, password []byte) (crypto.PrivateK
 
 	privateKey, cert, err := pkcs12.Decode(data, string(password))
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse PKCS12: %w", err)
+		return nil, nil, fmt.Errorf("failed to parse PKCS12: %w", wrapKeystorePasswordError(err))
 	}
 	return privateKey, cert, nil
 }
@@ -463,6 +467,16 @@ func zeroBytes(b []byte) {
 	for i := range b {
 		b[i] = 0
 	}
+}
+
+func wrapKeystorePasswordError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, pkcs12.ErrIncorrectPassword) || errors.Is(err, pkcs12.ErrDecryption) || strings.Contains(err.Error(), "got invalid digest") {
+		return fmt.Errorf("%w", ErrInvalidPassword)
+	}
+	return err
 }
 
 // LoadPKCS12File loads a private key and certificate from a PKCS12 file.
@@ -500,7 +514,7 @@ func LoadJKS(data, storePassword, keyPassword []byte, alias string) (crypto.Priv
 
 	store := keystore.New(keystore.WithOrderedAliases())
 	if err := store.Load(bytes.NewReader(data), storePassword); err != nil {
-		return nil, nil, fmt.Errorf("load JKS: %w", err)
+		return nil, nil, fmt.Errorf("load JKS: %w", wrapKeystorePasswordError(err))
 	}
 
 	var aliases []string
@@ -532,7 +546,7 @@ func LoadJKS(data, storePassword, keyPassword []byte, alias string) (crypto.Priv
 	}
 	entry, err := store.GetPrivateKeyEntry(alias, keyPassword)
 	if err != nil {
-		return nil, nil, fmt.Errorf("load private key for JKS alias %q: %w", alias, err)
+		return nil, nil, fmt.Errorf("load private key for JKS alias %q: %w", alias, wrapKeystorePasswordError(err))
 	}
 	if len(entry.CertificateChain) == 0 {
 		return nil, nil, fmt.Errorf("JKS key alias %q has no certificate chain", alias)

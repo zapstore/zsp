@@ -228,25 +228,35 @@ func loadJKSIdentity(path, alias string, interactive bool) (crypto.PrivateKey, *
 // prompt) and the key alias from --key-alias (or a TTY selection) when the
 // keystore contains multiple private-key entries.
 func loadJKSIdentityFromData(data []byte, path, alias string, interactive bool) (crypto.PrivateKey, *x509.Certificate, error) {
-	storePassword, err := resolveKeystorePassword(path, interactive)
-	if err != nil {
-		return nil, nil, err
-	}
-	keyPassword := config.GetKeystoreKeyPassword()
-
-	privateKey, cert, err := identity.LoadJKS(data, []byte(storePassword), []byte(keyPassword), alias)
-	var aliasErr *identity.JKSKeyAliasRequiredError
-	if err != nil && alias == "" && errors.As(err, &aliasErr) {
-		alias, err = resolveKeyAlias(aliasErr.Aliases, interactive)
+	useSavedPassword := true
+	for {
+		storePassword, err := resolveKeystorePassword(path, interactive, !useSavedPassword)
 		if err != nil {
 			return nil, nil, err
 		}
-		privateKey, cert, err = identity.LoadJKS(data, []byte(storePassword), []byte(keyPassword), alias)
-	}
-	if err != nil {
+		keyPassword := ""
+		if useSavedPassword {
+			keyPassword = config.GetKeystoreKeyPassword()
+		}
+		privateKey, cert, err := identity.LoadJKS(data, []byte(storePassword), []byte(keyPassword), alias)
+		var aliasErr *identity.JKSKeyAliasRequiredError
+		if err != nil && alias == "" && errors.As(err, &aliasErr) {
+			alias, err = resolveKeyAlias(aliasErr.Aliases, interactive)
+			if err != nil {
+				return nil, nil, err
+			}
+			privateKey, cert, err = identity.LoadJKS(data, []byte(storePassword), []byte(keyPassword), alias)
+		}
+		if err == nil {
+			return privateKey, cert, nil
+		}
+		if interactive && isTTY() && errors.Is(err, identity.ErrInvalidPassword) {
+			ui.PrintInfo("That password is incorrect. Try again.")
+			useSavedPassword = false
+			continue
+		}
 		return nil, nil, fmt.Errorf("load JKS keystore: %w", err)
 	}
-	return privateKey, cert, nil
 }
 
 // loadPKCS12Identity loads a private key and certificate from a PKCS#12
@@ -257,31 +267,45 @@ func loadPKCS12Identity(path, alias string, interactive bool) (crypto.PrivateKey
 	if err != nil {
 		return nil, nil, fmt.Errorf("read keystore file: %w", err)
 	}
-	password, err := resolveKeystorePassword(path, interactive)
-	if err != nil {
-		return nil, nil, err
-	}
-	privateKey, cert, err := identity.LoadPKCS12WithSecurePassword(data, []byte(password))
-	if err != nil {
+	useSavedPassword := true
+	for {
+		password, err := resolveKeystorePassword(path, interactive, !useSavedPassword)
+		if err != nil {
+			return nil, nil, err
+		}
+		privateKey, cert, err := identity.LoadPKCS12WithSecurePassword(data, []byte(password))
+		if err == nil {
+			return privateKey, cert, nil
+		}
 		if errors.Is(err, identity.ErrJKSFormat) {
 			return loadJKSIdentityFromData(data, path, alias, interactive)
 		}
+		if interactive && isTTY() && errors.Is(err, identity.ErrInvalidPassword) {
+			ui.PrintInfo("That password is incorrect. Try again.")
+			useSavedPassword = false
+			continue
+		}
 		return nil, nil, fmt.Errorf("load PKCS12 keystore: %w", err)
 	}
-	return privateKey, cert, nil
 }
 
 // resolveKeystorePassword resolves a keystore password from KEYSTORE_PASSWORD
 // (checked via the process environment, then .env in the current working
 // directory) or, on a TTY, an interactive masked prompt. Non-TTY use reports
 // the missing environment variable.
-func resolveKeystorePassword(path string, interactive bool) (string, error) {
-	if password := config.GetKeystorePassword(); password != "" {
-		return password, nil
+func resolveKeystorePassword(path string, interactive, promptOnly bool) (string, error) {
+	if !promptOnly {
+		if password := config.GetKeystorePassword(); password != "" {
+			return password, nil
+		}
 	}
 	if !interactive || !isTTY() {
 		return "", fmt.Errorf("KEYSTORE_PASSWORD is required for %s", path)
 	}
+	return promptKeystorePassword(path)
+}
+
+var promptKeystorePassword = func(path string) (string, error) {
 	return promptRequired("Keystore password", "Password for "+path+".", true)
 }
 
@@ -367,22 +391,19 @@ func renderC1RelayFailure(failure *c1RelayPublishError) string {
 		{Key: "Certificate hash", Value: failure.CertificateHash},
 		{Key: "Event id", Value: failure.EventID},
 	}, []string{"The proof was signed, but no configured relay confirmed it."}))
-	body.WriteString("\n\n" + ui.Dim("Relay results") + "\n")
+	body.WriteString("\n" + ui.StatusLine("info", "Relay results"))
 	for _, result := range failure.Results {
-		mark := "✗"
-		markStyle := ui.Error
+		kind := "error"
 		if result.Success {
-			mark = "✓"
-			markStyle = ui.Success
+			kind = "success"
 		}
 		message := "no acceptance response"
 		if result.Error != nil {
 			message = safeRelayDiagnostic(result.Error)
 		}
-		body.WriteString(fmt.Sprintf("  %s %s\n", markStyle(mark), ui.Info(sanitizeRelayURL(result.RelayURL))))
-		body.WriteString("    " + ui.Warning(message) + "\n")
+		body.WriteString("\n" + ui.StatusLine(kind, sanitizeRelayURL(result.RelayURL)+": "+message))
 	}
-	body.WriteString("\n" + ui.Dim("Check RELAYS, network access, and relay policy, then retry."))
+	body.WriteString("\n" + ui.StatusLine("info", "Check RELAYS, network access, and relay policy, then retry"))
 	return body.String()
 }
 
@@ -414,6 +435,9 @@ func validateSuggestionSource(value string) (string, error) {
 	parsed, err := url.ParseRequestURI(value)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
 		return "", fmt.Errorf("--source must be an HTTPS repository or release URL")
+	}
+	if err := config.ValidateURL(value); err != nil {
+		return "", fmt.Errorf("--source must be an HTTPS repository or release URL: %w", err)
 	}
 	return value, nil
 }

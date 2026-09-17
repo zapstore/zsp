@@ -83,6 +83,7 @@ func TestValidateSuggestionSource(t *testing.T) {
 		{name: "https URL kept as-is", input: "https://github.com/example/app", want: "https://github.com/example/app"},
 		{name: "bare domain gets https prefix", input: "github.com/example/app", want: "https://github.com/example/app"},
 		{name: "http rejected", input: "http://github.com/example/app", wantErr: true},
+		{name: "invalid hostname rejected", input: "asfdsdfdsfsdf", wantErr: true},
 		{name: "empty rejected", input: "", wantErr: true},
 		{name: "whitespace trimmed", input: "  github.com/example/app  ", want: "https://github.com/example/app"},
 	}
@@ -223,7 +224,7 @@ func TestRenderC1RelayFailure(t *testing.T) {
 		}
 	}
 	for _, expected := range []string{
-		"[ERROR] C1 proof was not accepted by any relay",
+		"× C1 proof was not accepted by any relay",
 		"C1 proof was not accepted by any relay",
 		"wss://relay.example",
 		"connection refused",
@@ -332,6 +333,66 @@ func TestLoadIdentityMaterial_JKS(t *testing.T) {
 	}
 	if gotCert.Subject.CommonName != "release" {
 		t.Fatalf("certificate common name = %q, want release", gotCert.Subject.CommonName)
+	}
+	if err := identity.ValidateKeyCertPair(gotKey, gotCert); err != nil {
+		t.Fatalf("loaded pair invalid: %v", err)
+	}
+}
+
+func TestLoadIdentityMaterial_JKSRetriesWrongPassword(t *testing.T) {
+	forceTTY(t, true)
+	path := generateTestKeystore(t, "JKS", "release")
+	t.Setenv("KEYSTORE_PASSWORD", "wrongpass")
+	withNoEnvFile(t)
+	stubKeystorePasswordPrompt(t, "storepass")
+
+	gotKey, gotCert, err := loadIdentityMaterial(proofOptions{Keystore: path})
+	if err != nil {
+		t.Fatalf("loadIdentityMaterial() error: %v", err)
+	}
+	if err := identity.ValidateKeyCertPair(gotKey, gotCert); err != nil {
+		t.Fatalf("loaded pair invalid: %v", err)
+	}
+}
+
+func TestLoadIdentityMaterial_JKSRetriesPromptedPassword(t *testing.T) {
+	forceTTY(t, true)
+	path := generateTestKeystore(t, "JKS", "release")
+	t.Setenv("KEYSTORE_PASSWORD", "")
+	withNoEnvFile(t)
+	stubKeystorePasswordPrompt(t, "wrongpass", "storepass")
+
+	gotKey, gotCert, err := loadIdentityMaterial(proofOptions{Keystore: path})
+	if err != nil {
+		t.Fatalf("loadIdentityMaterial() error: %v", err)
+	}
+	if err := identity.ValidateKeyCertPair(gotKey, gotCert); err != nil {
+		t.Fatalf("loaded pair invalid: %v", err)
+	}
+}
+
+func TestLoadIdentityMaterial_JKSWrongPasswordNonInteractive(t *testing.T) {
+	forceTTY(t, false)
+	path := generateTestKeystore(t, "JKS", "release")
+	t.Setenv("KEYSTORE_PASSWORD", "wrongpass")
+	withNoEnvFile(t)
+
+	_, _, err := loadIdentityMaterial(proofOptions{Keystore: path})
+	if !errors.Is(err, identity.ErrInvalidPassword) {
+		t.Fatalf("error = %v, want %v", err, identity.ErrInvalidPassword)
+	}
+}
+
+func TestLoadIdentityMaterial_PKCS12RetriesWrongPassword(t *testing.T) {
+	forceTTY(t, true)
+	path := generateTestKeystore(t, "PKCS12", "release")
+	t.Setenv("KEYSTORE_PASSWORD", "wrongpass")
+	withNoEnvFile(t)
+	stubKeystorePasswordPrompt(t, "storepass")
+
+	gotKey, gotCert, err := loadIdentityMaterial(proofOptions{Keystore: path})
+	if err != nil {
+		t.Fatalf("loadIdentityMaterial() error: %v", err)
 	}
 	if err := identity.ValidateKeyCertPair(gotKey, gotCert); err != nil {
 		t.Fatalf("loaded pair invalid: %v", err)
@@ -454,6 +515,20 @@ func TestLoadIdentityMaterial_UnsupportedExtension(t *testing.T) {
 // config.GetEnv's ".env" fallback can't pick up an ambient .env file (e.g.
 // local developer secrets) and leak state into a test that only wants to
 // control the process environment.
+func stubKeystorePasswordPrompt(t *testing.T, passwords ...string) {
+	t.Helper()
+	old := promptKeystorePassword
+	t.Cleanup(func() { promptKeystorePassword = old })
+	promptKeystorePassword = func(string) (string, error) {
+		if len(passwords) == 0 {
+			t.Fatal("keystore password prompt called more times than expected")
+		}
+		password := passwords[0]
+		passwords = passwords[1:]
+		return password, nil
+	}
+}
+
 func withNoEnvFile(t *testing.T) {
 	t.Helper()
 	t.Chdir(t.TempDir())
