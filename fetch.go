@@ -71,9 +71,9 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 	results := make([]*APK, 0, len(candidates))
 	seen := make(map[string]struct{})
 	var lastDownloadError error
-	var clearCache func() error
+	var clearHTTPCache func() error
 	if clearer, ok := src.(source.CacheClearer); ok {
-		clearCache = clearer.ClearCache
+		clearHTTPCache = clearer.ClearHTTPCache
 	}
 	for _, candidate := range candidates {
 		if err := ctx.Err(); err != nil {
@@ -141,7 +141,7 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 			eventSourceURL = ""
 		}
 		ownership := newAPKOwnership(path, tempDir, managed)
-		ownership.clearCache = clearCache
+		ownership.clearHTTPCache = clearHTTPCache
 		results = append(results, &APK{
 			Hash:            parsed.SHA256,
 			Filename:        candidate.Name,
@@ -324,13 +324,13 @@ func (apk *APK) beginPublish() (string, bool) {
 	return state.path, true
 }
 
-func (apk *APK) clearSourceCache() {
+func (apk *APK) clearHTTPCache() {
 	if apk == nil || apk.ownership == nil {
 		return
 	}
 	state := apk.ownership
 	state.mu.Lock()
-	clear := state.clearCache
+	clear := state.clearHTTPCache
 	state.mu.Unlock()
 	if clear != nil {
 		_ = clear()

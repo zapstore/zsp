@@ -469,8 +469,8 @@ func (w *Web) CommitCache() error {
 	return nil
 }
 
-// ClearCache deletes persisted HTTP cache headers so the next fetch is unconditional.
-func (w *Web) ClearCache() error {
+// ClearHTTPCache deletes persisted HTTP cache headers so the next fetch is unconditional.
+func (w *Web) ClearHTTPCache() error {
 	w.pendingCache = nil
 	err := os.Remove(w.cacheFilePath())
 	if errors.Is(err, os.ErrNotExist) {

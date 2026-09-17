@@ -121,8 +121,8 @@ func (g *GitHub) CommitCache() error {
 	return nil
 }
 
-// ClearCache deletes the persisted ETag so the next fetch is unconditional.
-func (g *GitHub) ClearCache() error {
+// ClearHTTPCache deletes the persisted ETag so the next fetch is unconditional.
+func (g *GitHub) ClearHTTPCache() error {
 	g.pendingETag = ""
 	err := os.Remove(g.cacheFilePath())
 	if errors.Is(err, os.ErrNotExist) {

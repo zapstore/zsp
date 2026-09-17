@@ -122,7 +122,7 @@ type apkOwnership struct {
 	publishing     bool
 	closeRequested bool
 	timer          apkTimer
-	clearCache     func() error
+	clearHTTPCache func() error
 }
 
 type apkTimer interface {

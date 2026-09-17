@@ -163,11 +163,11 @@ func TestWebDirectURLReturnsErrNotModifiedForUnchangedETag(t *testing.T) {
 		t.Fatalf("second FetchLatestRelease() = %v, want ErrNotModified", err)
 	}
 
-	if err := web.ClearCache(); err != nil {
+	if err := web.ClearHTTPCache(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := web.FetchLatestRelease(t.Context()); err != nil {
-		t.Fatalf("FetchLatestRelease after ClearCache() = %v", err)
+		t.Fatalf("FetchLatestRelease after ClearHTTPCache() = %v", err)
 	}
 
 	web.SkipHTTPCache = true

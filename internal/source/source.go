@@ -342,9 +342,9 @@ type CacheCommitter interface {
 	CommitCache() error
 }
 
-// CacheClearer removes a persisted ETag so the next Fetch is unconditional.
+// CacheClearer removes a persisted HTTP cache so the next Fetch is unconditional.
 type CacheClearer interface {
-	ClearCache() error
+	ClearHTTPCache() error
 }
 
 var userCacheDir = os.UserCacheDir

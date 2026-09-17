@@ -30,7 +30,7 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 	var publicationResult *PublishResult
 	defer func() {
 		if !published {
-			candidate.clearSourceCache()
+			candidate.clearHTTPCache()
 		}
 		if err := candidate.finishPublish(published); err != nil && publicationResult != nil {
 			publicationResult.Warnings = append(publicationResult.Warnings, "temporary APK cleanup failed")

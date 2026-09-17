@@ -154,11 +154,11 @@ func TestGitHubFetchLatestReleaseUsesETag(t *testing.T) {
 		t.Fatalf("second FetchLatestRelease() = %v, want ErrNotModified", err)
 	}
 
-	if err := github.ClearCache(); err != nil {
+	if err := github.ClearHTTPCache(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := github.FetchLatestRelease(t.Context()); err != nil {
-		t.Fatalf("FetchLatestRelease after ClearCache() = %v", err)
+		t.Fatalf("FetchLatestRelease after ClearHTTPCache() = %v", err)
 	}
 
 	github.SkipHTTPCache = true
