@@ -9,17 +9,17 @@ import (
 	"path/filepath"
 	"strings"
 
-	publiczsp "github.com/zapstore/zsp"
+	"github.com/zapstore/zsp"
 	"github.com/zapstore/zsp/internal/cli"
 	"github.com/zapstore/zsp/internal/ui"
 	"golang.org/x/term"
 )
 
 type cliErrorDocument struct {
-	OK        bool                     `json:"ok"`
-	Operation string                   `json:"operation"`
-	Error     cliErrorBody             `json:"error"`
-	Result    *publiczsp.PublishResult `json:"result,omitempty"`
+	OK        bool               `json:"ok"`
+	Operation string             `json:"operation"`
+	Error     cliErrorBody       `json:"error"`
+	Result    *zsp.PublishResult `json:"result,omitempty"`
 }
 
 type cliErrorBody struct {
@@ -58,7 +58,7 @@ func publishCommand(ctx context.Context, opts *cli.Options) int {
 	var fetchWarnings []string
 	reporter := ui.NewProgressReporter(os.Stderr, opts.ShouldShowSpinners() && !opts.Global.NoColor && term.IsTerminal(int(os.Stderr.Fd())))
 	defer reporter.Finish()
-	progress := func(progress publiczsp.Progress) {
+	progress := func(progress zsp.Progress) {
 		if progress.Phase == "warning" {
 			fetchWarnings = append(fetchWarnings, progress.Target)
 		}
@@ -66,7 +66,7 @@ func publishCommand(ctx context.Context, opts *cli.Options) int {
 			reporter.Report(progress)
 		}
 	}
-	candidates, err := publiczsp.Fetch(ctx, config.FetchConfig, publiczsp.FetchOptions{
+	candidates, err := zsp.Fetch(ctx, config.FetchConfig, zsp.FetchOptions{
 		OnProgress: progress,
 	})
 	if err != nil {
@@ -81,7 +81,7 @@ func publishCommand(ctx context.Context, opts *cli.Options) int {
 	if err != nil {
 		return writePublishError(opts, err, candidates)
 	}
-	result, err := publiczsp.Publish(ctx, config.PublishConfig, selected, publiczsp.PublishOptions{
+	result, err := zsp.Publish(ctx, config.PublishConfig, selected, zsp.PublishOptions{
 		Channel:              opts.Publish.Channel,
 		Commit:               opts.Publish.Commit,
 		SkipAppEvent:         opts.Publish.SkipAppEvent,
@@ -95,14 +95,14 @@ func publishCommand(ctx context.Context, opts *cli.Options) int {
 		if result != nil {
 			result.Warnings = append(fetchWarnings, result.Warnings...)
 		}
-		return writePublishError(opts, err, []*publiczsp.APK{selected}, result)
+		return writePublishError(opts, err, []*zsp.APK{selected}, result)
 	}
 	result.Warnings = append(fetchWarnings, result.Warnings...)
 	return writePublishSuccess(opts, result, selected)
 }
 
-func loadPublicConfig(opts *cli.Options) (publiczsp.Config, error) {
-	var config publiczsp.Config
+func loadPublicConfig(opts *cli.Options) (zsp.Config, error) {
+	var config zsp.Config
 	var err error
 	if len(opts.Args) > 1 {
 		return config, fmt.Errorf("publish accepts at most one config or APK argument")
@@ -112,7 +112,7 @@ func loadPublicConfig(opts *cli.Options) (publiczsp.Config, error) {
 		if pathErr != nil {
 			return config, pathErr
 		}
-		config.ReleaseSource = &publiczsp.ReleaseSource{LocalPath: path}
+		config.ReleaseSource = &zsp.ReleaseSource{LocalPath: path}
 	} else if len(opts.Args) == 0 && (opts.Publish.RepoURL != "" || opts.Publish.ReleaseSource != "") {
 		// Flags provide the source configuration.
 	} else {
@@ -120,7 +120,7 @@ func loadPublicConfig(opts *cli.Options) (publiczsp.Config, error) {
 		if len(opts.Args) == 1 {
 			path = opts.Args[0]
 		}
-		config, err = publiczsp.LoadConfig(path)
+		config, err = zsp.LoadConfig(path)
 		if err != nil {
 			return config, err
 		}
@@ -133,13 +133,13 @@ func loadPublicConfig(opts *cli.Options) (publiczsp.Config, error) {
 		if !strings.Contains(value, "://") {
 			if absolute, pathErr := filepath.Abs(value); pathErr == nil {
 				if _, statErr := os.Stat(absolute); statErr == nil {
-					config.ReleaseSource = &publiczsp.ReleaseSource{LocalPath: absolute}
+					config.ReleaseSource = &zsp.ReleaseSource{LocalPath: absolute}
 				} else {
-					config.ReleaseSource = &publiczsp.ReleaseSource{URL: normalizeRepoURL(value)}
+					config.ReleaseSource = &zsp.ReleaseSource{URL: normalizeRepoURL(value)}
 				}
 			}
 		} else {
-			config.ReleaseSource = &publiczsp.ReleaseSource{URL: value}
+			config.ReleaseSource = &zsp.ReleaseSource{URL: value}
 		}
 	}
 	if opts.Publish.Match != "" {
@@ -167,7 +167,25 @@ func normalizeRepoURL(value string) string {
 	return "https://" + value
 }
 
-func selectPublicAPK(opts *cli.Options, candidates []*publiczsp.APK) (*publiczsp.APK, error) {
+func selectPublicAPK(opts *cli.Options, candidates []*zsp.APK) (*zsp.APK, error) {
+	return selectPublicAPKWithPrompt(
+		opts,
+		candidates,
+		"Select the APK to publish",
+		"Each candidate was downloaded and signature-verified.",
+	)
+}
+
+func selectAPKForAppSetup(candidates []*zsp.APK) (*zsp.APK, error) {
+	return selectPublicAPKWithPrompt(
+		&cli.Options{},
+		candidates,
+		"Select the certificate that identifies your app",
+		"Used to verify the app's package and signing certificate. This does not pin the APK in zapstore.yaml.",
+	)
+}
+
+func selectPublicAPKWithPrompt(opts *cli.Options, candidates []*zsp.APK, title, description string) (*zsp.APK, error) {
 	if opts.Publish.APKHash != "" {
 		for index := range candidates {
 			if candidates[index].Hash == strings.ToLower(opts.Publish.APKHash) {
@@ -176,53 +194,70 @@ func selectPublicAPK(opts *cli.Options, candidates []*publiczsp.APK) (*publiczsp
 		}
 		return nil, &cliOperationError{
 			code: "apk_not_checked", message: fmt.Sprintf("no verified APK has hash %s", opts.Publish.APKHash),
-			cause: publiczsp.ErrAPKNotChecked,
+			cause: zsp.ErrAPKNotChecked,
 		}
 	}
 	if len(candidates) == 1 {
 		return candidates[0], nil
 	}
+	choices := apkSelectionChoices(candidates)
+	if len(choices) == 1 {
+		return candidates[0], nil
+	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) || opts.Publish.Quiet || opts.Global.JSON {
 		return nil, &cliOperationError{
 			code: "apk_selection_required", message: "multiple verified APKs require --apk-hash",
-			cause: publiczsp.ErrAPKSelectionRequired,
+			cause: zsp.ErrAPKSelectionRequired,
 		}
 	}
-	options := make([]string, 0, len(candidates))
-	for _, candidate := range candidates {
-		options = append(options, fmt.Sprintf("%s (%s, %d bytes)", candidate.Filename, candidate.Hash, candidate.Size))
-	}
-	selected, err := ui.SelectField("Select the APK to publish", "Each candidate was downloaded and signature-verified.", options)
+	selected, err := ui.SelectChoiceField(title, description, choices)
 	if err != nil {
 		return nil, err
 	}
-	for index, option := range options {
-		if option == selected {
-			return candidates[index], nil
+	for _, candidate := range candidates {
+		if candidate.Hash == selected {
+			return candidate, nil
 		}
 	}
 	return nil, &cliOperationError{
 		code: "apk_not_checked", message: "selected APK is unavailable",
-		cause: publiczsp.ErrAPKNotChecked,
+		cause: zsp.ErrAPKNotChecked,
 	}
 }
 
-func closeCandidates(candidates []*publiczsp.APK) {
+func apkSelectionChoices(candidates []*zsp.APK) []ui.SelectChoice {
+	choices := make([]ui.SelectChoice, 0, len(candidates))
+	byCertificateHash := make(map[string]int, len(candidates))
+	for _, candidate := range candidates {
+		if index, ok := byCertificateHash[candidate.CertificateHash]; ok {
+			choices[index].Label += "\n  " + candidate.Filename
+			continue
+		}
+		byCertificateHash[candidate.CertificateHash] = len(choices)
+		choices = append(choices, ui.SelectChoice{
+			Label: fmt.Sprintf("%s\n  %s", candidate.CertificateHash, candidate.Filename),
+			Value: candidate.Hash,
+		})
+	}
+	return choices
+}
+
+func closeCandidates(candidates []*zsp.APK) {
 	for _, candidate := range candidates {
 		_ = candidate.Close()
 	}
 }
 
-func writeCheckSuccess(opts *cli.Options, candidates []*publiczsp.APK, warnings []string) int {
+func writeCheckSuccess(opts *cli.Options, candidates []*zsp.APK, warnings []string) int {
 	if opts.Global.JSON {
 		if warnings == nil {
 			warnings = []string{}
 		}
 		_ = json.NewEncoder(os.Stdout).Encode(struct {
-			OK        bool             `json:"ok"`
-			Operation string           `json:"operation"`
-			APKs      []*publiczsp.APK `json:"apks"`
-			Warnings  []string         `json:"warnings"`
+			OK        bool       `json:"ok"`
+			Operation string     `json:"operation"`
+			APKs      []*zsp.APK `json:"apks"`
+			Warnings  []string   `json:"warnings"`
 		}{true, "check", candidates, warnings})
 		return 0
 	}
@@ -239,7 +274,7 @@ func writeCheckSuccess(opts *cli.Options, candidates []*publiczsp.APK, warnings 
 	return 0
 }
 
-func writePublishSuccess(opts *cli.Options, result *publiczsp.PublishResult, selected *publiczsp.APK) int {
+func writePublishSuccess(opts *cli.Options, result *zsp.PublishResult, selected *zsp.APK) int {
 	if opts.Global.JSON {
 		if result.Warnings == nil {
 			result.Warnings = []string{}
@@ -249,15 +284,15 @@ func writePublishSuccess(opts *cli.Options, result *publiczsp.PublishResult, sel
 			application = &result.Events.Application
 		}
 		_ = json.NewEncoder(os.Stdout).Encode(struct {
-			OK          bool                    `json:"ok"`
-			Operation   string                  `json:"operation"`
-			ID          string                  `json:"id"`
-			Status      string                  `json:"status"`
-			SelectedAPK *publiczsp.APK          `json:"selected_apk"`
-			Events      publishEventsDocument   `json:"events"`
-			Uploads     []publiczsp.BlobResult  `json:"uploads"`
-			Relays      []publiczsp.RelayResult `json:"relays"`
-			Warnings    []string                `json:"warnings"`
+			OK          bool                  `json:"ok"`
+			Operation   string                `json:"operation"`
+			ID          string                `json:"id"`
+			Status      string                `json:"status"`
+			SelectedAPK *zsp.APK              `json:"selected_apk"`
+			Events      publishEventsDocument `json:"events"`
+			Uploads     []zsp.BlobResult      `json:"uploads"`
+			Relays      []zsp.RelayResult     `json:"relays"`
+			Warnings    []string              `json:"warnings"`
 		}{
 			true, "publish", result.ID, result.Status, selected,
 			publishEventsDocument{Application: application, Release: result.Events.Release, Assets: result.Events.Assets},
@@ -282,10 +317,10 @@ type publishEventsDocument struct {
 	Assets      []string `json:"assets"`
 }
 
-func writePublishError(opts *cli.Options, err error, candidates []*publiczsp.APK, partial ...*publiczsp.PublishResult) int {
+func writePublishError(opts *cli.Options, err error, candidates []*zsp.APK, partial ...*zsp.PublishResult) int {
 	code := publishErrorCode(err)
 	retryable := false
-	var operationError publiczsp.Error
+	var operationError zsp.Error
 	if errors.As(err, &operationError) {
 		retryable = operationError.Retryable()
 	}
@@ -307,7 +342,7 @@ func writePublishError(opts *cli.Options, err error, candidates []*publiczsp.APK
 			Reason:  "Select one verified APK by its exact hash.",
 		}}
 	}
-	var result *publiczsp.PublishResult
+	var result *zsp.PublishResult
 	if len(partial) > 0 {
 		result = partial[0]
 	}
@@ -320,12 +355,12 @@ func writePublishError(opts *cli.Options, err error, candidates []*publiczsp.APK
 	} else {
 		ui.WritePanel(os.Stderr, "error", safeSummary(code), nil, []string{ui.SanitizeErrorMessage(err)})
 		if code == "proof_required" {
-			fmt.Fprintln(os.Stderr, "  "+ui.RenderCommand("zsp"))
+			fmt.Fprintln(os.Stderr, ui.StatusLine("info", ui.RenderCommand("zsp")))
 		} else if code == "apk_selection_required" {
 			for _, candidate := range candidates {
-				fmt.Fprintf(os.Stderr, "  %s  %s\n", candidate.Filename, candidate.Hash)
+				fmt.Fprintln(os.Stderr, ui.StatusLine("info", candidate.Filename+" "+candidate.Hash))
 			}
-			fmt.Fprintln(os.Stderr, "  "+ui.RenderCommand("zsp publish --apk-hash <sha256>"))
+			fmt.Fprintln(os.Stderr, ui.StatusLine("info", ui.RenderCommand("zsp publish --apk-hash <sha256>")))
 		}
 	}
 	if errors.Is(err, context.Canceled) {
@@ -342,37 +377,37 @@ func publishErrorCode(err error) string {
 	switch {
 	case errors.Is(err, context.Canceled):
 		return "cancelled"
-	case errors.Is(err, publiczsp.ErrAlreadyPublished):
+	case errors.Is(err, zsp.ErrAlreadyPublished):
 		return "release_already_published"
-	case errors.Is(err, publiczsp.ErrReleaseDowngrade):
+	case errors.Is(err, zsp.ErrReleaseDowngrade):
 		return "release_downgrade"
-	case errors.Is(err, publiczsp.ErrAPKNotChecked):
+	case errors.Is(err, zsp.ErrAPKNotChecked):
 		return "apk_not_checked"
-	case errors.Is(err, publiczsp.ErrAPKSelectionRequired):
+	case errors.Is(err, zsp.ErrAPKSelectionRequired):
 		return "apk_selection_required"
-	case errors.Is(err, publiczsp.ErrProofRequired):
+	case errors.Is(err, zsp.ErrProofRequired):
 		return "proof_required"
-	case errors.Is(err, publiczsp.ErrProofUnauthorized):
+	case errors.Is(err, zsp.ErrProofUnauthorized):
 		return "proof_unauthorized"
-	case errors.Is(err, publiczsp.ErrSigner):
+	case errors.Is(err, zsp.ErrSigner):
 		return "signer_unavailable"
-	case errors.Is(err, publiczsp.ErrUploadRejected):
+	case errors.Is(err, zsp.ErrUploadRejected):
 		return "upload_rejected"
-	case errors.Is(err, publiczsp.ErrPublishRejected):
+	case errors.Is(err, zsp.ErrPublishRejected):
 		return "publish_rejected"
-	case errors.Is(err, publiczsp.ErrInvalidConfig):
+	case errors.Is(err, zsp.ErrInvalidConfig):
 		return "invalid_arguments"
-	case errors.Is(err, publiczsp.ErrSourceFailed):
+	case errors.Is(err, zsp.ErrSourceFailed):
 		return "source_failed"
-	case errors.Is(err, publiczsp.ErrNoAPK):
+	case errors.Is(err, zsp.ErrNoAPK):
 		return "no_apk"
-	case errors.Is(err, publiczsp.ErrTooManyCandidates):
+	case errors.Is(err, zsp.ErrTooManyCandidates):
 		return "too_many_candidates"
-	case errors.Is(err, publiczsp.ErrInvalidAPK):
+	case errors.Is(err, zsp.ErrInvalidAPK):
 		return "invalid_apk"
-	case errors.Is(err, publiczsp.ErrRateLimited):
+	case errors.Is(err, zsp.ErrRateLimited):
 		return "rate_limited"
-	case errors.Is(err, publiczsp.ErrTemporaryFailure):
+	case errors.Is(err, zsp.ErrTemporaryFailure):
 		return "temporary_failure"
 	default:
 		return "publish_failed"
