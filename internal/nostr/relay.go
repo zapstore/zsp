@@ -32,15 +32,11 @@ type Publisher struct {
 	relayURLs []string
 }
 
-// AppEventLocations records the relays that have events for one application.
+// AppEventLocations records the relays that list an application.
 type AppEventLocations struct {
 	ApplicationRelays []string
-	ReleaseRelays     []string
-	AssetRelays       []string
 	CheckedRelays     []string
 	ApplicationCount  int
-	ReleaseCount      int
-	AssetCount        int
 }
 
 // RelayClassification is advisory relay metadata used by the wizard.
@@ -56,6 +52,30 @@ func NewPublisher(relayURLs []string) *Publisher {
 		relayURLs = []string{DefaultRelay}
 	}
 	return &Publisher{relayURLs: relayURLs}
+}
+
+// EnsureReachable verifies that at least one configured relay accepts a
+// connection. It returns the URLs that could not be reached.
+func (p *Publisher) EnsureReachable(ctx context.Context) ([]string, error) {
+	unreachable := make([]string, 0)
+	var failures []error
+	reachable := false
+	for _, relayURL := range p.relayURLs {
+		relayCtx, cancel := context.WithTimeout(ctx, RelayTimeout)
+		relay, err := nostr.RelayConnect(relayCtx, relayURL)
+		cancel()
+		if err != nil {
+			unreachable = append(unreachable, relayURL)
+			failures = append(failures, fmt.Errorf("%s: %w", relayURL, err))
+			continue
+		}
+		_ = relay.Close()
+		reachable = true
+	}
+	if reachable {
+		return unreachable, nil
+	}
+	return unreachable, relayQueryError("reachability", failures)
 }
 
 // PublishResult contains the result of publishing to a single relay.
@@ -225,58 +245,40 @@ func (p *Publisher) FetchApplicationEvents(ctx context.Context, appID string, au
 	return events, warnings, nil
 }
 
-// HasAppEvents reports whether any application, release, or asset event for
-// appID exists on a configured relay. A successful empty query is definitive;
-// individual relay failures are returned as warnings.
+// HasAppEvents reports whether a kind 32267 application event for appID exists
+// on a configured relay. A successful empty query is definitive; individual
+// relay failures are returned as warnings.
 func (p *Publisher) HasAppEvents(ctx context.Context, appID string) (bool, []error, error) {
 	locations, warnings, err := p.FindAppEvents(ctx, appID)
-	return len(locations.ApplicationRelays) > 0 || len(locations.ReleaseRelays) > 0 || len(locations.AssetRelays) > 0, warnings, err
+	return len(locations.ApplicationRelays) > 0, warnings, err
 }
 
-// FindAppEvents returns the configured relay URLs that contain application,
-// release, or asset events for appID.
+// FindAppEvents returns configured relay URLs that contain a kind 32267
+// application event for appID.
 func (p *Publisher) FindAppEvents(ctx context.Context, appID string) (AppEventLocations, []error, error) {
-	filters := []nostr.Filter{
-		{Kinds: []int{KindAppMetadata}, Tags: nostr.TagMap{"d": []string{appID}}, Limit: 1},
-		{Kinds: []int{KindRelease, KindSoftwareAsset}, Tags: nostr.TagMap{"i": []string{appID}}, Limit: 1},
+	filter := nostr.Filter{
+		Kinds: []int{KindAppMetadata}, Tags: nostr.TagMap{"d": []string{appID}}, Limit: 1,
 	}
 	var locations AppEventLocations
 	var warnings []error
 	completed := 0
 	for _, relayURL := range p.relayURLs {
-		relayCompleted := false
-		for filterIndex, filter := range filters {
-			events, err := p.queryRelayMultiple(ctx, relayURL, filter)
-			if err != nil {
-				warnings = append(warnings, fmt.Errorf("%s: %w", relayURL, err))
-				continue
-			}
-			relayCompleted = true
-			for _, event := range events {
-				switch {
-				case filterIndex == 0:
-					locations.ApplicationRelays = append(locations.ApplicationRelays, relayURL)
-					locations.ApplicationCount++
-				case event.Kind == KindRelease:
-					locations.ReleaseRelays = append(locations.ReleaseRelays, relayURL)
-					locations.ReleaseCount++
-				case event.Kind == KindSoftwareAsset:
-					locations.AssetRelays = append(locations.AssetRelays, relayURL)
-					locations.AssetCount++
-				}
-			}
+		events, err := p.queryRelayMultiple(ctx, relayURL, filter)
+		if err != nil {
+			warnings = append(warnings, fmt.Errorf("%s: %w", relayURL, err))
+			continue
 		}
-		if relayCompleted {
-			completed++
-			locations.CheckedRelays = append(locations.CheckedRelays, relayURL)
+		completed++
+		locations.CheckedRelays = append(locations.CheckedRelays, relayURL)
+		for range events {
+			locations.ApplicationRelays = append(locations.ApplicationRelays, relayURL)
+			locations.ApplicationCount++
 		}
 	}
 	if completed == 0 && len(p.relayURLs) > 0 {
 		return AppEventLocations{}, warnings, relayQueryError("app", warnings)
 	}
 	locations.ApplicationRelays = uniqueRelayURLs(locations.ApplicationRelays)
-	locations.ReleaseRelays = uniqueRelayURLs(locations.ReleaseRelays)
-	locations.AssetRelays = uniqueRelayURLs(locations.AssetRelays)
 	return locations, warnings, nil
 }
 

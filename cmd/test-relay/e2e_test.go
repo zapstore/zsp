@@ -25,7 +25,7 @@ import (
 	"time"
 
 	gonostr "github.com/nbd-wtf/go-nostr"
-	publiczsp "github.com/zapstore/zsp"
+	"github.com/zapstore/zsp"
 	"github.com/zapstore/zsp/internal/identity"
 	internalnostr "github.com/zapstore/zsp/internal/nostr"
 )
@@ -102,7 +102,7 @@ func TestClientAPIPublishesThroughTestRelayEndToEnd(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(configContents), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	config, err := publiczsp.LoadConfig(configPath)
+	config, err := zsp.LoadConfig(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,14 +113,14 @@ func TestClientAPIPublishesThroughTestRelayEndToEnd(t *testing.T) {
 	assertRelayPublication(t, relayURL, ownerPubkey, []string{ownerPubkey, delegatePubkey}, 1, 1, 1)
 
 	equal := fetchOneE2EAPK(t, config.FetchConfig)
-	_, err = publiczsp.Publish(t.Context(), config.PublishConfig, equal, publiczsp.PublishOptions{
+	_, err = zsp.Publish(t.Context(), config.PublishConfig, equal, zsp.PublishOptions{
 		BlossomURL: blossomURL,
 		Relays:     []string{relayURL},
 	})
-	if !errors.Is(err, publiczsp.ErrAlreadyPublished) {
+	if !errors.Is(err, zsp.ErrAlreadyPublished) {
 		t.Fatalf("equal version Publish error = %v, want ErrAlreadyPublished", err)
 	}
-	equalResult, err := publiczsp.Publish(t.Context(), config.PublishConfig, equal, publiczsp.PublishOptions{
+	equalResult, err := zsp.Publish(t.Context(), config.PublishConfig, equal, zsp.PublishOptions{
 		BlossomURL:       blossomURL,
 		Relays:           []string{relayURL},
 		OverwriteRelease: true,
@@ -136,21 +136,22 @@ func TestClientAPIPublishesThroughTestRelayEndToEnd(t *testing.T) {
 	downgradeFetchConfig.ReleaseSource = &downgradeSource
 	downgrade := fetchOneE2EAPK(t, downgradeFetchConfig)
 	for _, overwrite := range []bool{false, true} {
-		_, err := publiczsp.Publish(t.Context(), config.PublishConfig, downgrade, publiczsp.PublishOptions{
+		_, err := zsp.Publish(t.Context(), config.PublishConfig, downgrade, zsp.PublishOptions{
 			BlossomURL:       blossomURL,
 			Relays:           []string{relayURL},
 			OverwriteRelease: overwrite,
 		})
-		if !errors.Is(err, publiczsp.ErrReleaseDowngrade) {
+		if !errors.Is(err, zsp.ErrReleaseDowngrade) {
 			t.Fatalf("downgrade Publish(overwrite=%v) error = %v, want ErrReleaseDowngrade", overwrite, err)
 		}
 	}
 	unreachableRelay := "ws://" + unusedLoopbackAddress(t)
-	_, err = publiczsp.Publish(t.Context(), config.PublishConfig, downgrade, publiczsp.PublishOptions{
-		BlossomURL: blossomURL,
-		Relays:     []string{unreachableRelay},
+	_, err = zsp.Publish(t.Context(), config.PublishConfig, downgrade, zsp.PublishOptions{
+		BlossomURL:     blossomURL,
+		Relays:         []string{unreachableRelay},
+		SkipProofCheck: true,
 	})
-	if !errors.Is(err, publiczsp.ErrTemporaryFailure) {
+	if !errors.Is(err, zsp.ErrTemporaryFailure) {
 		t.Fatalf("relay lookup failure = %v, want ErrTemporaryFailure", err)
 	}
 
@@ -165,7 +166,7 @@ func TestClientAPIPublishesThroughTestRelayEndToEnd(t *testing.T) {
 	secondFetchConfig.ReleaseSource = &secondSource
 	second := fetchOneE2EAPK(t, secondFetchConfig)
 	t.Setenv("SIGN_WITH", delegateSecret)
-	secondResult, err := publiczsp.Publish(t.Context(), config.PublishConfig, second, publiczsp.PublishOptions{
+	secondResult, err := zsp.Publish(t.Context(), config.PublishConfig, second, zsp.PublishOptions{
 		BlossomURL:   blossomURL,
 		Relays:       []string{relayURL, unreachableRelay},
 		SkipAppEvent: true,
@@ -189,7 +190,7 @@ func TestClientAPIPublishesThroughTestRelayEndToEnd(t *testing.T) {
 	thirdFetchConfig.ReleaseSource = &thirdSource
 	third := fetchOneE2EAPK(t, thirdFetchConfig)
 	t.Setenv("SIGN_WITH", indexerSecret)
-	thirdResult, err := publiczsp.Publish(t.Context(), config.PublishConfig, third, publiczsp.PublishOptions{
+	thirdResult, err := zsp.Publish(t.Context(), config.PublishConfig, third, zsp.PublishOptions{
 		BlossomURL:     blossomURL,
 		Relays:         []string{relayURL},
 		SkipAppEvent:   true,
@@ -210,12 +211,12 @@ func TestClientAPIPublishesThroughTestRelayEndToEnd(t *testing.T) {
 	retryFetchConfig.ReleaseSource = &retrySource
 	retryCandidate := fetchOneE2EAPK(t, retryFetchConfig)
 	t.Setenv("SIGN_WITH", partialSecret)
-	partialResult, err := publiczsp.Publish(t.Context(), config.PublishConfig, retryCandidate, publiczsp.PublishOptions{
+	partialResult, err := zsp.Publish(t.Context(), config.PublishConfig, retryCandidate, zsp.PublishOptions{
 		BlossomURL:     blossomURL,
 		Relays:         []string{relayURL},
 		SkipProofCheck: true,
 	})
-	if !errors.Is(err, publiczsp.ErrPublishRejected) {
+	if !errors.Is(err, zsp.ErrPublishRejected) {
 		t.Fatalf("partial Publish error = %v, want ErrPublishRejected", err)
 	}
 	if partialResult == nil || partialResult.Status != "partial" || len(partialResult.Uploads) != 1 ||
@@ -224,7 +225,7 @@ func TestClientAPIPublishesThroughTestRelayEndToEnd(t *testing.T) {
 	}
 
 	t.Setenv("SIGN_WITH", indexerSecret)
-	retryResult, err := publiczsp.Publish(t.Context(), config.PublishConfig, retryCandidate, publiczsp.PublishOptions{
+	retryResult, err := zsp.Publish(t.Context(), config.PublishConfig, retryCandidate, zsp.PublishOptions{
 		BlossomURL:     blossomURL,
 		Relays:         []string{relayURL},
 		SkipProofCheck: true,
@@ -371,9 +372,9 @@ func publishE2EC1Proof(
 	}
 }
 
-func fetchOneE2EAPK(t *testing.T, config publiczsp.FetchConfig) *publiczsp.APK {
+func fetchOneE2EAPK(t *testing.T, config zsp.FetchConfig) *zsp.APK {
 	t.Helper()
-	candidates, err := publiczsp.Fetch(t.Context(), config, publiczsp.FetchOptions{})
+	candidates, err := zsp.Fetch(t.Context(), config, zsp.FetchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,13 +389,13 @@ func fetchOneE2EAPK(t *testing.T, config publiczsp.FetchConfig) *publiczsp.APK {
 
 func publishE2EAPK(
 	t *testing.T,
-	config publiczsp.PublishConfig,
-	candidate *publiczsp.APK,
+	config zsp.PublishConfig,
+	candidate *zsp.APK,
 	blossomURL, relayURL string,
 	skipApp bool,
-) *publiczsp.PublishResult {
+) *zsp.PublishResult {
 	t.Helper()
-	result, err := publiczsp.Publish(t.Context(), config, candidate, publiczsp.PublishOptions{
+	result, err := zsp.Publish(t.Context(), config, candidate, zsp.PublishOptions{
 		BlossomURL:   blossomURL,
 		Relays:       []string{relayURL},
 		SkipAppEvent: skipApp,
@@ -408,7 +409,7 @@ func publishE2EAPK(
 	return result
 }
 
-func assertPublishedBlob(t *testing.T, result *publiczsp.PublishResult, expected []byte) {
+func assertPublishedBlob(t *testing.T, result *zsp.PublishResult, expected []byte) {
 	t.Helper()
 	if len(result.Uploads) != 1 || !result.Uploads[0].Accepted {
 		t.Fatalf("uploads = %+v, want one accepted APK", result.Uploads)

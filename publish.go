@@ -79,11 +79,23 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 	}
 	publicationResult = result
 	publisher := internalnostr.NewPublisher(relayURLs)
+	unreachable, err := publisher.EnsureReachable(ctx)
+	if err != nil {
+		if contextErr := contextOperationError(ctx.Err(), "reach relay"); contextErr != nil {
+			return nil, contextErr
+		}
+		sentinel, retryable := relayQueryErrorClassification(err)
+		return nil, wrapOperationError(sentinel, err, retryable, "reach relay")
+	}
+	for _, relayURL := range unreachable {
+		result.Warnings = append(result.Warnings, "couldn't reach relay "+publicRelayURL(relayURL))
+	}
 	publishChannel := selectedChannel(options, config)
 	var existingReleaseTimestamp time.Time
 	c1Status := "not checked"
 	authorizedPublishers := map[string]struct{}{signer.PublicKey(): {}}
 	if !options.SkipProofCheck {
+		reportPublish(options, "publish", "proof", "C1 ownership proof", 0, 0)
 		proofs, proofWarnings, proofErr := publisher.FetchIdentityProofsByCertificate(ctx, parsed.CertFingerprint)
 		if proofErr != nil {
 			if contextErr := contextOperationError(ctx.Err(), "check C1 proof"); contextErr != nil {
@@ -106,6 +118,7 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 		}
 		c1Status = "active"
 		var publishedVersionCode int64
+		reportPublish(options, "publish", "release", "published releases", 0, 0)
 		versionCode, publishedAt, warnings, checkErr := publisher.HighestReleaseVersionCode(
 			ctx, authorizedPublishers, parsed.PackageID, parsed.CertFingerprint, publishChannel,
 		)
