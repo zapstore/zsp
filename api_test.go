@@ -38,7 +38,7 @@ func TestPublicStructFieldsMatchContract(t *testing.T) {
 		want  []string
 	}{
 		{Config{}, []string{"FetchConfig", "PublishConfig"}},
-		{FetchConfig{}, []string{"Repository", "ReleaseSource", "ReleaseFilter", "Match", "PrereleaseChannel"}},
+		{FetchConfig{}, []string{"Repository", "ReleaseSource", "ReleaseFilter", "Match", "PrereleaseChannel", "SkipETag"}},
 		{PublishConfig{}, []string{"Name", "Summary", "Description", "Tags", "License", "Website", "Icon", "Images", "ReleaseNotes", "SupportedNIPs", "MinAllowedVersion", "MinAllowedVersionCode", "MetadataSources", "Channel"}},
 		{ReleaseSource{}, []string{"URL", "LocalPath", "Type", "AssetURL", "VersionExtractor", "AssetExtractor"}},
 		{Extractor{}, []string{"URL", "Selector", "Attribute", "Path", "Header", "Match"}},
@@ -796,6 +796,53 @@ func TestPublishRejectsClosedAPK(t *testing.T) {
 	_, err := Publish(t.Context(), PublishConfig{}, candidate, PublishOptions{})
 	if !errors.Is(err, ErrAPKNotChecked) {
 		t.Fatalf("Publish error = %v, want ErrAPKNotChecked", err)
+	}
+}
+
+func TestFetchReturnsErrNoNewAPKWhenETagUnchanged(t *testing.T) {
+	t.Cleanup(source.SetCacheDirForTest(t.TempDir()))
+	path := buildSignedTestAPK(t)
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const etag = `"apk-1"`
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("If-None-Match") == etag {
+			writer.WriteHeader(http.StatusNotModified)
+			return
+		}
+		writer.Header().Set("ETag", etag)
+		if request.Method == http.MethodHead {
+			writer.WriteHeader(http.StatusOK)
+			return
+		}
+		_, _ = writer.Write(payload)
+	}))
+	t.Cleanup(server.Close)
+
+	config := FetchConfig{ReleaseSource: &ReleaseSource{URL: server.URL + "/app.apk"}}
+	candidates, err := Fetch(t.Context(), config, FetchOptions{})
+	if err != nil {
+		t.Fatalf("first Fetch() = %v", err)
+	}
+	t.Cleanup(func() { closeAPKs(candidates) })
+	if len(candidates) != 1 {
+		t.Fatalf("len(candidates) = %d, want 1", len(candidates))
+	}
+
+	if _, err := Fetch(t.Context(), config, FetchOptions{}); !errors.Is(err, ErrNoNewAPK) {
+		t.Fatalf("second Fetch() = %v, want ErrNoNewAPK", err)
+	}
+
+	config.SkipETag = true
+	forced, err := Fetch(t.Context(), config, FetchOptions{})
+	if err != nil {
+		t.Fatalf("SkipETag Fetch() = %v", err)
+	}
+	t.Cleanup(func() { closeAPKs(forced) })
+	if len(forced) != 1 {
+		t.Fatalf("SkipETag len(candidates) = %d, want 1", len(forced))
 	}
 }
 

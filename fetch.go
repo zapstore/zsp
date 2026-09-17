@@ -16,6 +16,9 @@ import (
 
 // Fetch resolves and verifies usable APK candidates. The caller owns each
 // returned APK and must call Close when it will not be published.
+//
+// When SkipETag is false, Fetch sends stored ETags and returns ErrNoNewAPK
+// if the source reports that nothing has changed.
 func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*APK, error) {
 	internal, err := fetchInternalConfig(config)
 	if err != nil {
@@ -23,6 +26,7 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 	}
 	src, err := source.NewWithOptions(internal, source.Options{
 		IncludePreReleases: config.PrereleaseChannel != "",
+		SkipCache:          config.SkipETag,
 	})
 	if err != nil {
 		return nil, wrapOperationError(ErrInvalidConfig, err, false, "create source")
@@ -30,6 +34,9 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 	report(options, "fetch", "resolve", config.Repository, 0, 0)
 	release, err := src.FetchLatestRelease(ctx)
 	if err != nil {
+		if errors.Is(err, source.ErrNotModified) {
+			return nil, operationErr(ErrNoNewAPK, false, "no new APKs")
+		}
 		if contextErr := contextOperationError(ctx.Err(), "fetch"); contextErr != nil {
 			return nil, contextErr
 		}
@@ -167,6 +174,11 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 			return nil, wrapOperationError(sentinel, lastDownloadError, retryable, "download APK candidates")
 		}
 		return nil, operationErr(ErrNoAPK, false, "no candidate passed APK verification")
+	}
+	if !config.SkipETag {
+		if committer, ok := src.(source.CacheCommitter); ok {
+			_ = committer.CommitCache()
+		}
 	}
 	return results, nil
 }

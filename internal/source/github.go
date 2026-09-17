@@ -2,14 +2,22 @@ package source
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/zapstore/zsp/internal/config"
 )
+
+// githubETagCache stores the ETag from /releases/latest for conditional requests.
+type githubETagCache struct {
+	ETag string `json:"etag"`
+}
 
 // GitHub implements Source for GitHub releases.
 type GitHub struct {
@@ -18,7 +26,11 @@ type GitHub struct {
 	repo               string
 	token              string
 	client             *http.Client
+	cacheDir           string
+	apiBase            string
+	SkipCache          bool // Set to true to bypass ETag checks
 	IncludePreReleases bool // Set to true to include pre-releases (--pre-release)
+	pendingETag        string
 }
 
 // NewGitHub creates a new GitHub source.
@@ -35,11 +47,12 @@ func NewGitHub(cfg *config.Config) (*GitHub, error) {
 	}
 
 	return &GitHub{
-		cfg:    cfg,
-		owner:  parts[0],
-		repo:   parts[1],
-		token:  config.GetEnv("GITHUB_TOKEN"),
-		client: newSecureHTTPClient(30 * time.Second),
+		cfg:      cfg,
+		owner:    parts[0],
+		repo:     parts[1],
+		token:    config.GetEnv("GITHUB_TOKEN"),
+		client:   newSecureHTTPClient(30 * time.Second),
+		cacheDir: sourceCacheDir("github"),
 	}, nil
 }
 
@@ -68,10 +81,68 @@ type githubAsset struct {
 	ContentType        string `json:"content_type"`
 }
 
+func (g *GitHub) cacheFilePath() string {
+	return filepath.Join(g.cacheDir, filepath.Base(g.owner)+"_"+filepath.Base(g.repo)+".json")
+}
+
+func (g *GitHub) loadCache() *githubETagCache {
+	data, err := os.ReadFile(g.cacheFilePath())
+	if err != nil {
+		return nil
+	}
+	var cache githubETagCache
+	if err := json.Unmarshal(data, &cache); err != nil || cache.ETag == "" {
+		return nil
+	}
+	return &cache
+}
+
+func (g *GitHub) saveCache(etag string) error {
+	if err := os.MkdirAll(g.cacheDir, 0o755); err != nil {
+		return err
+	}
+	data, err := json.Marshal(githubETagCache{ETag: etag})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(g.cacheFilePath(), data, 0o644)
+}
+
+// CommitCache persists the ETag from the last successful fetch.
+func (g *GitHub) CommitCache() error {
+	if g.pendingETag == "" {
+		return nil
+	}
+	if err := g.saveCache(g.pendingETag); err != nil {
+		return err
+	}
+	g.pendingETag = ""
+	return nil
+}
+
+func (g *GitHub) apiURL(format string, args ...any) string {
+	base := g.apiBase
+	if base == "" {
+		base = "https://api.github.com"
+	}
+	return base + fmt.Sprintf(format, args...)
+}
+
+func (g *GitHub) setGitHubHeaders(req *http.Request) {
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if g.token != "" {
+		req.Header.Set("Authorization", "Bearer "+g.token)
+	}
+}
+
 // FetchLatestRelease fetches the latest release from GitHub that contains valid APKs.
 // First tries /releases/latest (single request, fast path). If that release is a draft,
 // a pre-release (when not opted in), or carries no valid APKs, falls back to scanning
 // the most recent releases list to find one that qualifies.
+// Uses conditional requests (ETag/If-None-Match) on the fast path. Returns
+// ErrNotModified if the latest release has not changed since the last fetch.
+// Set SkipCache to true to bypass the ETag check and always fetch fresh data.
 //
 // Note: /releases/latest always returns the latest stable release — GitHub excludes
 // prereleases from that endpoint by design. When IncludePreReleases is set we skip
@@ -82,17 +153,15 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		return g.fetchLatestFromList(ctx)
 	}
 
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", g.owner, g.repo)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", g.apiURL("/repos/%s/%s/releases/latest", g.owner, g.repo), nil)
 	if err != nil {
 		return nil, err
 	}
-
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	if g.token != "" {
-		req.Header.Set("Authorization", "Bearer "+g.token)
+	g.setGitHubHeaders(req)
+	if !g.SkipCache {
+		if cache := g.loadCache(); cache != nil {
+			req.Header.Set("If-None-Match", cache.ETag)
+		}
 	}
 
 	resp, err := g.client.Do(req)
@@ -102,6 +171,8 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	defer resp.Body.Close()
 
 	switch resp.StatusCode {
+	case http.StatusNotModified:
+		return nil, ErrNotModified
 	case http.StatusNotFound:
 		return nil, fmt.Errorf("no releases found for %s/%s", g.owner, g.repo)
 	case http.StatusForbidden:
@@ -125,11 +196,15 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	if !ghRelease.Draft && !(ghRelease.Prerelease && !g.IncludePreReleases) && g.matchesReleaseFilter(ghRelease.TagName, ghRelease.Name) {
 		release := g.convertRelease(&ghRelease)
 		if HasValidAPKs(release.Assets) {
+			if etag := resp.Header.Get("ETag"); etag != "" {
+				g.pendingETag = etag
+			}
 			return release, nil
 		}
 	}
 
 	// Fast path didn't yield a valid APK — fall back to scanning the release list.
+	// ETag is intentionally not cached here: the cached ETag is bound to /releases/latest.
 	return g.fetchLatestFromList(ctx)
 }
 
@@ -138,18 +213,11 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 // Used as a fallback when /releases/latest does not itself contain a valid APK
 // (e.g. repos that publish separate desktop and mobile releases).
 func (g *GitHub) fetchLatestFromList(ctx context.Context) (*Release, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases?per_page=%d", g.owner, g.repo, maxReleasesToCheck)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", g.apiURL("/repos/%s/%s/releases?per_page=%d", g.owner, g.repo, maxReleasesToCheck), nil)
 	if err != nil {
 		return nil, err
 	}
-
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	if g.token != "" {
-		req.Header.Set("Authorization", "Bearer "+g.token)
-	}
+	g.setGitHubHeaders(req)
 
 	resp, err := g.client.Do(req)
 	if err != nil {

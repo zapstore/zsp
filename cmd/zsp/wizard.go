@@ -76,7 +76,7 @@ func runWizard(ctx context.Context) int {
 	if isRepositorySuggestion(publish.config.Repository) {
 		spinner := ui.NewSpinner("Finding and inspecting APK releases...")
 		spinner.Start()
-		candidates, err = zsp.Fetch(ctx, publish.config.FetchConfig, zsp.FetchOptions{})
+		candidates, err = zsp.Fetch(ctx, wizardFetchConfig(publish.config.FetchConfig), zsp.FetchOptions{})
 		spinner.Stop()
 		if err != nil {
 			if err == ui.ErrInterrupted || errors.Is(err, context.Canceled) || errors.Is(err, huh.ErrUserAborted) {
@@ -97,7 +97,7 @@ func runWizard(ctx context.Context) int {
 		}
 		spinner := ui.NewSpinner("Finding and inspecting APK releases...")
 		spinner.Start()
-		candidates, err = zsp.Fetch(ctx, publish.config.FetchConfig, zsp.FetchOptions{})
+		candidates, err = zsp.Fetch(ctx, wizardFetchConfig(publish.config.FetchConfig), zsp.FetchOptions{})
 		spinner.Stop()
 		if err != nil {
 			return wizardError("No verified APK release found", err)
@@ -678,6 +678,11 @@ func wizardSigner(ctx context.Context) (nostrpkg.Signer, error) {
 
 type wizardPublishConfig struct {
 	config zsp.Config
+}
+
+func wizardFetchConfig(config zsp.FetchConfig) zsp.FetchConfig {
+	config.SkipETag = true
+	return config
 }
 
 func wizardConfigFromSourceCode(source string) (wizardPublishConfig, error) {

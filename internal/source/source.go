@@ -328,6 +328,35 @@ type Options struct {
 
 	// IncludePreReleases includes pre-releases when fetching the latest release (--pre-release).
 	IncludePreReleases bool
+
+	// SkipCache bypasses ETag/Last-Modified checks and does not persist a new ETag.
+	SkipCache bool
+}
+
+// ErrNotModified is returned when a cached ETag shows the release is unchanged.
+var ErrNotModified = errors.New("release not modified")
+
+// CacheCommitter persists pending ETag data after a successful Fetch.
+type CacheCommitter interface {
+	CommitCache() error
+}
+
+var userCacheDir = os.UserCacheDir
+
+// SetCacheDirForTest redirects ETag cache files into dir. The returned
+// function restores the previous cache directory.
+func SetCacheDirForTest(dir string) func() {
+	prev := userCacheDir
+	userCacheDir = func() (string, error) { return dir, nil }
+	return func() { userCacheDir = prev }
+}
+
+func sourceCacheDir(kind string) string {
+	dir, err := userCacheDir()
+	if err != nil {
+		dir = os.TempDir()
+	}
+	return filepath.Join(dir, "zsp", kind)
 }
 
 // New creates a new source based on the config.
@@ -352,6 +381,7 @@ func NewWithOptions(cfg *config.Config, opts Options) (Source, error) {
 			return nil, err
 		}
 		gh.IncludePreReleases = opts.IncludePreReleases
+		gh.SkipCache = opts.SkipCache
 		return gh, nil
 	case config.SourceGitLab:
 		gl, err := NewGitLab(cfg)
@@ -378,6 +408,7 @@ func NewWithOptions(cfg *config.Config, opts Options) (Source, error) {
 		if err != nil {
 			return nil, err
 		}
+		web.SkipCache = opts.SkipCache
 		return web, nil
 	default:
 		return nil, fmt.Errorf("unsupported source type: %s", sourceType)

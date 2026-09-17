@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -125,5 +126,49 @@ func TestExtractAssetURLAcceptsSafeExtractedURL(t *testing.T) {
 	}
 	if got != "https://cdn.example.com/app.apk" {
 		t.Fatalf("extractAssetURL() = %q, want %q", got, "https://cdn.example.com/app.apk")
+	}
+}
+
+func TestWebDirectURLReturnsErrNotModifiedForUnchangedETag(t *testing.T) {
+	const etag = `"abc123"`
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("If-None-Match") == etag {
+			writer.WriteHeader(http.StatusNotModified)
+			return
+		}
+		writer.Header().Set("ETag", etag)
+		writer.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	web := &Web{
+		cfg: &config.Config{
+			ReleaseSource: &config.ReleaseSource{
+				IsWebSource: true,
+				AssetURL:    server.URL + "/app.apk",
+			},
+		},
+		client:   newSecureHTTPClient(5 * time.Second),
+		cacheDir: t.TempDir(),
+	}
+
+	if _, err := web.FetchLatestRelease(t.Context()); err != nil {
+		t.Fatalf("first FetchLatestRelease() = %v", err)
+	}
+	if err := web.CommitCache(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := web.FetchLatestRelease(t.Context()); !errors.Is(err, ErrNotModified) {
+		t.Fatalf("second FetchLatestRelease() = %v, want ErrNotModified", err)
+	}
+
+	web.SkipCache = true
+	release, err := web.FetchLatestRelease(t.Context())
+	if err != nil {
+		t.Fatalf("SkipCache FetchLatestRelease() = %v", err)
+	}
+	if len(release.Assets) != 1 || release.Assets[0].URL != server.URL+"/app.apk" {
+		t.Fatalf("SkipCache assets = %+v", release.Assets)
 	}
 }

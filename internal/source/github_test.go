@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -107,6 +108,62 @@ func TestGitHubDownloadSendsBearerToken(t *testing.T) {
 	}
 	if asset.LocalPath != path {
 		t.Fatalf("asset.LocalPath = %q, want %q", asset.LocalPath, path)
+	}
+}
+
+func TestGitHubFetchLatestReleaseUsesETag(t *testing.T) {
+	const etag = `"rel-1"`
+	const body = `{"tag_name":"v1.0.0","name":"1.0.0","draft":false,"prerelease":false,"assets":[{"name":"app.apk","browser_download_url":"https://example.com/app.apk","size":1}]}`
+	var ifNone []string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		ifNone = append(ifNone, request.Header.Get("If-None-Match"))
+		if request.Header.Get("If-None-Match") == etag {
+			writer.WriteHeader(http.StatusNotModified)
+			return
+		}
+		writer.Header().Set("ETag", etag)
+		_, _ = writer.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+
+	github := &GitHub{
+		cfg:      &config.Config{},
+		owner:    "owner",
+		repo:     "repo",
+		client:   server.Client(),
+		cacheDir: t.TempDir(),
+		apiBase:  server.URL,
+	}
+
+	release, err := github.FetchLatestRelease(t.Context())
+	if err != nil {
+		t.Fatalf("first FetchLatestRelease() = %v", err)
+	}
+	if release.Version != "1.0.0" {
+		t.Fatalf("version = %q, want 1.0.0", release.Version)
+	}
+	if github.pendingETag != etag {
+		t.Fatalf("pendingETag = %q, want %q", github.pendingETag, etag)
+	}
+	if err := github.CommitCache(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = github.FetchLatestRelease(t.Context())
+	if !errors.Is(err, ErrNotModified) {
+		t.Fatalf("second FetchLatestRelease() = %v, want ErrNotModified", err)
+	}
+
+	github.SkipCache = true
+	release, err = github.FetchLatestRelease(t.Context())
+	if err != nil {
+		t.Fatalf("SkipCache FetchLatestRelease() = %v", err)
+	}
+	if release.Version != "1.0.0" {
+		t.Fatalf("SkipCache version = %q, want 1.0.0", release.Version)
+	}
+	if len(ifNone) != 3 || ifNone[0] != "" || ifNone[1] != etag || ifNone[2] != "" {
+		t.Fatalf("If-None-Match headers = %v, want [\"\", %q, \"\"]", ifNone, etag)
 	}
 }
 

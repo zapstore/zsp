@@ -20,7 +20,10 @@ type FetchConfig struct {
 	ReleaseFilter     string         `json:"release_filter"`
 	Match             string         `json:"match"`
 	PrereleaseChannel string         `json:"prerelease_channel"`
-	baseDir           string
+	// SkipETag disables conditional requests. When false (the default), Fetch
+	// sends stored ETags and returns ErrNoNewAPK if the source reports no change.
+	SkipETag bool `json:"skip_etag"`
+	baseDir  string
 }
 
 // PublishConfig contains application metadata used to build NIP-82 events.
@@ -206,6 +209,7 @@ var (
 	ErrSourceFailed         = errors.New("source failed")
 	ErrTooManyCandidates    = errors.New("too many APK candidates")
 	ErrNoAPK                = errors.New("no APK found")
+	ErrNoNewAPK             = errors.New("no new APKs")
 	ErrInvalidAPK           = errors.New("APK is invalid")
 	ErrAPKNotChecked        = errors.New("APK was not returned by Fetch")
 	ErrAPKSelectionRequired = errors.New("APK selection required")

@@ -2,10 +2,14 @@ package source
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -16,10 +20,20 @@ import (
 	"github.com/zapstore/zsp/internal/config"
 )
 
+// webCache stores HTTP caching headers for a versionless direct URL.
+type webCache struct {
+	ETag          string `json:"etag,omitempty"`
+	LastModified  string `json:"last_modified,omitempty"`
+	ContentLength int64  `json:"content_length,omitempty"`
+}
+
 // Web implements Source for web scraping with version extraction.
 type Web struct {
-	cfg    *config.Config
-	client *http.Client
+	cfg          *config.Config
+	client       *http.Client
+	cacheDir     string
+	SkipCache    bool
+	pendingCache *webCache
 }
 
 // NewWeb creates a new web scraping source.
@@ -29,8 +43,9 @@ func NewWeb(cfg *config.Config) (*Web, error) {
 	}
 
 	return &Web{
-		cfg:    cfg,
-		client: newSecureHTTPClient(30 * time.Second),
+		cfg:      cfg,
+		client:   newSecureHTTPClient(30 * time.Second),
+		cacheDir: sourceCacheDir("web"),
 	}, nil
 }
 
@@ -146,6 +161,22 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 
 		// Filename from redirect target (e.g. Telegram.apk); download still uses assetURL
 		nameURL = finalURL
+
+		if !w.SkipCache {
+			cache := w.loadCache()
+			if cache != nil {
+				modified, etag, lastMod, contentLen, cacheErr := w.checkHTTPCacheHeaders(ctx, finalURL, cache.ETag, cache.LastModified, cache.ContentLength)
+				if cacheErr != nil {
+					return nil, fmt.Errorf("failed to check for updates: %w", cacheErr)
+				}
+				if !modified {
+					return nil, ErrNotModified
+				}
+				w.pendingCache = &webCache{ETag: etag, LastModified: lastMod, ContentLength: contentLen}
+			} else if _, etag, lastMod, contentLen, cacheErr := w.checkHTTPCacheHeaders(ctx, finalURL, "", "", 0); cacheErr == nil {
+				w.pendingCache = &webCache{ETag: etag, LastModified: lastMod, ContentLength: contentLen}
+			}
+		}
 
 		// Version will be extracted from APK after download
 		version = ""
@@ -385,6 +416,95 @@ func extractWithPattern(value, pattern string) (string, error) {
 	}
 
 	return matches[1], nil
+}
+
+func (w *Web) cacheFilePath() string {
+	cacheKey := w.cfg.ReleaseSource.URL
+	if cacheKey == "" {
+		cacheKey = w.cfg.ReleaseSource.AssetURL
+	}
+	if cacheKey == "" && w.cfg.ReleaseSource.Asset != nil {
+		cacheKey = w.cfg.ReleaseSource.Asset.URL
+	}
+	sum := sha256.Sum256([]byte(cacheKey))
+	return filepath.Join(w.cacheDir, hex.EncodeToString(sum[:8])+".json")
+}
+
+func (w *Web) loadCache() *webCache {
+	data, err := os.ReadFile(w.cacheFilePath())
+	if err != nil {
+		return nil
+	}
+	var cache webCache
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return nil
+	}
+	if cache.ETag == "" && cache.LastModified == "" && cache.ContentLength == 0 {
+		return nil
+	}
+	return &cache
+}
+
+func (w *Web) saveCache(cache *webCache) error {
+	if err := os.MkdirAll(w.cacheDir, 0o755); err != nil {
+		return err
+	}
+	data, err := json.Marshal(cache)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(w.cacheFilePath(), data, 0o644)
+}
+
+// CommitCache persists HTTP cache headers from the last successful fetch.
+func (w *Web) CommitCache() error {
+	if w.pendingCache == nil {
+		return nil
+	}
+	if err := w.saveCache(w.pendingCache); err != nil {
+		return err
+	}
+	w.pendingCache = nil
+	return nil
+}
+
+// checkHTTPCacheHeaders reports whether a resource has changed using
+// ETag, Last-Modified, or Content-Length.
+func (w *Web) checkHTTPCacheHeaders(ctx context.Context, rawURL, etag, lastModified string, contentLength int64) (bool, string, string, int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, rawURL, nil)
+	if err != nil {
+		return true, "", "", 0, err
+	}
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
+	if lastModified != "" {
+		req.Header.Set("If-Modified-Since", lastModified)
+	}
+
+	resp, err := w.client.Do(req)
+	if err != nil {
+		return true, "", "", 0, fmt.Errorf("HEAD request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotModified {
+		return false, etag, lastModified, contentLength, nil
+	}
+
+	newETag := resp.Header.Get("ETag")
+	newLastMod := resp.Header.Get("Last-Modified")
+	newContentLen := resp.ContentLength
+	if etag != "" && newETag != "" && etag == newETag {
+		return false, newETag, newLastMod, newContentLen, nil
+	}
+	if lastModified != "" && newLastMod != "" && lastModified == newLastMod {
+		return false, newETag, newLastMod, newContentLen, nil
+	}
+	if etag == "" && lastModified == "" && contentLength > 0 && newContentLen > 0 && contentLength == newContentLen {
+		return false, newETag, newLastMod, newContentLen, nil
+	}
+	return true, newETag, newLastMod, newContentLen, nil
 }
 
 // Download downloads an APK from the web.

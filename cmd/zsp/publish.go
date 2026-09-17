@@ -66,7 +66,11 @@ func publishCommand(ctx context.Context, opts *cli.Options) int {
 			reporter.Report(progress)
 		}
 	}
-	candidates, err := zsp.Fetch(ctx, config.FetchConfig, zsp.FetchOptions{
+	fetchConfig := config.FetchConfig
+	if opts.Publish.OverwriteRelease || opts.Publish.Check {
+		fetchConfig.SkipETag = true
+	}
+	candidates, err := zsp.Fetch(ctx, fetchConfig, zsp.FetchOptions{
 		OnProgress: progress,
 	})
 	if err != nil {
@@ -342,6 +346,12 @@ func writePublishError(opts *cli.Options, err error, candidates []*zsp.APK, part
 			Reason:  "Select one verified APK by its exact hash.",
 		}}
 	}
+	if code == "no_new_apk" {
+		body.NextSteps = []cliNextStep{{
+			Command: "zsp publish --overwrite-release",
+			Reason:  "Fetch and publish even if the source ETag is unchanged.",
+		}}
+	}
 	var result *zsp.PublishResult
 	if len(partial) > 0 {
 		result = partial[0]
@@ -361,6 +371,8 @@ func writePublishError(opts *cli.Options, err error, candidates []*zsp.APK, part
 				fmt.Fprintln(os.Stderr, ui.StatusLine("info", candidate.Filename+" "+candidate.Hash))
 			}
 			fmt.Fprintln(os.Stderr, ui.StatusLine("info", ui.RenderCommand("zsp publish --apk-hash <sha256>")))
+		} else if code == "no_new_apk" {
+			fmt.Fprintln(os.Stderr, ui.StatusLine("info", ui.RenderCommand("zsp publish --overwrite-release")))
 		}
 	}
 	if errors.Is(err, context.Canceled) {
@@ -401,6 +413,8 @@ func publishErrorCode(err error) string {
 		return "source_failed"
 	case errors.Is(err, zsp.ErrNoAPK):
 		return "no_apk"
+	case errors.Is(err, zsp.ErrNoNewAPK):
+		return "no_new_apk"
 	case errors.Is(err, zsp.ErrTooManyCandidates):
 		return "too_many_candidates"
 	case errors.Is(err, zsp.ErrInvalidAPK):
@@ -434,6 +448,8 @@ func safeSummary(code string) string {
 		return "The release source could not be read."
 	case "no_apk":
 		return "No APK passed source filtering and verification."
+	case "no_new_apk":
+		return "The release source has not changed since the last fetch."
 	case "too_many_candidates":
 		return "More than ten APK candidates matched; narrow the match pattern."
 	case "invalid_apk":
