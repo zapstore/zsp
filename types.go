@@ -90,6 +90,7 @@ type APK struct {
 	CertificateHash string   `json:"certificate_hash"`
 	LineageHashes   []string `json:"lineage_hashes,omitempty"`
 	Architectures   []string `json:"architectures"`
+	Permissions     []string `json:"permissions,omitempty"`
 
 	ownership   *apkOwnership
 	fetchConfig FetchConfig

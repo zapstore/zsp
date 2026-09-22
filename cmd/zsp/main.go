@@ -164,6 +164,7 @@ type apkMetadataDocument struct {
 	TargetSDK       int32    `json:"target_sdk"`
 	Label           string   `json:"label"`
 	Architectures   []string `json:"architectures"`
+	Permissions     []string `json:"permissions,omitempty"`
 	CertificateHash string   `json:"certificate_hash"`
 	Hash            string   `json:"hash"`
 	Size            int64    `json:"size"`
@@ -177,7 +178,7 @@ func extractAPKMetadata(path string, envelope bool) error {
 	output := apkMetadataDocument{
 		PackageID: info.PackageID, VersionName: info.VersionName, VersionCode: info.VersionCode,
 		MinSDK: info.MinSDK, TargetSDK: info.TargetSDK, Label: info.Label,
-		Architectures: info.Architectures, CertificateHash: info.CertFingerprint,
+		Architectures: info.Architectures, Permissions: info.Permissions, CertificateHash: info.CertFingerprint,
 		Hash: info.SHA256, Size: info.FileSize,
 	}
 	if envelope {
