@@ -146,6 +146,7 @@ type PublishOptions struct {
 	SkipMediaCompression bool           `json:"skip_media_compression"`
 	SkipProofCheck       bool           `json:"skip_proof_check"`
 	OverwriteRelease     bool           `json:"overwrite_release"`
+	OverwriteAppEvent    bool           `json:"overwrite_app_event"`
 	Preview              bool           `json:"preview"`
 	BrowserPort          int            `json:"browser_port"`
 	OnProgress           func(Progress) `json:"-"`

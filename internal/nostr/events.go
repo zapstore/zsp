@@ -3,6 +3,7 @@ package nostr
 
 import (
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -127,6 +128,51 @@ func BuildAppMetadataEvent(meta *AppMetadata, pubkey string) *nostr.Event {
 		Tags:      tags,
 		Content:   meta.Description, // Description goes in content per NIP-82
 	}
+}
+
+// SameAppMetadata reports whether two application events have the same body.
+// created_at, id, and sig are ignored. Tag order is ignored.
+func SameAppMetadata(a, b *nostr.Event) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.Kind != b.Kind || a.PubKey != b.PubKey || a.Content != b.Content {
+		return false
+	}
+	return equalTags(a.Tags, b.Tags)
+}
+
+func equalTags(a, b nostr.Tags) bool {
+	left := sortedTags(a)
+	right := sortedTags(b)
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if !slices.Equal(left[index], right[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func sortedTags(tags nostr.Tags) nostr.Tags {
+	result := make(nostr.Tags, len(tags))
+	for index, tag := range tags {
+		result[index] = slices.Clone(tag)
+	}
+	slices.SortFunc(result, compareTags)
+	return result
+}
+
+func compareTags(a, b nostr.Tag) int {
+	limit := min(len(a), len(b))
+	for index := 0; index < limit; index++ {
+		if cmp := strings.Compare(a[index], b[index]); cmp != 0 {
+			return cmp
+		}
+	}
+	return len(a) - len(b)
 }
 
 // versionOrCode returns version, or the decimal version_code when version is empty.

@@ -189,6 +189,23 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 	if options.SkipAppEvent {
 		events.AppMetadata = nil
 		events.SetApplicationPubkey(applicationPubkey)
+	} else if !options.OverwriteAppEvent {
+		appEvents, appWarnings, appErr := publisher.FetchApplicationEvents(ctx, parsed.PackageID, []string{signer.PublicKey()})
+		if appErr != nil {
+			if contextErr := contextOperationError(ctx.Err(), "find existing application event"); contextErr != nil {
+				return nil, contextErr
+			}
+			result.Warnings = append(result.Warnings, safeRelayQueryWarnings("application event", appWarnings)...)
+			result.Warnings = append(result.Warnings, "couldn't verify existing application event")
+		} else {
+			result.Warnings = append(result.Warnings, safeRelayQueryWarnings("application event", appWarnings)...)
+			existing := newestAuthorizedApplication(appEvents, parsed.PackageID, map[string]struct{}{signer.PublicKey(): {}})
+			if internalnostr.SameAppMetadata(existing, events.AppMetadata) {
+				events.AppMetadata = nil
+				media.blobs = nil
+				result.Warnings = append(result.Warnings, "application event unchanged")
+			}
+		}
 	}
 	internalnostr.FinalizeEventSet(events, firstRelay(relayURLs))
 	if options.Preview {

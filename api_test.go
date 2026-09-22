@@ -45,7 +45,7 @@ func TestPublicStructFieldsMatchContract(t *testing.T) {
 		{FetchOptions{}, []string{"OnProgress", "SkipHTTPCache"}},
 		{APK{}, []string{"Hash", "Filename", "SourceURL", "Size", "AppID", "VersionName", "VersionCode", "MinSDK", "TargetSDK", "Name", "CertificateHash", "LineageHashes", "Architectures"}},
 		{Progress{}, []string{"Operation", "Phase", "Target", "Completed", "Total"}},
-		{PublishOptions{}, []string{"BlossomURL", "Relays", "Channel", "Commit", "SkipAppEvent", "SkipMediaCompression", "SkipProofCheck", "OverwriteRelease", "Preview", "BrowserPort", "OnProgress"}},
+		{PublishOptions{}, []string{"BlossomURL", "Relays", "Channel", "Commit", "SkipAppEvent", "SkipMediaCompression", "SkipProofCheck", "OverwriteRelease", "OverwriteAppEvent", "Preview", "BrowserPort", "OnProgress"}},
 		{EventIDs{}, []string{"Application", "Release", "Assets"}},
 		{PublishResult{}, []string{"ID", "Status", "AppID", "CertificateHash", "LineageHashes", "Events", "Uploads", "Relays", "Warnings"}},
 		{BlobResult{}, []string{"URL", "Hash", "Size", "Type", "Uploaded", "Accepted", "Message"}},

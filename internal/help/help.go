@@ -129,6 +129,7 @@ func PublishHelp() string {
 
 	b.WriteString(renderBold("VALIDATION FLAGS") + "\n")
 	writeFlag(&b, "--overwrite-release", "Allow replacing an equal version_code; never allows a downgrade")
+	writeFlag(&b, "--overwrite-app-event", "Publish kind 32267 even if the application event is unchanged")
 	writeFlag(&b, "--skip-metadata", "Skip fetching metadata from external sources")
 	b.WriteString("\n")
 

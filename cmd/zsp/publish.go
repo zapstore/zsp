@@ -88,6 +88,7 @@ func publishCommand(ctx context.Context, opts *cli.Options) int {
 		SkipAppEvent:         opts.Publish.SkipAppEvent,
 		SkipMediaCompression: opts.Publish.NoCompress,
 		OverwriteRelease:     opts.Publish.OverwriteRelease,
+		OverwriteAppEvent:    opts.Publish.OverwriteAppEvent,
 		Preview:              !opts.Publish.SkipPreview && !opts.Publish.Quiet && !opts.Global.JSON && term.IsTerminal(int(os.Stdin.Fd())),
 		BrowserPort:          opts.Publish.Port,
 		OnProgress:           progress,

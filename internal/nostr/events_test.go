@@ -82,6 +82,55 @@ func TestBuildAppMetadataEvent(t *testing.T) {
 	}
 }
 
+func TestSameAppMetadata(t *testing.T) {
+	base := BuildAppMetadataEvent(&AppMetadata{
+		PackageID:   "com.example.app",
+		Name:        "Example App",
+		Description: "A test application",
+		Summary:     "Test app",
+		IconURL:     "https://cdn.example.com/icon.png",
+		ImageURLs:   []string{"https://cdn.example.com/a.png", "https://cdn.example.com/b.png"},
+		Platforms:   []string{"android-arm64-v8a"},
+	}, "aa")
+
+	same := *base
+	same.CreatedAt = base.CreatedAt + 10
+	same.ID = "other-id"
+	same.Sig = "other-sig"
+	same.Tags = append(nostr.Tags{}, base.Tags[1], base.Tags[0])
+	same.Tags = append(same.Tags, base.Tags[2:]...)
+	if !SameAppMetadata(base, &same) {
+		t.Fatal("created_at, id, sig, and tag order must not count")
+	}
+
+	if SameAppMetadata(base, nil) || SameAppMetadata(nil, base) || !SameAppMetadata(nil, nil) {
+		t.Fatal("nil handling")
+	}
+
+	otherKind := *base
+	otherKind.Kind = KindRelease
+	otherPubkey := *base
+	otherPubkey.PubKey = "bb"
+	otherContent := *base
+	otherContent.Content = "changed"
+	otherTag := *base
+	otherTag.Tags = append(nostr.Tags{}, base.Tags...)
+	otherTag.Tags[0] = nostr.Tag{"d", "com.other.app"}
+	extraTag := *base
+	extraTag.Tags = append(append(nostr.Tags{}, base.Tags...), nostr.Tag{"license", "MIT"})
+	for name, event := range map[string]*nostr.Event{
+		"kind":    &otherKind,
+		"pubkey":  &otherPubkey,
+		"content": &otherContent,
+		"tag":     &otherTag,
+		"extra":   &extraTag,
+	} {
+		if SameAppMetadata(base, event) {
+			t.Fatalf("%s change must not compare equal", name)
+		}
+	}
+}
+
 func TestBuildReleaseEvent(t *testing.T) {
 	meta := &ReleaseMetadata{
 		PackageID:      "com.example.app",

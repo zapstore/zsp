@@ -61,6 +61,20 @@ func TestParseCommand_AcceptsRootFlags(t *testing.T) {
 	}
 }
 
+func TestParseCommand_AcceptsOverwriteAppEvent(t *testing.T) {
+	oldArgs := os.Args
+	t.Cleanup(func() { os.Args = oldArgs })
+	os.Args = []string{"zsp", "publish", "--overwrite-app-event", "zapstore.yaml"}
+
+	opts := ParseCommand()
+	if opts.FlagParseError != nil {
+		t.Fatal(opts.FlagParseError)
+	}
+	if !opts.Publish.OverwriteAppEvent {
+		t.Fatal("expected OverwriteAppEvent")
+	}
+}
+
 func TestParseCommand_AcceptsChannelFlags(t *testing.T) {
 	oldArgs := os.Args
 	t.Cleanup(func() { os.Args = oldArgs })
