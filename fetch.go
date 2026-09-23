@@ -230,6 +230,20 @@ func newAPKOwnership(path, tempDir string, managed bool) *apkOwnership {
 	return &apkOwnership{path: path, tempDir: tempDir, managed: managed}
 }
 
+// Path is the verified APK on disk. It stays valid until Close.
+func (apk *APK) Path() (string, error) {
+	if apk == nil || apk.ownership == nil {
+		return "", operationErr(nil, false, "apk file is not open")
+	}
+	state := apk.ownership
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.closed || state.path == "" {
+		return "", operationErr(nil, false, "apk file is not open")
+	}
+	return state.path, nil
+}
+
 // Close releases temporary files owned by ZSP. It never deletes a local APK.
 func (apk *APK) Close() error {
 	if apk == nil || apk.ownership == nil {

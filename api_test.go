@@ -986,6 +986,13 @@ func TestFetchLocalAPKReturnsVerifiedIdentity(t *testing.T) {
 	if candidate.Hash == "" || candidate.AppID == "" || candidate.CertificateHash == "" {
 		t.Fatalf("missing verified identity: %+v", candidate)
 	}
+	got, err := candidate.Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != path {
+		t.Fatalf("Path() = %q, want %q", got, path)
+	}
 	if err := candidate.Close(); err != nil {
 		t.Fatal(err)
 	}
