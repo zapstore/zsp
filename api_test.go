@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -516,6 +517,82 @@ func TestRelayPublicationErrorsRemainClassifiable(t *testing.T) {
 			var operationError Error
 			if !errors.As(err, &operationError) || operationError.Retryable() != test.retryable {
 				t.Fatalf("unexpected retryability for %v", err)
+			}
+		})
+	}
+}
+
+func TestUploadErrorDetailSurfacesStatusAndReason(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"status only", &blossom.StatusError{Err: blossom.ErrUploadRejected, StatusCode: 501}, ": status 501"},
+		{"status and reason", &blossom.StatusError{Err: blossom.ErrPreflightRejected, StatusCode: 401, Reason: "expected server hostname localhost"}, ": status 401: expected server hostname localhost"},
+		{"blank reason", &blossom.StatusError{Err: blossom.ErrUploadRejected, StatusCode: 404, Reason: "   "}, ": status 404"},
+		{"credentialed url is redacted", &blossom.StatusError{Err: blossom.ErrUploadRejected, StatusCode: 400, Reason: "cannot store wss://relay.example/?token=secret"}, ": status 400: cannot store wss://relay.example/"},
+		{"unrelated error", errors.New("upload failed: connection reset"), ""},
+		{
+			"descriptor mismatch",
+			fmt.Errorf("%w: url %q is not on the configured server %q", blossom.ErrInvalidDescriptor, "https://localhost/deadbeef", "http://localhost:3335"),
+			`: url "https://localhost/deadbeef" is not on the configured server "http://localhost:3335"`,
+		},
+		{
+			"descriptor url is redacted",
+			fmt.Errorf("%w: url %q does not reference blob %q", blossom.ErrInvalidDescriptor, "https://evil.example/?token=secret", "deadbeef"),
+			`: url "https://evil.example/" does not reference blob "deadbeef"`,
+		},
+		{"bare descriptor error", blossom.ErrInvalidDescriptor, ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := uploadErrorDetail(test.err); got != test.want {
+				t.Fatalf("uploadErrorDetail() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestUploadFailureMessageNamesStatus(t *testing.T) {
+	cause := &blossom.StatusError{Err: blossom.ErrPreflightRejected, StatusCode: 401, Reason: "invalid event json"}
+	err := wrapOperationError(ErrUploadRejected, cause, false, "upload icon"+uploadErrorDetail(cause))
+	const want = "blob upload rejected: upload icon: status 401: invalid event json"
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+	if !errors.Is(err, ErrUploadRejected) {
+		t.Fatalf("sentinel lost: %v", err)
+	}
+}
+
+func TestDescriptorMismatchNamesDifferingFields(t *testing.T) {
+	tests := []struct {
+		name string
+		got  blossom.UploadResult
+		want string
+	}{
+		{
+			"identical",
+			blossom.UploadResult{URL: "https://cdn.example/deadbeef.png", SHA256: "deadbeef", Size: 4, Type: "image/png"},
+			"",
+		},
+		{
+			"url only",
+			blossom.UploadResult{URL: "https://cdn.example/deadbeef", SHA256: "deadbeef", Size: 4, Type: "image/png"},
+			": mismatch in url",
+		},
+		{
+			"every field",
+			blossom.UploadResult{URL: "https://evil.example/other", SHA256: "other", Size: 5, Type: "image/jpeg"},
+			": mismatch in url, sha256, size, type",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := descriptorMismatch(&test.got, "https://cdn.example/deadbeef.png", "deadbeef", 4, "image/png")
+			if got != test.want {
+				t.Fatalf("descriptorMismatch() = %q, want %q", got, test.want)
 			}
 		})
 	}

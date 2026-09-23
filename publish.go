@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -264,15 +266,15 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 				Accepted: false, Message: "upload failed",
 			})
 			sentinel, retryable := blossomErrorClassification(uploadErr)
-			return result, wrapOperationError(sentinel, uploadErr, retryable, "upload "+blob.label)
+			return result, wrapOperationError(sentinel, uploadErr, retryable, "upload "+blob.label+uploadErrorDetail(uploadErr))
 		}
-		if upload.URL != blob.url || upload.SHA256 != blob.hash || upload.Size != int64(len(blob.data)) || upload.Type != blob.mimeType {
+		if mismatch := descriptorMismatch(upload, blob.url, blob.hash, int64(len(blob.data)), blob.mimeType); mismatch != "" {
 			result.Status = statusAfterExternal(result)
 			result.Uploads = append(result.Uploads, BlobResult{
 				URL: upload.URL, Hash: upload.SHA256, Size: upload.Size, Type: upload.Type,
 				Accepted: false, Message: "Blossom returned an unexpected descriptor",
 			})
-			return result, operationErr(ErrTemporaryFailure, true, "Blossom returned an invalid descriptor for %s", blob.label)
+			return result, operationErr(ErrTemporaryFailure, true, "Blossom returned an invalid descriptor for %s%s", blob.label, mismatch)
 		}
 		result.Uploads = append(result.Uploads, BlobResult{
 			URL: upload.URL, Hash: upload.SHA256, Size: upload.Size, Type: upload.Type,
@@ -293,17 +295,17 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 			Uploaded: uploadedBytes, Accepted: false, Message: "upload failed",
 		})
 		sentinel, retryable := blossomErrorClassification(err)
-		return result, wrapOperationError(sentinel, err, retryable, "upload APK")
+		return result, wrapOperationError(sentinel, err, retryable, "upload APK"+uploadErrorDetail(err))
 	}
 	expectedAPKURL := blossomURL + "/" + verified.hash + ".apk"
-	if upload.URL != expectedAPKURL || upload.SHA256 != verified.hash || upload.Size != parsed.FileSize ||
-		upload.Type != "application/vnd.android.package-archive" {
+	if mismatch := descriptorMismatch(upload, expectedAPKURL, verified.hash, parsed.FileSize,
+		"application/vnd.android.package-archive"); mismatch != "" {
 		result.Status = statusAfterExternal(result)
 		result.Uploads = append(result.Uploads, BlobResult{
 			URL: upload.URL, Hash: upload.SHA256, Size: upload.Size, Type: upload.Type,
 			Accepted: false, Message: "Blossom returned an unexpected descriptor",
 		})
-		return result, operationErr(ErrTemporaryFailure, true, "Blossom returned an invalid APK descriptor")
+		return result, operationErr(ErrTemporaryFailure, true, "Blossom returned an invalid APK descriptor%s", mismatch)
 	}
 	result.Uploads = append(result.Uploads, BlobResult{
 		URL: upload.URL, Hash: upload.SHA256, Size: upload.Size,
@@ -381,6 +383,87 @@ func blossomErrorClassification(err error) (error, bool) {
 		return ErrSourceFailed, false
 	}
 	return networkErrorClassification(err)
+}
+
+// uploadErrorDetail renders why Blossom rejected an upload: the HTTP status and
+// server-supplied reason for a rejected request, or the specific disagreement
+// for a descriptor that passed the status check but failed validation. A
+// failure that would otherwise read as a bare "blob upload rejected" says what
+// actually went wrong. Server text and any URL in it are reduced to their
+// credential-free forms first.
+func uploadErrorDetail(err error) string {
+	var statusError *blossom.StatusError
+	if errors.As(err, &statusError) {
+		detail := fmt.Sprintf(": status %d", statusError.StatusCode)
+		if reason := publicReason(statusError.Reason); reason != "" {
+			detail += ": " + reason
+		}
+		return detail
+	}
+	if reason := publicReason(descriptorReason(err)); reason != "" {
+		return ": " + reason
+	}
+	return ""
+}
+
+// descriptorReason returns the specific disagreement reported by a descriptor
+// validation error, without the sentinel prefix, or "" when err is not one.
+func descriptorReason(err error) string {
+	if !errors.Is(err, blossom.ErrInvalidDescriptor) {
+		return ""
+	}
+	prefix := blossom.ErrInvalidDescriptor.Error() + ": "
+	if !strings.HasPrefix(err.Error(), prefix) {
+		return ""
+	}
+	return strings.TrimPrefix(err.Error(), prefix)
+}
+
+// descriptorMismatch names the fields where the descriptor a server returned
+// disagrees with the upload zsp performed. The client validates every field
+// against the request already, so this reports the stricter exact-URL check.
+func descriptorMismatch(got *blossom.UploadResult, wantURL, wantHash string, wantSize int64, wantType string) string {
+	var different []string
+	if got.URL != wantURL {
+		different = append(different, "url")
+	}
+	if got.SHA256 != wantHash {
+		different = append(different, "sha256")
+	}
+	if got.Size != wantSize {
+		different = append(different, "size")
+	}
+	if got.Type != wantType {
+		different = append(different, "type")
+	}
+	if len(different) == 0 {
+		return ""
+	}
+	return ": mismatch in " + strings.Join(different, ", ")
+}
+
+// reasonURLPattern matches absolute URLs in server-supplied reason text. Quotes
+// are excluded because reasons often quote a URL.
+var reasonURLPattern = regexp.MustCompile(`\w+://[^\s"']+`)
+
+// publicReason strips credentials, query parameters, and fragments from every
+// URL in reason text, mirroring publicRelayURL: a server reason may echo a
+// configured endpoint that carries a token.
+func publicReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return ""
+	}
+	return reasonURLPattern.ReplaceAllStringFunc(reason, func(candidate string) string {
+		parsed, err := url.Parse(candidate)
+		if err != nil {
+			return "URL"
+		}
+		parsed.User = nil
+		parsed.RawQuery = ""
+		parsed.Fragment = ""
+		return parsed.String()
+	})
 }
 
 func networkErrorClassification(err error) (error, bool) {
