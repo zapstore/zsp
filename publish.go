@@ -395,13 +395,26 @@ func uploadErrorDetail(err error) string {
 	var statusError *blossom.StatusError
 	if errors.As(err, &statusError) {
 		detail := fmt.Sprintf(": status %d", statusError.StatusCode)
-		if reason := publicReason(statusError.Reason); reason != "" {
+		if reason := publicDetail(statusError.Reason); reason != "" {
 			detail += ": " + reason
 		}
 		return detail
 	}
-	if reason := publicReason(descriptorReason(err)); reason != "" {
+	if reason := publicDetail(descriptorReason(err)); reason != "" {
 		return ": " + reason
+	}
+	return ""
+}
+
+// causeDetail renders an error's message as a suffix for an operation error,
+// which wrapOperationError would otherwise discard, so callers can see why
+// image or media preparation failed instead of just which step failed.
+func causeDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	if detail := publicDetail(err.Error()); detail != "" {
+		return ": " + detail
 	}
 	return ""
 }
@@ -446,15 +459,15 @@ func descriptorMismatch(got *blossom.UploadResult, wantURL, wantHash string, wan
 // are excluded because reasons often quote a URL.
 var reasonURLPattern = regexp.MustCompile(`\w+://[^\s"']+`)
 
-// publicReason strips credentials, query parameters, and fragments from every
-// URL in reason text, mirroring publicRelayURL: a server reason may echo a
-// configured endpoint that carries a token.
-func publicReason(reason string) string {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
+// publicDetail strips credentials, query parameters, and fragments from every
+// URL in arbitrary detail text, mirroring publicRelayURL: text from a server or
+// a fetch may echo a configured endpoint that carries a token.
+func publicDetail(detail string) string {
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
 		return ""
 	}
-	return reasonURLPattern.ReplaceAllStringFunc(reason, func(candidate string) string {
+	return reasonURLPattern.ReplaceAllStringFunc(detail, func(candidate string) string {
 		parsed, err := url.Parse(candidate)
 		if err != nil {
 			return "URL"

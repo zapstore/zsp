@@ -47,7 +47,7 @@ func prepareMedia(ctx context.Context, config PublishConfig, apkInfo *apk.APKInf
 	} else if len(apkInfo.Icon) > 0 {
 		processed, err := media.Process(apkInfo.Icon, "image/png", media.IconMaxWidth, compress)
 		if err != nil {
-			return mediaPlan{}, wrapOperationError(ErrInvalidConfig, err, false, "process APK icon")
+			return mediaPlan{}, wrapOperationError(ErrInvalidConfig, err, false, "process APK icon"+causeDetail(err))
 		}
 		blob := newPreparedBlob("icon", processed.Data, processed.Hash, processed.MimeType, blossomURL)
 		plan.iconURL = blob.url
@@ -71,11 +71,11 @@ func prepareMediaBlob(ctx context.Context, label, location string, maxWidth int,
 			return preparedBlob{}, contextErr
 		}
 		sentinel, retryable := sourceErrorClassification(err)
-		return preparedBlob{}, wrapOperationError(sentinel, err, retryable, "load "+label)
+		return preparedBlob{}, wrapOperationError(sentinel, err, retryable, "load "+label+causeDetail(err))
 	}
 	processed, err := media.Process(data, contentType, maxWidth, compress)
 	if err != nil {
-		return preparedBlob{}, wrapOperationError(ErrInvalidConfig, err, false, "process "+label)
+		return preparedBlob{}, wrapOperationError(ErrInvalidConfig, err, false, "process "+label+causeDetail(err))
 	}
 	return newPreparedBlob(label, processed.Data, processed.Hash, processed.MimeType, blossomURL), nil
 }

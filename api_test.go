@@ -566,6 +566,29 @@ func TestUploadFailureMessageNamesStatus(t *testing.T) {
 	}
 }
 
+func TestCauseDetailSurfacesSanitizedMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"nil", nil, ""},
+		{"plain", errors.New("detecting image format: image: unknown format"), ": detecting image format: image: unknown format"},
+		{
+			"credentials are redacted",
+			errors.New(`Get "https://cdn.example/icon?token=secret": dial tcp: lookup failed`),
+			`: Get "https://cdn.example/icon": dial tcp: lookup failed`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := causeDetail(test.err); got != test.want {
+				t.Fatalf("causeDetail() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestDescriptorMismatchNamesDifferingFields(t *testing.T) {
 	tests := []struct {
 		name string
