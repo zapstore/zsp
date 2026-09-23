@@ -50,10 +50,19 @@ func NewWeb(cfg *config.Config) (*Web, error) {
 	}, nil
 }
 
-// resolveRedirects follows redirects and returns the final URL. HEAD is used
-// first to avoid downloading the asset, with a GET fallback for endpoints that
-// deliberately reject HEAD.
-func (w *Web) resolveRedirects(ctx context.Context, url string) (string, error) {
+// probedURL is the result of a HEAD (or ranged GET) used to name a direct
+// download without fetching the body. ContentType and ContentLength come from
+// that response; FinalURL is the last redirect hop, or rawURL when there is none.
+type probedURL struct {
+	FinalURL      string
+	ContentType   string
+	ContentLength int64
+}
+
+// resolveRedirects follows redirects and returns the final URL plus the
+// response media type and length. HEAD is used first to avoid downloading the
+// asset, with a ranged GET fallback for endpoints that deliberately reject HEAD.
+func (w *Web) resolveRedirects(ctx context.Context, rawURL string) (probedURL, error) {
 	// Create a client that tracks redirects but still follows them
 	var finalURL string
 	client := newSecureHTTPClient(30 * time.Second)
@@ -62,31 +71,37 @@ func (w *Web) resolveRedirects(ctx context.Context, url string) (string, error) 
 		return validateRedirect(req, via)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "HEAD", rawURL, nil)
 	if err != nil {
-		return "", err
+		return probedURL{}, err
 	}
 
 	resp, err := client.Do(req)
 	if err == nil && resp.StatusCode == http.StatusMethodNotAllowed {
 		resp.Body.Close()
-		req, err = http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		req, err = http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 		if err == nil {
 			req.Header.Set("Range", "bytes=0-0")
 			resp, err = client.Do(req)
 		}
 	}
 	if err != nil {
-		return "", fmt.Errorf("failed to resolve redirects: %w", err)
+		return probedURL{}, fmt.Errorf("failed to resolve redirects: %w", err)
 	}
 	defer resp.Body.Close()
 
 	// If no redirects occurred, finalURL won't be set
 	if finalURL == "" {
-		finalURL = url
+		finalURL = rawURL
 	}
-
-	return finalURL, nil
+	probed := probedURL{FinalURL: finalURL}
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent {
+		probed.ContentType = resp.Header.Get("Content-Type")
+		if resp.ContentLength > 0 {
+			probed.ContentLength = resp.ContentLength
+		}
+	}
+	return probed, nil
 }
 
 // Type returns the source type.
@@ -119,6 +134,8 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	var version string
 	var assetURL string
 	var nameURL string // optional override for filename (e.g. resolved redirect target)
+	var probedType string
+	var probedLength int64
 
 	if repo.HasAssetExtractor() {
 		// Mode 2: Extract asset URL from page (version optionally extracted too)
@@ -153,20 +170,23 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		// Resolve redirects for filename purposes only. Keep downloading from the
 		// original URL so tokenized CDN targets (e.g. telegram.org → telesco.pe?token=...)
 		// are minted at GET time.
-		finalURL, err := w.resolveRedirects(ctx, assetURL)
+		probed, err := w.resolveRedirects(ctx, assetURL)
 		if err != nil {
 			// HEAD is only a filename optimization. Some otherwise valid APK
 			// endpoints reject it, while the authoritative GET succeeds.
-			finalURL = assetURL
+			probed.FinalURL = assetURL
 		}
 
-		// Filename from redirect target (e.g. Telegram.apk); download still uses assetURL
-		nameURL = finalURL
+		// Filename from redirect target (e.g. Telegram.apk); download still uses assetURL.
+		// A CDN object named .bin is still an APK when the probe says so.
+		nameURL = probed.FinalURL
+		probedType = probed.ContentType
+		probedLength = probed.ContentLength
 
 		if !w.SkipHTTPCache {
 			cache := w.loadCache()
 			if cache != nil {
-				modified, etag, lastMod, contentLen, cacheErr := w.checkHTTPCacheHeaders(ctx, finalURL, cache.ETag, cache.LastModified, cache.ContentLength)
+				modified, etag, lastMod, contentLen, cacheErr := w.checkHTTPCacheHeaders(ctx, probed.FinalURL, cache.ETag, cache.LastModified, cache.ContentLength)
 				if cacheErr != nil {
 					return nil, fmt.Errorf("failed to check for updates: %w", cacheErr)
 				}
@@ -174,7 +194,7 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 					return nil, ErrNotModified
 				}
 				w.pendingCache = &webCache{ETag: etag, LastModified: lastMod, ContentLength: contentLen}
-			} else if _, etag, lastMod, contentLen, cacheErr := w.checkHTTPCacheHeaders(ctx, finalURL, "", "", 0); cacheErr == nil {
+			} else if _, etag, lastMod, contentLen, cacheErr := w.checkHTTPCacheHeaders(ctx, probed.FinalURL, "", "", 0); cacheErr == nil {
 				w.pendingCache = &webCache{ETag: etag, LastModified: lastMod, ContentLength: contentLen}
 			}
 		}
@@ -197,17 +217,35 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	if parsed, err := url.Parse(nameURL); err == nil {
 		assetName = filepath.Base(parsed.Path)
 	}
+	if IsAPKContentType(probedType) {
+		assetName = apkFilename(assetName)
+	}
 
 	asset := &Asset{
-		Name:       assetName,
-		URL:        assetURL,
-		ExcludeURL: excludeURL,
+		Name:        assetName,
+		URL:         assetURL,
+		Size:        probedLength,
+		ContentType: probedType,
+		ExcludeURL:  excludeURL,
 	}
 
 	return &Release{
 		Version: version,
 		Assets:  []*Asset{asset},
 	}, nil
+}
+
+// apkFilename returns name with an .apk suffix. A CDN object such as
+// "hash.bin" stays recognizable; only the suffix changes.
+func apkFilename(name string) string {
+	if strings.HasSuffix(strings.ToLower(name), ".apk") {
+		return name
+	}
+	base := strings.TrimSuffix(name, filepath.Ext(name))
+	if base == "" || base == "." || base == ".." {
+		base = "app"
+	}
+	return base + ".apk"
 }
 
 // extractVersion extracts the version string using the configured extractor.

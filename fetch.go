@@ -342,7 +342,7 @@ func filterCandidates(assets []*source.Asset, match string) ([]*source.Asset, er
 	}
 	result := make([]*source.Asset, 0, len(assets))
 	for _, asset := range assets {
-		if !source.IsAPKAsset(asset.Name, asset.URL) || source.HasUnsupportedArchitecture(asset.Name) || excludedFilename(asset.Name) {
+		if !asset.IsAPK() || source.HasUnsupportedArchitecture(asset.Name) || excludedFilename(asset.Name) {
 			continue
 		}
 		if expression != nil && !expression.MatchString(asset.Name) {

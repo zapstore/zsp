@@ -442,6 +442,23 @@ func (r *bytesReaderImpl) Read(p []byte) (int, error) {
 	return n, nil
 }
 
+func TestIsAPKContentTypeIgnoresParameters(t *testing.T) {
+	if !IsAPKContentType("application/vnd.android.package-archive; charset=binary") {
+		t.Fatal("expected Android package media type to match with parameters")
+	}
+	asset := &Asset{
+		Name:        "6f1c0a.bin",
+		URL:         "https://r2a.primal.net/blob/6f1c0a.bin",
+		ContentType: "application/vnd.android.package-archive",
+	}
+	if !asset.IsAPK() {
+		t.Fatal("content type should identify the asset as an APK")
+	}
+	if (&Asset{Name: "6f1c0a.bin", URL: "https://r2a.primal.net/blob/6f1c0a.bin"}).IsAPK() {
+		t.Fatal("bin path without an APK content type is not an APK")
+	}
+}
+
 func TestHasUnsupportedArchitecture(t *testing.T) {
 	tests := []struct {
 		filename    string

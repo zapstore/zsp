@@ -75,12 +75,117 @@ func TestWebDirectURLFallsBackToGETWhenHEADIsNotAllowed(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	w := &Web{client: newSecureHTTPClient(5 * time.Second)}
-	finalURL, err := w.resolveRedirects(context.Background(), srv.URL+"/download")
+	probed, err := w.resolveRedirects(context.Background(), srv.URL+"/download")
 	if err != nil {
 		t.Fatalf("resolveRedirects() error = %v", err)
 	}
-	if finalURL != srv.URL+"/files/app.apk" {
-		t.Fatalf("resolveRedirects() = %q, want redirected URL", finalURL)
+	if probed.FinalURL != srv.URL+"/files/app.apk" {
+		t.Fatalf("resolveRedirects() = %q, want redirected URL", probed.FinalURL)
+	}
+}
+
+func TestWebDirectURLKeepsAPKWhenPathIsNotAPK(t *testing.T) {
+	const apkType = "application/vnd.android.package-archive"
+	const apkSize int64 = 10956212
+	mux := http.NewServeMux()
+	// HEAD is 200 with the APK media type. A ranged GET 302s to a .bin object,
+	// the same shape as a CDN such as r2a.primal.net.
+	mux.HandleFunc("/download", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Type", apkType)
+			w.Header().Set("Content-Length", "10956212")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.Redirect(w, r, "/r2/6f1c0a.bin", http.StatusFound)
+	})
+	mux.HandleFunc("/r2/6f1c0a.bin", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", apkType)
+		w.Header().Set("Content-Length", "10956212")
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	entryURL := srv.URL + "/download"
+	web := &Web{
+		cfg: &config.Config{
+			ReleaseSource: &config.ReleaseSource{
+				IsWebSource: true,
+				AssetURL:    entryURL,
+			},
+		},
+		client:   newSecureHTTPClient(5 * time.Second),
+		cacheDir: t.TempDir(),
+	}
+
+	rel, err := web.FetchLatestRelease(context.Background())
+	if err != nil {
+		t.Fatalf("FetchLatestRelease() error = %v", err)
+	}
+	if len(rel.Assets) != 1 {
+		t.Fatalf("assets = %d, want 1", len(rel.Assets))
+	}
+	asset := rel.Assets[0]
+	if asset.URL != entryURL {
+		t.Errorf("asset.URL = %q, want original entry URL", asset.URL)
+	}
+	if !asset.IsAPK() {
+		t.Fatal("asset dropped as non-APK despite Android package content type")
+	}
+	if asset.Name != "download.apk" {
+		t.Errorf("asset.Name = %q, want download.apk", asset.Name)
+	}
+	if asset.ContentType != apkType {
+		t.Errorf("ContentType = %q, want %q", asset.ContentType, apkType)
+	}
+	if asset.Size != apkSize {
+		t.Errorf("Size = %d, want %d", asset.Size, apkSize)
+	}
+}
+
+func TestWebDirectURLRenamesBinRedirectTarget(t *testing.T) {
+	const apkType = "application/vnd.android.package-archive"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/download", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/r2/6f1c0a.bin", http.StatusFound)
+	})
+	mux.HandleFunc("/r2/6f1c0a.bin", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", apkType)
+		w.Header().Set("Content-Length", "10956212")
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	entryURL := srv.URL + "/download"
+	web := &Web{
+		cfg: &config.Config{
+			ReleaseSource: &config.ReleaseSource{
+				IsWebSource: true,
+				AssetURL:    entryURL,
+			},
+		},
+		client:   newSecureHTTPClient(5 * time.Second),
+		cacheDir: t.TempDir(),
+	}
+
+	rel, err := web.FetchLatestRelease(context.Background())
+	if err != nil {
+		t.Fatalf("FetchLatestRelease() error = %v", err)
+	}
+	if len(rel.Assets) != 1 {
+		t.Fatalf("assets = %d, want 1", len(rel.Assets))
+	}
+	asset := rel.Assets[0]
+	if asset.URL != entryURL {
+		t.Errorf("asset.URL = %q, want original entry URL", asset.URL)
+	}
+	if asset.Name != "6f1c0a.apk" {
+		t.Errorf("asset.Name = %q, want 6f1c0a.apk", asset.Name)
+	}
+	if !asset.IsAPK() {
+		t.Fatal("bin redirect target was not kept as an APK")
 	}
 }
 

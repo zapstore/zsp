@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -692,6 +693,20 @@ func HasUnsupportedArchitecture(filename string) bool {
 	return unsupportedArchRegex.MatchString(filename)
 }
 
+// apkMediaType is the MIME type of an Android package. A response with this
+// type is an APK even when the URL path ends in another suffix, such as .bin.
+const apkMediaType = "application/vnd.android.package-archive"
+
+// IsAPKContentType reports whether contentType is an Android package,
+// ignoring parameters such as charset.
+func IsAPKContentType(contentType string) bool {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		mediaType = strings.TrimSpace(contentType)
+	}
+	return strings.EqualFold(mediaType, apkMediaType)
+}
+
 // IsAPKURL checks if a URL points to an APK file.
 // Properly handles URLs with query parameters.
 func IsAPKURL(rawURL string) bool {
@@ -711,11 +726,20 @@ func IsAPKAsset(name, url string) bool {
 	return IsAPKURL(url)
 }
 
+// IsAPK reports whether the asset is an APK by media type, filename, or URL.
+// Media type wins when a CDN path does not end in .apk.
+func (a *Asset) IsAPK() bool {
+	if a == nil {
+		return false
+	}
+	return IsAPKContentType(a.ContentType) || IsAPKAsset(a.Name, a.URL)
+}
+
 // HasValidAPKs returns true if the assets contain at least one APK file.
 // Used to determine if a release is a valid mobile release (vs desktop-only).
 func HasValidAPKs(assets []*Asset) bool {
 	for _, asset := range assets {
-		if IsAPKAsset(asset.Name, asset.URL) {
+		if asset.IsAPK() {
 			return true
 		}
 	}

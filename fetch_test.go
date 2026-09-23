@@ -7,6 +7,27 @@ import (
 	"github.com/zapstore/zsp/internal/source"
 )
 
+func TestFilterCandidatesKeepsAPKMediaTypeWithoutAPKSuffix(t *testing.T) {
+	assets := []*source.Asset{
+		{
+			Name:        "6f1c0a.bin",
+			URL:         "https://r2a.primal.net/blob/6f1c0a.bin",
+			ContentType: "application/vnd.android.package-archive",
+			Size:        10956212,
+		},
+		{Name: "other.bin", URL: "https://r2a.primal.net/blob/other.bin"},
+		{Name: "notes.txt", URL: "https://example.com/notes.txt"},
+	}
+
+	candidates, err := filterCandidates(assets, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].Name != "6f1c0a.bin" {
+		t.Fatalf("filterCandidates() = %+v, want the content-typed APK", candidates)
+	}
+}
+
 func TestFilterCandidatesPrecedence(t *testing.T) {
 	tests := []struct {
 		name   string
