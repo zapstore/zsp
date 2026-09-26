@@ -71,7 +71,6 @@ func startLocalRelay() (relayURL, blossomURL string, stop func(), err error) {
 		"RELAY_PUBKEY=" + fixturePubkey,
 		"RELAY_DESCRIPTION=Local publish fixture",
 		"RELAY_URL=ws://" + relayAddr,
-		"CATALOG_RELAYS=ws://" + relayAddr,
 		"RELAY_ICON=https://example.invalid/icon.png",
 		"RELAY_BANNER=https://example.invalid/banner.png",
 		"RELAY_CONTACT=" + fixturePubkey,
