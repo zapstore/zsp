@@ -97,8 +97,7 @@ func (l *Local) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	}
 
 	return &Release{
-		Version: "local",
-		Assets:  assets,
+		Assets: assets,
 	}, nil
 }
 
@@ -118,4 +117,3 @@ func (l *Local) Download(ctx context.Context, asset *Asset, destDir string, prog
 
 	return asset.LocalPath, nil
 }
-

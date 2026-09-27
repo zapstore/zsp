@@ -764,7 +764,7 @@ func (p *Publisher) signAndUpload(ctx context.Context) error {
 	// When overwriting a release, fetch the existing 30063's created_at so the new
 	// event gets a strictly higher timestamp and the relay's NIP-33 guard fires.
 	if p.opts.Publish.OverwriteRelease && !p.isOffline() {
-		ts, err := p.publisher.CheckExistingRelease(ctx, p.signer.PublicKey(), p.apkInfo.PackageID, p.apkInfo.VersionName)
+		ts, err := p.publisher.CheckExistingRelease(ctx, p.signer.PublicKey(), p.apkInfo.PackageID, p.release.Version)
 		if err == nil {
 			p.existingReleaseTimestamp = ts
 		} else if p.opts.Global.Verbose {
@@ -1025,6 +1025,7 @@ func (p *Publisher) buildEventsWithoutUpload(ctx context.Context) error {
 		Variant:                   p.matchVariant(),
 		Commit:                    p.opts.Publish.Commit,
 		Channel:                   p.opts.Publish.Channel,
+		ReleaseVersion:            p.release.Version,
 		ReleaseTimestamp:          p.getReleaseTimestamp(),
 		UseReleaseTimestampForApp: p.opts.Publish.AppCreatedAtRelease,
 		MinReleaseTimestamp:       p.existingReleaseTimestamp,
@@ -1097,6 +1098,7 @@ func (p *Publisher) uploadAndBuildEvents(ctx context.Context) error {
 		Variant:                   p.matchVariant(),
 		Commit:                    p.opts.Publish.Commit,
 		Channel:                   p.opts.Publish.Channel,
+		ReleaseVersion:            p.release.Version,
 		ReleaseTimestamp:          p.getReleaseTimestamp(),
 		UseReleaseTimestampForApp: p.opts.Publish.AppCreatedAtRelease,
 		MinReleaseTimestamp:       p.existingReleaseTimestamp,

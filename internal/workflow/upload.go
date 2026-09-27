@@ -325,8 +325,10 @@ func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.Ev
 	}
 
 	var releaseTimestamp time.Time
+	var releaseVersion string
 	if params.Release != nil {
 		releaseTimestamp = params.Release.CreatedAt
+		releaseVersion = params.Release.Version
 	}
 
 	events := nostr.BuildEventSet(nostr.BuildEventSetParams{
@@ -341,6 +343,7 @@ func UploadAndSignWithBatch(ctx context.Context, params UploadParams) (*nostr.Ev
 		Variant:                   params.Variant,
 		Commit:                    params.Commit,
 		Channel:                   params.Channel,
+		ReleaseVersion:            releaseVersion,
 		ReleaseTimestamp:          releaseTimestamp,
 		UseReleaseTimestampForApp: params.AppCreatedAtRelease,
 		MinReleaseTimestamp:       params.MinReleaseTimestamp,
