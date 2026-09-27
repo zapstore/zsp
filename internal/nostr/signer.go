@@ -23,6 +23,10 @@ const (
 	SignerBunker
 )
 
+// localBunkerClientKey matches hotbox/internal/bunker.localClientKey.
+// Loopback bunkers expect this key. Remote bunkers keep a per-install key.
+const localBunkerClientKey = "0000000000000000000000000000000000000000000000000000000000000002"
+
 // Signer handles event signing.
 type Signer interface {
 	// Type returns the signer type.
@@ -145,18 +149,14 @@ type BunkerSigner struct {
 func NewBunkerSigner(ctx context.Context, bunkerURL string) (*BunkerSigner, error) {
 	// Extract the target pubkey from the bunker URL.
 	// The URL format is: bunker://<remote-signer-pubkey>?relay=...&secret=...
-	// We key the client secret by the target pubkey, NOT the secret token,
-	// because the secret is single-use and disposable while the pubkey identifies
-	// the actual bunker we're connecting to.
+	// A remote bunker keeps a client key for that pubkey. A loopback bunker uses
+	// the shared local client key.
 	targetPubkey, err := extractBunkerTargetPubkey(bunkerURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid bunker URL: %w", err)
 	}
 
-	// Get or generate a truly random client secret key for this bunker.
-	// This is persisted to ensure we use the same client key across sessions,
-	// which is necessary because NIP-46 permissions are tied to the client pubkey.
-	clientSecretKey, err := getOrCreateBunkerClientKey(targetPubkey)
+	clientSecretKey, err := bunkerClientKey(bunkerURL, targetPubkey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get client key: %w", err)
 	}
@@ -206,6 +206,36 @@ func extractBunkerTargetPubkey(bunkerURL string) (string, error) {
 		return "", fmt.Errorf("invalid target pubkey: %s", parsed.Host)
 	}
 	return parsed.Host, nil
+}
+
+func bunkerClientKey(bunkerURL, targetPubkey string) (string, error) {
+	if loopbackBunker(bunkerURL) {
+		return localBunkerClientKey, nil
+	}
+	return getOrCreateBunkerClientKey(targetPubkey)
+}
+
+func loopbackBunker(bunkerURL string) bool {
+	parsed, err := url.Parse(bunkerURL)
+	if err != nil {
+		return false
+	}
+	relays := parsed.Query()["relay"]
+	if len(relays) == 0 {
+		return false
+	}
+	for _, relay := range relays {
+		parsedRelay, err := url.Parse(relay)
+		if err != nil {
+			return false
+		}
+		switch parsedRelay.Hostname() {
+		case "127.0.0.1", "localhost", "::1":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // getOrCreateBunkerClientKey retrieves an existing client key for a bunker,

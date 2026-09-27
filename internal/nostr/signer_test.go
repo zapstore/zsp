@@ -9,6 +9,24 @@ import (
 	"github.com/nbd-wtf/go-nostr/nip19"
 )
 
+func TestLoopbackBunkerUsesSharedClientKey(t *testing.T) {
+	local := "bunker://ab?relay=ws%3A%2F%2F127.0.0.1%3A1%2Ftoken&secret=s"
+	if !loopbackBunker(local) {
+		t.Fatal("127.0.0.1 bunker was not local")
+	}
+	remote := "bunker://ab?relay=wss%3A%2F%2Frelay.example&secret=s"
+	if loopbackBunker(remote) {
+		t.Fatal("remote bunker was local")
+	}
+	key, err := bunkerClientKey(local, "ab")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key != localBunkerClientKey {
+		t.Fatalf("client key = %s", key)
+	}
+}
+
 func TestNewSignerRejectsBrowserSigning(t *testing.T) {
 	_, err := NewSigner(t.Context(), "browser")
 	if err == nil {
