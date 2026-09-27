@@ -103,8 +103,7 @@ func (l *Local) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	}
 
 	return &Release{
-		Version: "local",
-		Assets:  assets,
+		Assets: assets,
 	}, nil
 }
 

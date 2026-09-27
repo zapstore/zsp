@@ -364,6 +364,7 @@ type BuildEventSetParams struct {
 	Changelog        string    // Release notes (from remote source or local file)
 	Commit           string    // Git commit hash for reproducible builds
 	Channel          string    // Release channel: main (default), beta, nightly, dev
+	ReleaseVersion   string    // Kind 30063 version (source release). Empty uses the APK versionName.
 	ReleaseTimestamp time.Time // Release publish date (zero means use current time)
 	// UseReleaseTimestampForApp sets kind 32267 created_at to ReleaseTimestamp.
 	// When false, app metadata keeps current-time created_at.
@@ -437,10 +438,15 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		channel = "main"
 	}
 
+	releaseVersion := params.ReleaseVersion
+	if releaseVersion == "" {
+		releaseVersion = apkInfo.VersionName
+	}
+
 	// Software Release event
 	releaseMeta := &ReleaseMetadata{
 		PackageID:     apkInfo.PackageID,
-		Version:       apkInfo.VersionName,
+		Version:       releaseVersion,
 		VersionCode:   apkInfo.VersionCode,
 		Changelog:     params.Changelog,
 		Channel:       channel,

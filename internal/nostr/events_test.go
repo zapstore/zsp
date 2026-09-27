@@ -477,6 +477,35 @@ func TestBuildEventSet(t *testing.T) {
 	}
 }
 
+func TestBuildEventSetReleaseVersion(t *testing.T) {
+	apkInfo := &apk.APKInfo{
+		PackageID:   "com.example.app",
+		VersionName: "1.2.3-fdroid",
+		VersionCode: 45,
+		SHA256:      "abc123",
+		FilePath:    "/path/to/app.apk",
+	}
+	events := BuildEventSet(BuildEventSetParams{
+		APKInfo:        apkInfo,
+		Config:         &config.Config{},
+		Pubkey:         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		ReleaseVersion: "1.2.3",
+	})
+
+	versionTag := events.Release.Tags.GetFirst([]string{"version"})
+	if versionTag == nil || (*versionTag)[1] != "1.2.3" {
+		t.Errorf("kind 30063 version = %v, want 1.2.3", versionTag)
+	}
+	dTag := events.Release.Tags.GetFirst([]string{"d"})
+	if dTag == nil || (*dTag)[1] != "com.example.app@1.2.3" {
+		t.Errorf("kind 30063 d tag = %v, want com.example.app@1.2.3", dTag)
+	}
+	assetVersion := events.SoftwareAssets[0].Tags.GetFirst([]string{"version"})
+	if assetVersion == nil || (*assetVersion)[1] != "1.2.3-fdroid" {
+		t.Errorf("kind 3063 version = %v, want 1.2.3-fdroid", assetVersion)
+	}
+}
+
 func TestBuildEventSetFallbackToLabel(t *testing.T) {
 	apkInfo := &apk.APKInfo{
 		PackageID:   "com.example.app",

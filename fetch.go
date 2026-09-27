@@ -170,6 +170,7 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 				lineageHashes:   append([]string(nil), parsed.SigningAncestors...),
 				originalURL:     eventSourceURL,
 				releaseNotes:    release.Changelog,
+				releaseVersion:  release.Version,
 				releasedAt:      release.CreatedAt,
 			},
 		})

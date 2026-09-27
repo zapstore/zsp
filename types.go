@@ -109,6 +109,7 @@ type verifiedAPK struct {
 	lineageHashes   []string
 	originalURL     string
 	releaseNotes    string
+	releaseVersion  string
 	releasedAt      time.Time
 }
 
