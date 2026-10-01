@@ -1,6 +1,7 @@
 package zsp
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -21,6 +22,8 @@ import (
 	"time"
 
 	gonostr "github.com/nbd-wtf/go-nostr"
+	"gopkg.in/yaml.v3"
+
 	"github.com/zapstore/zsp/internal/blossom"
 	"github.com/zapstore/zsp/internal/identity"
 	internalnostr "github.com/zapstore/zsp/internal/nostr"
@@ -108,6 +111,109 @@ release_notes: notes.md
 	}
 	if config.ReleaseNotes != filepath.Join(directory, "notes.md") {
 		t.Fatalf("ReleaseNotes = %q, want resolved local path", config.ReleaseNotes)
+	}
+}
+
+func TestParseConfigLeavesLocalPathsUnresolved(t *testing.T) {
+	config, err := ParseConfig(strings.NewReader(`
+release_source: builds/*.apk
+name: Example
+icon: media/icon.png
+images: [media/one.png, https://example.com/two.png]
+release_notes: notes.md
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.ReleaseSource == nil {
+		t.Fatal("ReleaseSource is nil")
+	}
+	if config.ReleaseSource.LocalPath != "builds/*.apk" {
+		t.Fatalf("LocalPath = %q, want unresolved relative path", config.ReleaseSource.LocalPath)
+	}
+	if config.Icon != "media/icon.png" {
+		t.Fatalf("Icon = %q, want unresolved relative path", config.Icon)
+	}
+	if !reflect.DeepEqual(config.Images, []string{"media/one.png", "https://example.com/two.png"}) {
+		t.Fatalf("Images = %v, want unresolved relative paths and unchanged URLs", config.Images)
+	}
+	if config.ReleaseNotes != "notes.md" {
+		t.Fatalf("ReleaseNotes = %q, want unresolved relative path", config.ReleaseNotes)
+	}
+}
+
+func TestConfigMarshalYAMLRoundTrips(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "forge repository",
+			input: "repository: https://github.com/example/app\n",
+		},
+		{
+			name:  "local release source",
+			input: "release_source: builds/*.apk\nname: Example\n",
+		},
+		{
+			name: "structured web release source and full metadata",
+			input: `repository: https://github.com/example/app
+release_source:
+  url: https://example.com/app
+  asset_url: https://example.com/app-{version}.apk
+  version:
+    url: https://example.com/latest
+    path: $.version
+channel: nightly
+name: Example
+summary: A test app
+description: Longer description
+tags: [social, tools]
+license: MIT
+website: https://example.com
+icon: media/icon.png
+images: [media/one.png, https://example.com/two.png]
+release_notes: notes.md
+supported_nips: ["1", "2"]
+min_allowed_version: 1.0.0
+min_allowed_version_code: 1
+metadata_sources: []
+`,
+		},
+		{
+			name: "asset extractor release source",
+			input: `repository: https://github.com/example/app
+release_source:
+  url: https://example.com/app
+  version:
+    url: https://example.com/latest
+    path: $.version
+  asset:
+    url: https://example.com/latest
+    selector: a.download
+    attribute: href
+`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			want, err := ParseConfig(strings.NewReader(test.input))
+			if err != nil {
+				t.Fatalf("ParseConfig(input) = %v", err)
+			}
+			encoded, err := yaml.Marshal(want)
+			if err != nil {
+				t.Fatalf("Marshal = %v", err)
+			}
+			got, err := ParseConfig(bytes.NewReader(encoded))
+			if err != nil {
+				t.Fatalf("ParseConfig(marshaled) = %v; yaml=\n%s", err, encoded)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("round trip mismatch; yaml=\n%s\ngot:  %+v\nwant: %+v", encoded, got, want)
+			}
+		})
 	}
 }
 

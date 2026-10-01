@@ -9,59 +9,59 @@ import (
 
 // Config contains source resolution and publication metadata.
 type Config struct {
-	FetchConfig   `json:"fetch_config"`
-	PublishConfig `json:"publish_config"`
+	FetchConfig
+	PublishConfig
 }
 
 // FetchConfig identifies and filters an APK release source.
 type FetchConfig struct {
-	Repository        string         `json:"repository"`
-	ReleaseSource     *ReleaseSource `json:"release_source"`
-	ReleaseFilter     string         `json:"release_filter"`
-	Match             string         `json:"match"`
-	PrereleaseChannel string         `json:"prerelease_channel"`
+	Repository        string
+	ReleaseSource     *ReleaseSource
+	ReleaseFilter     string
+	Match             string
+	PrereleaseChannel string
 	baseDir           string
 }
 
 // PublishConfig contains application metadata used to build NIP-82 events.
 type PublishConfig struct {
-	Channel               string   `json:"channel"`
-	Name                  string   `json:"name"`
-	Summary               string   `json:"summary"`
-	Description           string   `json:"description"`
-	Tags                  []string `json:"tags"`
-	License               string   `json:"license"`
-	Website               string   `json:"website"`
-	Icon                  string   `json:"icon"`
-	Images                []string `json:"images"`
-	ReleaseNotes          string   `json:"release_notes"`
-	SupportedNIPs         []string `json:"supported_nips"`
-	MinAllowedVersion     string   `json:"min_allowed_version"`
-	MinAllowedVersionCode int64    `json:"min_allowed_version_code"`
+	Channel               string
+	Name                  string
+	Summary               string
+	Description           string
+	Tags                  []string
+	License               string
+	Website               string
+	Icon                  string
+	Images                []string
+	ReleaseNotes          string
+	SupportedNIPs         []string
+	MinAllowedVersion     string
+	MinAllowedVersionCode int64
 	// MetadataSources is nil for automatic source selection, empty to disable
 	// metadata fetching, or non-empty to select explicit sources.
-	MetadataSources []string `json:"metadata_sources"`
+	MetadataSources []string
 	baseDir         string
 }
 
 // ReleaseSource describes a local, forge, F-Droid, or web release source.
 type ReleaseSource struct {
-	URL              string     `json:"url"`
-	LocalPath        string     `json:"local_path"`
-	Type             string     `json:"type"`
-	AssetURL         string     `json:"asset_url"`
-	VersionExtractor *Extractor `json:"version_extractor"`
-	AssetExtractor   *Extractor `json:"asset_extractor"`
+	URL              string
+	LocalPath        string
+	Type             string
+	AssetURL         string
+	VersionExtractor *Extractor
+	AssetExtractor   *Extractor
 }
 
 // Extractor describes how to obtain a value from HTML, JSON, or headers.
 type Extractor struct {
-	URL       string `json:"url"`
-	Selector  string `json:"selector"`
-	Attribute string `json:"attribute"`
-	Path      string `json:"path"`
-	Header    string `json:"header"`
-	Match     string `json:"match"`
+	URL       string
+	Selector  string
+	Attribute string
+	Path      string
+	Header    string
+	Match     string
 }
 
 // FetchOptions controls per-fetch behavior such as HTTP cache use and progress reporting.

@@ -1,6 +1,7 @@
 package zsp
 
 import (
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -10,34 +11,41 @@ import (
 	internalconfig "github.com/zapstore/zsp/internal/config"
 )
 
-// LoadConfig loads canonical zapstore.yaml without performing network operations.
-func LoadConfig(path string) (Config, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return Config{}, wrapOperationError(ErrInvalidConfig, err, false, "open config")
-	}
-	defer file.Close()
-
-	parsed, err := internalconfig.Parse(file)
+// ParseConfig parses canonical zapstore.yaml from r without performing network
+// operations. The input has no file location, so relative local paths
+// (release_source, icon, images, release_notes) are returned as written; use
+// LoadConfig when those paths must be resolved against the config's directory.
+func ParseConfig(r io.Reader) (Config, error) {
+	parsed, err := internalconfig.Parse(r)
 	if err != nil {
 		return Config{}, wrapOperationError(ErrInvalidConfig, err, false, "parse config")
 	}
 	if err := parsed.Validate(); err != nil {
 		return Config{}, wrapOperationError(ErrInvalidConfig, err, false, "validate config")
 	}
-	result := fromInternalConfig(parsed)
-	if releaseSource := result.ReleaseSource; releaseSource != nil && releaseSource.LocalPath != "" && !filepath.IsAbs(releaseSource.LocalPath) {
-		absolutePath, err := filepath.Abs(path)
-		if err != nil {
-			return Config{}, wrapOperationError(ErrInvalidConfig, err, false, "resolve config path")
-		}
-		releaseSource.LocalPath = filepath.Join(filepath.Dir(absolutePath), releaseSource.LocalPath)
+	return fromInternalConfig(parsed), nil
+}
+
+// LoadConfig loads canonical zapstore.yaml from path without performing network
+// operations, resolving relative local paths against the config's directory.
+func LoadConfig(path string) (Config, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return Config{}, wrapOperationError(ErrInvalidConfig, err, false, "open config")
+	}
+	defer file.Close()
+	result, err := ParseConfig(file)
+	if err != nil {
+		return Config{}, err
 	}
 	absolutePath, err := filepath.Abs(path)
 	if err != nil {
 		return Config{}, wrapOperationError(ErrInvalidConfig, err, false, "resolve config path")
 	}
 	baseDir := filepath.Dir(absolutePath)
+	if releaseSource := result.ReleaseSource; releaseSource != nil && releaseSource.LocalPath != "" && !filepath.IsAbs(releaseSource.LocalPath) {
+		releaseSource.LocalPath = filepath.Join(baseDir, releaseSource.LocalPath)
+	}
 	result.Icon = resolveConfigPath(result.Icon, baseDir)
 	for index := range result.Images {
 		result.Images[index] = resolveConfigPath(result.Images[index], baseDir)
@@ -51,6 +59,50 @@ func resolveConfigPath(value, baseDir string) string {
 		return value
 	}
 	return filepath.Join(baseDir, value)
+}
+
+// MarshalYAML renders the configuration in the canonical zapstore.yaml shape.
+// The YAML representation itself lives in internal/config.
+func (c Config) MarshalYAML() (any, error) {
+	return c.toInternalConfig().MarshalYAML()
+}
+
+// MarshalYAML renders the source resolution configuration.
+func (c FetchConfig) MarshalYAML() (any, error) {
+	return Config{FetchConfig: c}.toInternalConfig().MarshalYAML()
+}
+
+// MarshalYAML renders the publication metadata configuration.
+func (c PublishConfig) MarshalYAML() (any, error) {
+	return Config{PublishConfig: c}.toInternalConfig().MarshalYAML()
+}
+
+// toInternalConfig converts the public configuration to the internal
+// representation without validating it, so it can be marshaled back to YAML.
+func (c Config) toInternalConfig() *internalconfig.Config {
+	internal := toPublishInternalConfig(c.PublishConfig)
+	internal.Repository = c.Repository
+	internal.ReleaseFilter = c.ReleaseFilter
+	internal.Match = c.Match
+	internal.PrereleaseChannel = c.PrereleaseChannel
+	internal.ReleaseSource = toInternalReleaseSource(c.ReleaseSource)
+	return internal
+}
+
+func toInternalReleaseSource(source *ReleaseSource) *internalconfig.ReleaseSource {
+	if source == nil {
+		return nil
+	}
+	result := &internalconfig.ReleaseSource{
+		URL: source.URL, LocalPath: source.LocalPath, Type: source.Type, AssetURL: source.AssetURL,
+	}
+	if source.VersionExtractor != nil {
+		result.Version = toInternalExtractor(source.VersionExtractor)
+	}
+	if source.AssetExtractor != nil {
+		result.Asset = toInternalExtractor(source.AssetExtractor)
+	}
+	return result
 }
 
 func fromInternalConfig(config *internalconfig.Config) Config {
