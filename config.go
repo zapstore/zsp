@@ -12,18 +12,55 @@ import (
 )
 
 // ParseConfig parses canonical zapstore.yaml from r without performing network
-// operations. The input has no file location, so relative local paths
+// operations. Both the release source and the application metadata are
+// validated. The input has no file location, so relative local paths
 // (release_source, icon, images, release_notes) are returned as written; use
 // LoadConfig when those paths must be resolved against the config's directory.
 func ParseConfig(r io.Reader) (Config, error) {
-	parsed, err := internalconfig.Parse(r)
+	parsed, err := parseInternalConfig(r)
 	if err != nil {
-		return Config{}, wrapOperationError(ErrInvalidConfig, err, false, "parse config")
+		return Config{}, err
 	}
 	if err := parsed.Validate(); err != nil {
 		return Config{}, wrapOperationError(ErrInvalidConfig, err, false, "validate config")
 	}
 	return fromInternalConfig(parsed), nil
+}
+
+// ParseFetchConfig parses canonical zapstore.yaml from r, validating only the
+// release source configuration, and returns the source resolution half. Use it
+// for configs that carry no application metadata.
+func ParseFetchConfig(r io.Reader) (FetchConfig, error) {
+	parsed, err := parseInternalConfig(r)
+	if err != nil {
+		return FetchConfig{}, err
+	}
+	if err := parsed.ValidateSource(); err != nil {
+		return FetchConfig{}, wrapOperationError(ErrInvalidConfig, err, false, "validate config")
+	}
+	return fromInternalFetchConfig(parsed), nil
+}
+
+// ParsePublishConfig parses canonical zapstore.yaml from r, validating only the
+// application metadata, and returns the publication half. Use it for configs
+// that carry no release source.
+func ParsePublishConfig(r io.Reader) (PublishConfig, error) {
+	parsed, err := parseInternalConfig(r)
+	if err != nil {
+		return PublishConfig{}, err
+	}
+	if err := parsed.ValidateMetadata(); err != nil {
+		return PublishConfig{}, wrapOperationError(ErrInvalidConfig, err, false, "validate config")
+	}
+	return fromInternalPublishConfig(parsed), nil
+}
+
+func parseInternalConfig(r io.Reader) (*internalconfig.Config, error) {
+	parsed, err := internalconfig.Parse(r)
+	if err != nil {
+		return nil, wrapOperationError(ErrInvalidConfig, err, false, "parse config")
+	}
+	return parsed, nil
 }
 
 // LoadConfig loads canonical zapstore.yaml from path without performing network
@@ -43,14 +80,14 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, wrapOperationError(ErrInvalidConfig, err, false, "resolve config path")
 	}
 	baseDir := filepath.Dir(absolutePath)
-	if releaseSource := result.ReleaseSource; releaseSource != nil && releaseSource.LocalPath != "" && !filepath.IsAbs(releaseSource.LocalPath) {
+	if releaseSource := result.Fetch.ReleaseSource; releaseSource != nil && releaseSource.LocalPath != "" && !filepath.IsAbs(releaseSource.LocalPath) {
 		releaseSource.LocalPath = filepath.Join(baseDir, releaseSource.LocalPath)
 	}
-	result.Icon = resolveConfigPath(result.Icon, baseDir)
-	for index := range result.Images {
-		result.Images[index] = resolveConfigPath(result.Images[index], baseDir)
+	result.Publish.Icon = resolveConfigPath(result.Publish.Icon, baseDir)
+	for index := range result.Publish.Images {
+		result.Publish.Images[index] = resolveConfigPath(result.Publish.Images[index], baseDir)
 	}
-	result.ReleaseNotes = resolveConfigPath(result.ReleaseNotes, baseDir)
+	result.Publish.ReleaseNotes = resolveConfigPath(result.Publish.ReleaseNotes, baseDir)
 	return result, nil
 }
 
@@ -69,23 +106,23 @@ func (c Config) MarshalYAML() (any, error) {
 
 // MarshalYAML renders the source resolution configuration.
 func (c FetchConfig) MarshalYAML() (any, error) {
-	return Config{FetchConfig: c}.toInternalConfig().MarshalYAML()
+	return Config{Fetch: c}.toInternalConfig().MarshalYAML()
 }
 
 // MarshalYAML renders the publication metadata configuration.
 func (c PublishConfig) MarshalYAML() (any, error) {
-	return Config{PublishConfig: c}.toInternalConfig().MarshalYAML()
+	return Config{Publish: c}.toInternalConfig().MarshalYAML()
 }
 
 // toInternalConfig converts the public configuration to the internal
 // representation without validating it, so it can be marshaled back to YAML.
 func (c Config) toInternalConfig() *internalconfig.Config {
-	internal := toPublishInternalConfig(c.PublishConfig)
-	internal.Repository = c.Repository
-	internal.ReleaseFilter = c.ReleaseFilter
-	internal.Match = c.Match
-	internal.PrereleaseChannel = c.PrereleaseChannel
-	internal.ReleaseSource = toInternalReleaseSource(c.ReleaseSource)
+	internal := toPublishInternalConfig(c.Publish)
+	internal.Repository = c.Fetch.Repository
+	internal.ReleaseFilter = c.Fetch.ReleaseFilter
+	internal.Match = c.Fetch.Match
+	internal.PrereleaseChannel = c.Fetch.PrereleaseChannel
+	internal.ReleaseSource = toInternalReleaseSource(c.Fetch.ReleaseSource)
 	return internal
 }
 
@@ -106,28 +143,36 @@ func toInternalReleaseSource(source *ReleaseSource) *internalconfig.ReleaseSourc
 }
 
 func fromInternalConfig(config *internalconfig.Config) Config {
-	result := Config{
-		FetchConfig: FetchConfig{
-			Repository:        config.Repository,
-			ReleaseFilter:     config.ReleaseFilter,
-			Match:             config.Match,
-			PrereleaseChannel: config.PrereleaseChannel,
-			baseDir:           config.BaseDir,
-		},
-		PublishConfig: PublishConfig{
-			Channel: config.Channel, Name: config.Name, Summary: config.Summary, Description: config.Description,
-			Tags: append([]string(nil), config.Tags...), License: config.License, Website: config.Website,
-			Icon: config.Icon, Images: append([]string(nil), config.Images...), ReleaseNotes: config.ReleaseNotes,
-			SupportedNIPs:     append([]string(nil), config.SupportedNIPs...),
-			MinAllowedVersion: config.MinAllowedVersion, MinAllowedVersionCode: config.MinAllowedVersionCode,
-			MetadataSources: cloneOptionalStrings(config.MetadataSources),
-			baseDir:         config.BaseDir,
-		},
+	return Config{
+		Fetch:   fromInternalFetchConfig(config),
+		Publish: fromInternalPublishConfig(config),
+	}
+}
+
+func fromInternalFetchConfig(config *internalconfig.Config) FetchConfig {
+	result := FetchConfig{
+		Repository:        config.Repository,
+		ReleaseFilter:     config.ReleaseFilter,
+		Match:             config.Match,
+		PrereleaseChannel: config.PrereleaseChannel,
+		baseDir:           config.BaseDir,
 	}
 	if config.ReleaseSource != nil {
 		result.ReleaseSource = fromInternalReleaseSource(config.ReleaseSource)
 	}
 	return result
+}
+
+func fromInternalPublishConfig(config *internalconfig.Config) PublishConfig {
+	return PublishConfig{
+		Channel: config.Channel, Name: config.Name, Summary: config.Summary, Description: config.Description,
+		Tags: append([]string(nil), config.Tags...), License: config.License, Website: config.Website,
+		Icon: config.Icon, Images: append([]string(nil), config.Images...), ReleaseNotes: config.ReleaseNotes,
+		SupportedNIPs:     append([]string(nil), config.SupportedNIPs...),
+		MinAllowedVersion: config.MinAllowedVersion, MinAllowedVersionCode: config.MinAllowedVersionCode,
+		MetadataSources: cloneOptionalStrings(config.MetadataSources),
+		baseDir:         config.BaseDir,
+	}
 }
 
 func fromInternalReleaseSource(source *internalconfig.ReleaseSource) *ReleaseSource {
@@ -265,35 +310,23 @@ func validatePublishInput(config PublishConfig, options PublishOptions) error {
 	if options.BrowserPort < 0 || options.BrowserPort > 65535 {
 		return operationErr(ErrInvalidConfig, false, "browser port must be between 0 and 65535")
 	}
-	if config.Website != "" {
-		if err := internalconfig.ValidateURL(config.Website); err != nil {
-			return operationErr(ErrInvalidConfig, false, "website must use HTTPS outside loopback")
-		}
+	return validatePublishConfig(config)
+}
+
+// validatePublishConfig validates application metadata. It reuses the internal
+// metadata validator and adds the public API rule that local media and
+// release-notes paths must be absolute.
+func validatePublishConfig(config PublishConfig) error {
+	if err := toPublishInternalConfig(config).ValidateMetadata(); err != nil {
+		return wrapOperationError(ErrInvalidConfig, err, false, "validate publish configuration")
 	}
-	for _, location := range append(append([]string{}, config.Icon), config.Images...) {
-		if strings.Contains(location, "://") {
-			if err := internalconfig.ValidateURL(location); err != nil {
-				return operationErr(ErrInvalidConfig, false, "media URL must use HTTPS outside loopback")
-			}
-		}
+	for _, location := range append([]string{config.Icon}, config.Images...) {
 		if location != "" && !strings.Contains(location, "://") && !filepath.IsAbs(location) {
 			return operationErr(ErrInvalidConfig, false, "local media paths must be absolute")
 		}
 	}
-	if strings.Contains(config.ReleaseNotes, "://") {
-		if err := internalconfig.ValidateURL(config.ReleaseNotes); err != nil {
-			return operationErr(ErrInvalidConfig, false, "release notes URL must use HTTPS outside loopback")
-		}
-	}
 	if config.ReleaseNotes != "" && !strings.Contains(config.ReleaseNotes, "://") && !filepath.IsAbs(config.ReleaseNotes) {
 		return operationErr(ErrInvalidConfig, false, "local release notes path must be absolute")
-	}
-	for _, source := range config.MetadataSources {
-		switch strings.ToLower(strings.TrimSpace(source)) {
-		case "fastlane", "github", "gitlab", "gitea", "fdroid", "playstore":
-		default:
-			return operationErr(ErrInvalidConfig, false, "unsupported metadata source %q", source)
-		}
 	}
 	return nil
 }

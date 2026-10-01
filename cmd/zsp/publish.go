@@ -66,7 +66,7 @@ func publishCommand(ctx context.Context, opts *cli.Options) int {
 			reporter.Report(progress)
 		}
 	}
-	candidates, err := zsp.Fetch(ctx, config.FetchConfig, zsp.FetchOptions{
+	candidates, err := zsp.Fetch(ctx, config.Fetch, zsp.FetchOptions{
 		OnProgress:    progress,
 		SkipHTTPCache: opts.Publish.OverwriteRelease || opts.Publish.Check,
 	})
@@ -82,7 +82,7 @@ func publishCommand(ctx context.Context, opts *cli.Options) int {
 	if err != nil {
 		return writePublishError(opts, err, candidates)
 	}
-	result, err := zsp.Publish(ctx, config.PublishConfig, selected, zsp.PublishOptions{
+	result, err := zsp.Publish(ctx, config.Publish, selected, zsp.PublishOptions{
 		Channel:              opts.Publish.Channel,
 		Commit:               opts.Publish.Commit,
 		SkipAppEvent:         opts.Publish.SkipAppEvent,
@@ -114,7 +114,7 @@ func loadPublicConfig(opts *cli.Options) (zsp.Config, error) {
 		if pathErr != nil {
 			return config, pathErr
 		}
-		config.ReleaseSource = &zsp.ReleaseSource{LocalPath: path}
+		config.Fetch.ReleaseSource = &zsp.ReleaseSource{LocalPath: path}
 	} else if len(opts.Args) == 0 && (opts.Publish.RepoURL != "" || opts.Publish.ReleaseSource != "") {
 		// Flags provide the source configuration.
 	} else {
@@ -128,36 +128,36 @@ func loadPublicConfig(opts *cli.Options) (zsp.Config, error) {
 		}
 	}
 	if opts.Publish.RepoURL != "" {
-		config.Repository = normalizeRepoURL(opts.Publish.RepoURL)
+		config.Fetch.Repository = normalizeRepoURL(opts.Publish.RepoURL)
 	}
 	if opts.Publish.ReleaseSource != "" {
 		value := opts.Publish.ReleaseSource
 		if !strings.Contains(value, "://") {
 			if absolute, pathErr := filepath.Abs(value); pathErr == nil {
 				if _, statErr := os.Stat(absolute); statErr == nil {
-					config.ReleaseSource = &zsp.ReleaseSource{LocalPath: absolute}
+					config.Fetch.ReleaseSource = &zsp.ReleaseSource{LocalPath: absolute}
 				} else {
-					config.ReleaseSource = &zsp.ReleaseSource{URL: normalizeRepoURL(value)}
+					config.Fetch.ReleaseSource = &zsp.ReleaseSource{URL: normalizeRepoURL(value)}
 				}
 			}
 		} else {
-			config.ReleaseSource = &zsp.ReleaseSource{URL: value}
+			config.Fetch.ReleaseSource = &zsp.ReleaseSource{URL: value}
 		}
 	}
 	if opts.Publish.Match != "" {
-		config.Match = opts.Publish.Match
+		config.Fetch.Match = opts.Publish.Match
 	}
 	if opts.Publish.ReleaseFilter != "" {
-		config.ReleaseFilter = opts.Publish.ReleaseFilter
+		config.Fetch.ReleaseFilter = opts.Publish.ReleaseFilter
 	}
 	if opts.Publish.PrereleaseChannel != "" {
-		config.PrereleaseChannel = opts.Publish.PrereleaseChannel
+		config.Fetch.PrereleaseChannel = opts.Publish.PrereleaseChannel
 	}
 	if len(opts.Publish.Metadata) > 0 {
-		config.MetadataSources = append([]string(nil), opts.Publish.Metadata...)
+		config.Publish.MetadataSources = append([]string(nil), opts.Publish.Metadata...)
 	}
 	if opts.Publish.SkipMetadata {
-		config.MetadataSources = []string{}
+		config.Publish.MetadataSources = []string{}
 	}
 	return config, nil
 }

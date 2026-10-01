@@ -486,7 +486,17 @@ func isLocalPath(value string) bool {
 }
 
 // Validate checks if the config has required fields and valid URLs.
+// Validate checks both the release source and the application metadata.
 func (c *Config) Validate() error {
+	if err := c.ValidateSource(); err != nil {
+		return err
+	}
+	return c.ValidateMetadata()
+}
+
+// ValidateSource checks the release source configuration: repository or
+// release_source, release filtering, and asset matching.
+func (c *Config) ValidateSource() error {
 	if c.Repository == "" && c.ReleaseSource == nil {
 		return fmt.Errorf("no source specified: need 'repository' or 'release_source'")
 	}
@@ -526,6 +536,27 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("invalid release_source: %w", err)
 		}
 	}
+
+	// Validate release_filter regex pattern
+	if c.ReleaseFilter != "" {
+		if _, err := regexp.Compile(c.ReleaseFilter); err != nil {
+			return fmt.Errorf("invalid release_filter pattern %q: %w", c.ReleaseFilter, err)
+		}
+	}
+
+	// Validate match regex pattern
+	if c.Match != "" {
+		if _, err := regexp.Compile(c.Match); err != nil {
+			return fmt.Errorf("invalid match pattern %q: %w", c.Match, err)
+		}
+	}
+
+	return nil
+}
+
+// ValidateMetadata checks the application metadata configuration: website,
+// media, release notes, and metadata sources.
+func (c *Config) ValidateMetadata() error {
 	if c.Website != "" {
 		if err := ValidateURL(c.Website); err != nil {
 			return fmt.Errorf("invalid website URL: %w", err)
@@ -541,20 +572,6 @@ func (c *Config) Validate() error {
 	if strings.Contains(c.ReleaseNotes, "://") {
 		if err := ValidateURL(c.ReleaseNotes); err != nil {
 			return fmt.Errorf("invalid release_notes URL: %w", err)
-		}
-	}
-
-	// Validate release_filter regex pattern
-	if c.ReleaseFilter != "" {
-		if _, err := regexp.Compile(c.ReleaseFilter); err != nil {
-			return fmt.Errorf("invalid release_filter pattern %q: %w", c.ReleaseFilter, err)
-		}
-	}
-
-	// Validate match regex pattern
-	if c.Match != "" {
-		if _, err := regexp.Compile(c.Match); err != nil {
-			return fmt.Errorf("invalid match pattern %q: %w", c.Match, err)
 		}
 	}
 	for _, source := range c.MetadataSources {

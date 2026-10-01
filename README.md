@@ -140,8 +140,8 @@ The non-interactive public package is `github.com/zapstore/zsp`:
 
 ```go
 cfg, err := zsp.LoadConfig("zapstore.yaml")
-apks, err := zsp.Fetch(ctx, cfg.FetchConfig, zsp.FetchOptions{})
-result, err := zsp.Publish(ctx, cfg.PublishConfig, apks[0], zsp.PublishOptions{})
+apks, err := zsp.Fetch(ctx, cfg.Fetch, zsp.FetchOptions{})
+result, err := zsp.Publish(ctx, cfg.Publish, apks[0], zsp.PublishOptions{})
 ```
 
 Call `APK.Close` for candidates that will not be published. `Publish` closes a

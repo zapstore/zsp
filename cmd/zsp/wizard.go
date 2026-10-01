@@ -55,7 +55,7 @@ func runWizard(ctx context.Context) int {
 	}
 	steps := ui.NewStepTracker(4)
 	steps.StartStep("📱 Add your app")
-	source, err := ui.PromptFieldDefault("Where is the source code published?", "For example: github.com/zapstore/zapstore. If app is closed-source, leave it blank.", existing.Repository, false, false)
+	source, err := ui.PromptFieldDefault("Where is the source code published?", "For example: github.com/zapstore/zapstore. If app is closed-source, leave it blank.", existing.Fetch.Repository, false, false)
 	if err != nil {
 		return wizardError("App discovery stopped", err)
 	}
@@ -66,17 +66,17 @@ func runWizard(ctx context.Context) int {
 	if source == "" {
 		publish.config = existing
 	} else {
-		publish.config.ReleaseSource = existing.ReleaseSource
-		publish.config.ReleaseFilter = existing.ReleaseFilter
-		publish.config.Match = existing.Match
-		publish.config.PrereleaseChannel = existing.PrereleaseChannel
+		publish.config.Fetch.ReleaseSource = existing.Fetch.ReleaseSource
+		publish.config.Fetch.ReleaseFilter = existing.Fetch.ReleaseFilter
+		publish.config.Fetch.Match = existing.Fetch.Match
+		publish.config.Fetch.PrereleaseChannel = existing.Fetch.PrereleaseChannel
 	}
 
 	var candidates []*zsp.APK
-	if isRepositorySuggestion(publish.config.Repository) {
+	if isRepositorySuggestion(publish.config.Fetch.Repository) {
 		spinner := ui.NewSpinner("Finding and inspecting APK releases...")
 		spinner.Start()
-		candidates, err = zsp.Fetch(ctx, publish.config.FetchConfig, zsp.FetchOptions{SkipHTTPCache: true})
+		candidates, err = zsp.Fetch(ctx, publish.config.Fetch, zsp.FetchOptions{SkipHTTPCache: true})
 		spinner.Stop()
 		if err != nil {
 			if err == ui.ErrInterrupted || errors.Is(err, context.Canceled) || errors.Is(err, huh.ErrUserAborted) {
@@ -97,7 +97,7 @@ func runWizard(ctx context.Context) int {
 		}
 		spinner := ui.NewSpinner("Finding and inspecting APK releases...")
 		spinner.Start()
-		candidates, err = zsp.Fetch(ctx, publish.config.FetchConfig, zsp.FetchOptions{SkipHTTPCache: true})
+		candidates, err = zsp.Fetch(ctx, publish.config.Fetch, zsp.FetchOptions{SkipHTTPCache: true})
 		spinner.Stop()
 		if err != nil {
 			return wizardError("No verified APK release found", err)
@@ -185,13 +185,13 @@ func loadWizardConfig(path string) (zsp.Config, error) {
 }
 
 func wizardReleaseSourceDefault(config zsp.Config) string {
-	if config.ReleaseSource == nil {
+	if config.Fetch.ReleaseSource == nil {
 		return ""
 	}
-	if config.ReleaseSource.LocalPath != "" {
-		return config.ReleaseSource.LocalPath
+	if config.Fetch.ReleaseSource.LocalPath != "" {
+		return config.Fetch.ReleaseSource.LocalPath
 	}
-	return config.ReleaseSource.URL
+	return config.Fetch.ReleaseSource.URL
 }
 
 func wizardRelayTargets(relays []string) []ui.KeyValue {
@@ -694,7 +694,7 @@ func wizardConfigFromSourceCode(source string) (wizardPublishConfig, error) {
 	}
 	source, _ = config.CanonicalForgeRepositoryURL(source, "")
 	return wizardPublishConfig{config: zsp.Config{
-		FetchConfig: zsp.FetchConfig{Repository: source},
+		Fetch: zsp.FetchConfig{Repository: source},
 	}}, nil
 }
 
@@ -712,8 +712,8 @@ func wizardConfigFromReleaseSource(sourceCode, source string) (wizardPublishConf
 		if info, err := os.Stat(absolutePath); err == nil && info.IsDir() {
 			return wizardPublishConfig{
 				config: zsp.Config{
-					FetchConfig: zsp.FetchConfig{
-						Repository:    publish.config.Repository,
+					Fetch: zsp.FetchConfig{
+						Repository:    publish.config.Fetch.Repository,
 						ReleaseSource: &zsp.ReleaseSource{LocalPath: absolutePath},
 					},
 				},
@@ -725,13 +725,13 @@ func wizardConfigFromReleaseSource(sourceCode, source string) (wizardPublishConf
 		return wizardPublishConfig{}, err
 	}
 	if repository, ok := config.CanonicalForgeRepositoryURL(source, ""); ok {
-		if publish.config.Repository == "" {
-			publish.config.Repository = repository
+		if publish.config.Fetch.Repository == "" {
+			publish.config.Fetch.Repository = repository
 			return publish, nil
 		}
 		source = repository
 	}
-	publish.config.ReleaseSource = &zsp.ReleaseSource{URL: source}
+	publish.config.Fetch.ReleaseSource = &zsp.ReleaseSource{URL: source}
 	return publish, nil
 }
 
@@ -803,9 +803,9 @@ func loadWizardYAML(path string, apk *zsp.APK) (wizardMetadata, *yaml.Node, erro
 		return metadata, nil, err
 	}
 	metadata = wizardMetadata{
-		name: existing.Name, summary: existing.Summary, description: existing.Description,
-		tags: existing.Tags, license: existing.License, website: existing.Website,
-		icon: existing.Icon, images: existing.Images, sources: existing.MetadataSources,
+		name: existing.Publish.Name, summary: existing.Publish.Summary, description: existing.Publish.Description,
+		tags: existing.Publish.Tags, license: existing.Publish.License, website: existing.Publish.Website,
+		icon: existing.Publish.Icon, images: existing.Publish.Images, sources: existing.Publish.MetadataSources,
 	}
 	if metadata.name == "" {
 		metadata.name = apk.Name
@@ -852,7 +852,7 @@ func wizardDirectPublishing(ctx context.Context, publish wizardPublishConfig, se
 	if _, allowed := state.authorized[state.signer.PublicKey()]; !allowed {
 		return wizardError("Signing setup stopped", fmt.Errorf("SIGN_WITH is not the active C1 owner or delegate"))
 	}
-	result, err := zsp.Publish(ctx, publish.config.PublishConfig, selected, zsp.PublishOptions{Preview: true})
+	result, err := zsp.Publish(ctx, publish.config.Publish, selected, zsp.PublishOptions{Preview: true})
 	if err != nil {
 		return wizardError("Publication stopped", err)
 	}
@@ -943,7 +943,7 @@ func promptWizardMetadataSources(existing []string, source zsp.Config, root stri
 }
 
 func wizardMetadataSourceChoices(source zsp.Config, root string) ([]string, []string) {
-	if source.ReleaseSource != nil && source.ReleaseSource.LocalPath != "" {
+	if source.Fetch.ReleaseSource != nil && source.Fetch.ReleaseSource.LocalPath != "" {
 		return []string{"fdroid", "playstore"}, []string{"F-Droid", "Google Play Store"}
 	}
 
@@ -977,11 +977,11 @@ func wizardMetadataSourceChoices(source zsp.Config, root string) ([]string, []st
 }
 
 func wizardMetadataForgeTypes(source zsp.Config) []config.SourceType {
-	types := []config.SourceType{config.DetectSourceType(source.Repository)}
-	if source.ReleaseSource != nil {
-		releaseType := config.DetectSourceType(source.ReleaseSource.URL)
-		if source.ReleaseSource.Type != "" {
-			releaseType = config.ParseSourceType(source.ReleaseSource.Type)
+	types := []config.SourceType{config.DetectSourceType(source.Fetch.Repository)}
+	if source.Fetch.ReleaseSource != nil {
+		releaseType := config.DetectSourceType(source.Fetch.ReleaseSource.URL)
+		if source.Fetch.ReleaseSource.Type != "" {
+			releaseType = config.ParseSourceType(source.Fetch.ReleaseSource.Type)
 		}
 		types = append(types, releaseType)
 	}
@@ -1004,14 +1004,14 @@ func splitWizardList(value string) []string {
 }
 
 func applyWizardMetadata(config *zsp.Config, metadata wizardMetadata) {
-	config.Name = metadata.name
-	config.Summary = metadata.summary
-	config.Description = metadata.description
-	config.Tags = append([]string(nil), metadata.tags...)
-	config.License = metadata.license
-	config.Website = metadata.website
-	config.Icon = metadata.icon
-	config.Images = append([]string(nil), metadata.images...)
+	config.Publish.Name = metadata.name
+	config.Publish.Summary = metadata.summary
+	config.Publish.Description = metadata.description
+	config.Publish.Tags = append([]string(nil), metadata.tags...)
+	config.Publish.License = metadata.license
+	config.Publish.Website = metadata.website
+	config.Publish.Icon = metadata.icon
+	config.Publish.Images = append([]string(nil), metadata.images...)
 }
 
 func saveWizardYAML(path string, document *yaml.Node, metadata wizardMetadata, source zsp.Config, root string) error {
@@ -1033,13 +1033,13 @@ func saveWizardYAML(path string, document *yaml.Node, metadata wizardMetadata, s
 	setWizardYAMLValue(document.Content[0], "name", nil)
 	setWizardYAMLValue(document.Content[0], "icon", nil)
 	setWizardYAMLSequence(document.Content[0], "metadata_sources", metadata.sources)
-	if source.Repository != "" {
-		setWizardYAMLValue(document.Content[0], "repository", []string{source.Repository})
+	if source.Fetch.Repository != "" {
+		setWizardYAMLValue(document.Content[0], "repository", []string{source.Fetch.Repository})
 	}
-	if source.ReleaseSource != nil {
-		value := source.ReleaseSource.URL
-		if source.ReleaseSource.LocalPath != "" {
-			relative, err := filepath.Rel(root, source.ReleaseSource.LocalPath)
+	if source.Fetch.ReleaseSource != nil {
+		value := source.Fetch.ReleaseSource.URL
+		if source.Fetch.ReleaseSource.LocalPath != "" {
+			relative, err := filepath.Rel(root, source.Fetch.ReleaseSource.LocalPath)
 			if err != nil {
 				return err
 			}
@@ -1181,26 +1181,26 @@ func ensureEnvIgnored() error {
 }
 
 func wizardSuggestionSource(cfg zsp.Config) string {
-	if cfg.Repository != "" {
-		return cfg.Repository
+	if cfg.Fetch.Repository != "" {
+		return cfg.Fetch.Repository
 	}
-	if cfg.ReleaseSource != nil {
-		return cfg.ReleaseSource.URL
+	if cfg.Fetch.ReleaseSource != nil {
+		return cfg.Fetch.ReleaseSource.URL
 	}
 	return ""
 }
 
 func wizardReleaseLocation(cfg zsp.Config) string {
-	if cfg.ReleaseSource != nil {
-		if cfg.ReleaseSource.LocalPath != "" {
-			return cfg.ReleaseSource.LocalPath
+	if cfg.Fetch.ReleaseSource != nil {
+		if cfg.Fetch.ReleaseSource.LocalPath != "" {
+			return cfg.Fetch.ReleaseSource.LocalPath
 		}
-		if cfg.ReleaseSource.URL != "" {
-			return cfg.ReleaseSource.URL
+		if cfg.Fetch.ReleaseSource.URL != "" {
+			return cfg.Fetch.ReleaseSource.URL
 		}
-		if cfg.ReleaseSource.AssetURL != "" {
-			return cfg.ReleaseSource.AssetURL
+		if cfg.Fetch.ReleaseSource.AssetURL != "" {
+			return cfg.Fetch.ReleaseSource.AssetURL
 		}
 	}
-	return cfg.Repository
+	return cfg.Fetch.Repository
 }

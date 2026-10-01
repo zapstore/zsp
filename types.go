@@ -9,8 +9,8 @@ import (
 
 // Config contains source resolution and publication metadata.
 type Config struct {
-	FetchConfig
-	PublishConfig
+	Fetch   FetchConfig
+	Publish PublishConfig
 }
 
 // FetchConfig identifies and filters an APK release source.

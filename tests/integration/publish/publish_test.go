@@ -98,20 +98,20 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 	}
 
 	t.Setenv("SIGN_WITH", ownerSecret)
-	first := fetchOneE2EAPK(t, config.FetchConfig)
-	firstResult := publishE2EAPK(t, config.PublishConfig, first, blossomURL, relayURL, false)
+	first := fetchOneE2EAPK(t, config.Fetch)
+	firstResult := publishE2EAPK(t, config.Publish, first, blossomURL, relayURL, false)
 	assertPublishedBlob(t, firstResult, firstBytes)
 	assertRelayPublication(t, relayURL, ownerPubkey, []string{ownerPubkey, delegatePubkey}, 1, 1, 1)
 
-	equal := fetchOneE2EAPK(t, config.FetchConfig)
-	_, err = zsp.Publish(t.Context(), config.PublishConfig, equal, zsp.PublishOptions{
+	equal := fetchOneE2EAPK(t, config.Fetch)
+	_, err = zsp.Publish(t.Context(), config.Publish, equal, zsp.PublishOptions{
 		BlossomURL: blossomURL,
 		Relays:     []string{relayURL},
 	})
 	if !errors.Is(err, zsp.ErrAlreadyPublished) {
 		t.Fatalf("equal version Publish error = %v, want ErrAlreadyPublished", err)
 	}
-	equalResult, err := zsp.Publish(t.Context(), config.PublishConfig, equal, zsp.PublishOptions{
+	equalResult, err := zsp.Publish(t.Context(), config.Publish, equal, zsp.PublishOptions{
 		BlossomURL:       blossomURL,
 		Relays:           []string{relayURL},
 		OverwriteRelease: true,
@@ -130,13 +130,13 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 	}
 
 	downgradeAPK := buildE2EAPK(t, apkDirectory, keystore, 41)
-	downgradeFetchConfig := config.FetchConfig
+	downgradeFetchConfig := config.Fetch
 	downgradeSource := *downgradeFetchConfig.ReleaseSource
 	downgradeSource.LocalPath = downgradeAPK
 	downgradeFetchConfig.ReleaseSource = &downgradeSource
 	downgrade := fetchOneE2EAPK(t, downgradeFetchConfig)
 	for _, overwrite := range []bool{false, true} {
-		_, err := zsp.Publish(t.Context(), config.PublishConfig, downgrade, zsp.PublishOptions{
+		_, err := zsp.Publish(t.Context(), config.Publish, downgrade, zsp.PublishOptions{
 			BlossomURL:       blossomURL,
 			Relays:           []string{relayURL},
 			OverwriteRelease: overwrite,
@@ -146,7 +146,7 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 		}
 	}
 	unreachableRelay := "ws://" + unusedLoopbackAddress(t)
-	_, err = zsp.Publish(t.Context(), config.PublishConfig, downgrade, zsp.PublishOptions{
+	_, err = zsp.Publish(t.Context(), config.Publish, downgrade, zsp.PublishOptions{
 		BlossomURL:     blossomURL,
 		Relays:         []string{unreachableRelay},
 		SkipProofCheck: true,
@@ -160,13 +160,13 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondFetchConfig := config.FetchConfig
+	secondFetchConfig := config.Fetch
 	secondSource := *secondFetchConfig.ReleaseSource
 	secondSource.LocalPath = secondAPK
 	secondFetchConfig.ReleaseSource = &secondSource
 	second := fetchOneE2EAPK(t, secondFetchConfig)
 	t.Setenv("SIGN_WITH", delegateSecret)
-	secondResult, err := zsp.Publish(t.Context(), config.PublishConfig, second, zsp.PublishOptions{
+	secondResult, err := zsp.Publish(t.Context(), config.Publish, second, zsp.PublishOptions{
 		BlossomURL:   blossomURL,
 		Relays:       []string{relayURL, unreachableRelay},
 		SkipAppEvent: true,
@@ -184,13 +184,13 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 	}
 
 	thirdAPK := buildE2EAPK(t, apkDirectory, keystore, 44)
-	thirdFetchConfig := config.FetchConfig
+	thirdFetchConfig := config.Fetch
 	thirdSource := *thirdFetchConfig.ReleaseSource
 	thirdSource.LocalPath = thirdAPK
 	thirdFetchConfig.ReleaseSource = &thirdSource
 	third := fetchOneE2EAPK(t, thirdFetchConfig)
 	t.Setenv("SIGN_WITH", indexerSecret)
-	thirdResult, err := zsp.Publish(t.Context(), config.PublishConfig, third, zsp.PublishOptions{
+	thirdResult, err := zsp.Publish(t.Context(), config.Publish, third, zsp.PublishOptions{
 		BlossomURL:     blossomURL,
 		Relays:         []string{relayURL},
 		SkipAppEvent:   true,
@@ -205,13 +205,13 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 	assertReleasePublishedBy(t, relayURL, thirdResult.ID, indexerPubkey)
 
 	retryAPK := buildE2EAPK(t, apkDirectory, keystore, 45)
-	retryFetchConfig := config.FetchConfig
+	retryFetchConfig := config.Fetch
 	retrySource := *retryFetchConfig.ReleaseSource
 	retrySource.LocalPath = retryAPK
 	retryFetchConfig.ReleaseSource = &retrySource
 	retryCandidate := fetchOneE2EAPK(t, retryFetchConfig)
 	t.Setenv("SIGN_WITH", ownerSecret)
-	retryResult, err := zsp.Publish(t.Context(), config.PublishConfig, retryCandidate, zsp.PublishOptions{
+	retryResult, err := zsp.Publish(t.Context(), config.Publish, retryCandidate, zsp.PublishOptions{
 		BlossomURL:     blossomURL,
 		Relays:         []string{relayURL},
 		SkipProofCheck: true,
@@ -223,12 +223,12 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 	assertPublishedBlob(t, retryResult, mustRead(t, retryAPK))
 
 	unchangedAPK := buildE2EAPK(t, apkDirectory, keystore, 46)
-	unchangedFetchConfig := config.FetchConfig
+	unchangedFetchConfig := config.Fetch
 	unchangedSource := *unchangedFetchConfig.ReleaseSource
 	unchangedSource.LocalPath = unchangedAPK
 	unchangedFetchConfig.ReleaseSource = &unchangedSource
 	unchanged := fetchOneE2EAPK(t, unchangedFetchConfig)
-	unchangedResult, err := zsp.Publish(t.Context(), config.PublishConfig, unchanged, zsp.PublishOptions{
+	unchangedResult, err := zsp.Publish(t.Context(), config.Publish, unchanged, zsp.PublishOptions{
 		BlossomURL:     blossomURL,
 		Relays:         []string{relayURL},
 		SkipProofCheck: true,
@@ -244,12 +244,12 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 	}
 
 	forcedAPK := buildE2EAPK(t, apkDirectory, keystore, 47)
-	forcedFetchConfig := config.FetchConfig
+	forcedFetchConfig := config.Fetch
 	forcedSource := *forcedFetchConfig.ReleaseSource
 	forcedSource.LocalPath = forcedAPK
 	forcedFetchConfig.ReleaseSource = &forcedSource
 	forced := fetchOneE2EAPK(t, forcedFetchConfig)
-	forcedResult, err := zsp.Publish(t.Context(), config.PublishConfig, forced, zsp.PublishOptions{
+	forcedResult, err := zsp.Publish(t.Context(), config.Publish, forced, zsp.PublishOptions{
 		BlossomURL:        blossomURL,
 		Relays:            []string{relayURL},
 		SkipProofCheck:    true,

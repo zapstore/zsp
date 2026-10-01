@@ -29,7 +29,7 @@ func TestWizardDiscoverReportsOnlyAcceptedSuggestion(t *testing.T) {
 	t.Cleanup(server.Close)
 	t.Setenv("RELAYS", "ws"+strings.TrimPrefix(server.URL, "http"))
 
-	cfg := zsp.Config{FetchConfig: zsp.FetchConfig{
+	cfg := zsp.Config{Fetch: zsp.FetchConfig{
 		Repository: "https://github.com/example/app",
 	}}
 	candidate := &zsp.APK{
@@ -58,7 +58,7 @@ func TestWizardDiscoverSkipsExistingAppID(t *testing.T) {
 	t.Cleanup(server.Close)
 	t.Setenv("RELAYS", "ws"+strings.TrimPrefix(server.URL, "http"))
 
-	cfg := zsp.Config{FetchConfig: zsp.FetchConfig{
+	cfg := zsp.Config{Fetch: zsp.FetchConfig{
 		Repository: "https://github.com/example/app",
 	}}
 	candidate := &zsp.APK{
@@ -118,11 +118,11 @@ func TestWizardConfigFromSourceCode(t *testing.T) {
 			if err != nil {
 				t.Fatalf("wizardConfigFromSourceCode() error = %v", err)
 			}
-			if got.config.Repository != test.repository {
-				t.Errorf("Repository = %q, want %q", got.config.Repository, test.repository)
+			if got.config.Fetch.Repository != test.repository {
+				t.Errorf("Repository = %q, want %q", got.config.Fetch.Repository, test.repository)
 			}
-			if got.config.ReleaseSource != nil {
-				t.Errorf("ReleaseSource = %#v, want nil", got.config.ReleaseSource)
+			if got.config.Fetch.ReleaseSource != nil {
+				t.Errorf("ReleaseSource = %#v, want nil", got.config.Fetch.ReleaseSource)
 			}
 		})
 	}
@@ -133,11 +133,11 @@ func TestWizardConfigFromReleaseSourcePreservesRepository(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.config.Repository != "https://github.com/example/app" {
-		t.Errorf("Repository = %q", got.config.Repository)
+	if got.config.Fetch.Repository != "https://github.com/example/app" {
+		t.Errorf("Repository = %q", got.config.Fetch.Repository)
 	}
-	if got.config.ReleaseSource == nil || got.config.ReleaseSource.URL != "https://downloads.example.com/app/releases" {
-		t.Errorf("ReleaseSource = %#v", got.config.ReleaseSource)
+	if got.config.Fetch.ReleaseSource == nil || got.config.Fetch.ReleaseSource.URL != "https://downloads.example.com/app/releases" {
+		t.Errorf("ReleaseSource = %#v", got.config.Fetch.ReleaseSource)
 	}
 }
 
@@ -146,11 +146,11 @@ func TestWizardConfigFromReleaseSourceUsesForgeRepository(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.config.Repository != "https://github.com/greenart7c3/amber" {
-		t.Errorf("Repository = %q", got.config.Repository)
+	if got.config.Fetch.Repository != "https://github.com/greenart7c3/amber" {
+		t.Errorf("Repository = %q", got.config.Fetch.Repository)
 	}
-	if got.config.ReleaseSource != nil {
-		t.Errorf("ReleaseSource = %#v, want nil", got.config.ReleaseSource)
+	if got.config.Fetch.ReleaseSource != nil {
+		t.Errorf("ReleaseSource = %#v, want nil", got.config.Fetch.ReleaseSource)
 	}
 }
 
@@ -168,13 +168,13 @@ func TestWizardConfigFromReleaseSourceAcceptsLocalAPKDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wizardConfigFromReleaseSource() error = %v", err)
 	}
-	if got.config.ReleaseSource == nil {
+	if got.config.Fetch.ReleaseSource == nil {
 		t.Fatal("ReleaseSource is nil")
 	}
-	if got.config.Repository != "https://github.com/example/app" {
-		t.Errorf("Repository = %q", got.config.Repository)
+	if got.config.Fetch.Repository != "https://github.com/example/app" {
+		t.Errorf("Repository = %q", got.config.Fetch.Repository)
 	}
-	gotInfo, err := os.Stat(got.config.ReleaseSource.LocalPath)
+	gotInfo, err := os.Stat(got.config.Fetch.ReleaseSource.LocalPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestWizardConfigFromReleaseSourceAcceptsLocalAPKDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !os.SameFile(gotInfo, wantInfo) {
-		t.Fatalf("ReleaseSource = %#v, want local directory %q", got.config.ReleaseSource, directory)
+		t.Fatalf("ReleaseSource = %#v, want local directory %q", got.config.Fetch.ReleaseSource, directory)
 	}
 }
 
@@ -195,12 +195,12 @@ func TestWizardReleaseLocation(t *testing.T) {
 	}{
 		{
 			name: "repository",
-			cfg:  zsp.Config{FetchConfig: zsp.FetchConfig{Repository: "https://github.com/example/app"}},
+			cfg:  zsp.Config{Fetch: zsp.FetchConfig{Repository: "https://github.com/example/app"}},
 			want: "https://github.com/example/app",
 		},
 		{
 			name: "release source",
-			cfg: zsp.Config{FetchConfig: zsp.FetchConfig{
+			cfg: zsp.Config{Fetch: zsp.FetchConfig{
 				Repository:    "https://github.com/example/not-the-release",
 				ReleaseSource: &zsp.ReleaseSource{URL: "https://github.com/example/app"},
 			}},
@@ -208,7 +208,7 @@ func TestWizardReleaseLocation(t *testing.T) {
 		},
 		{
 			name: "local APK",
-			cfg: zsp.Config{FetchConfig: zsp.FetchConfig{
+			cfg: zsp.Config{Fetch: zsp.FetchConfig{
 				ReleaseSource: &zsp.ReleaseSource{LocalPath: "/tmp/app.apk"},
 			}},
 			want: "/tmp/app.apk",
@@ -239,7 +239,7 @@ func TestWizardMetadataSourceChoices(t *testing.T) {
 	}{
 		{
 			name: "local Fastlane and GitHub repository",
-			source: zsp.Config{FetchConfig: zsp.FetchConfig{
+			source: zsp.Config{Fetch: zsp.FetchConfig{
 				Repository: "https://github.com/example/app",
 			}},
 			root:       root,
@@ -248,7 +248,7 @@ func TestWizardMetadataSourceChoices(t *testing.T) {
 		},
 		{
 			name: "GitLab repository and Gitea release source",
-			source: zsp.Config{FetchConfig: zsp.FetchConfig{
+			source: zsp.Config{Fetch: zsp.FetchConfig{
 				Repository:    "https://gitlab.com/example/app",
 				ReleaseSource: &zsp.ReleaseSource{URL: "https://codeberg.org/example/app/releases"},
 			}},
@@ -258,7 +258,7 @@ func TestWizardMetadataSourceChoices(t *testing.T) {
 		},
 		{
 			name: "local APK excludes Fastlane and forge sources",
-			source: zsp.Config{FetchConfig: zsp.FetchConfig{
+			source: zsp.Config{Fetch: zsp.FetchConfig{
 				Repository:    "https://github.com/example/app",
 				ReleaseSource: &zsp.ReleaseSource{LocalPath: "/tmp/apks"},
 			}},
@@ -293,7 +293,7 @@ func TestSaveWizardYAMLPreservesSourceCodeAndReleaseSource(t *testing.T) {
 	}
 	metadata.name = "Example"
 	if err := saveWizardYAML(path, document, metadata, zsp.Config{
-		FetchConfig: zsp.FetchConfig{
+		Fetch: zsp.FetchConfig{
 			Repository:    "https://github.com/example/app",
 			ReleaseSource: &zsp.ReleaseSource{URL: "https://downloads.example.com/app/releases"},
 		},
@@ -329,7 +329,7 @@ func TestSaveWizardYAMLOmitsNameAndIcon(t *testing.T) {
 	metadata.name = "Example"
 	metadata.icon = "./icon.png"
 	if err := saveWizardYAML(path, document, metadata, zsp.Config{
-		FetchConfig: zsp.FetchConfig{Repository: "https://github.com/example/app"},
+		Fetch: zsp.FetchConfig{Repository: "https://github.com/example/app"},
 	}, root); err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +351,7 @@ func TestSaveWizardYAMLDisablesMetadataAndAddsGuidance(t *testing.T) {
 	document := &yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode, Tag: "!!map"}}}
 
 	if err := saveWizardYAML(path, document, metadata, zsp.Config{
-		FetchConfig: zsp.FetchConfig{Repository: "https://github.com/example/app"},
+		Fetch: zsp.FetchConfig{Repository: "https://github.com/example/app"},
 	}, root); err != nil {
 		t.Fatal(err)
 	}

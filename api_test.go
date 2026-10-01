@@ -41,7 +41,7 @@ func TestPublicStructFieldsMatchContract(t *testing.T) {
 		value any
 		want  []string
 	}{
-		{Config{}, []string{"FetchConfig", "PublishConfig"}},
+		{Config{}, []string{"Fetch", "Publish"}},
 		{FetchConfig{}, []string{"Repository", "ReleaseSource", "ReleaseFilter", "Match", "PrereleaseChannel"}},
 		{PublishConfig{}, []string{"Name", "Summary", "Description", "Tags", "License", "Website", "Icon", "Images", "ReleaseNotes", "SupportedNIPs", "MinAllowedVersion", "MinAllowedVersionCode", "MetadataSources", "Channel"}},
 		{ReleaseSource{}, []string{"URL", "LocalPath", "Type", "AssetURL", "VersionExtractor", "AssetExtractor"}},
@@ -90,27 +90,27 @@ release_notes: notes.md
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.ReleaseSource == nil {
+	if config.Fetch.ReleaseSource == nil {
 		t.Fatal("ReleaseSource is nil")
 	}
 	want := filepath.Join(directory, "builds", "*.apk")
-	if config.ReleaseSource.LocalPath != want {
-		t.Fatalf("LocalPath = %q, want %q", config.ReleaseSource.LocalPath, want)
+	if config.Fetch.ReleaseSource.LocalPath != want {
+		t.Fatalf("LocalPath = %q, want %q", config.Fetch.ReleaseSource.LocalPath, want)
 	}
-	if config.Name != "Example" {
-		t.Fatalf("Name = %q, want Example", config.Name)
+	if config.Publish.Name != "Example" {
+		t.Fatalf("Name = %q, want Example", config.Publish.Name)
 	}
-	if config.Icon != filepath.Join(directory, "media", "icon.png") {
-		t.Fatalf("Icon = %q, want resolved local path", config.Icon)
+	if config.Publish.Icon != filepath.Join(directory, "media", "icon.png") {
+		t.Fatalf("Icon = %q, want resolved local path", config.Publish.Icon)
 	}
-	if !reflect.DeepEqual(config.Images, []string{
+	if !reflect.DeepEqual(config.Publish.Images, []string{
 		filepath.Join(directory, "media", "one.png"),
 		"https://example.com/two.png",
 	}) {
-		t.Fatalf("Images = %v, want resolved local paths and unchanged URLs", config.Images)
+		t.Fatalf("Images = %v, want resolved local paths and unchanged URLs", config.Publish.Images)
 	}
-	if config.ReleaseNotes != filepath.Join(directory, "notes.md") {
-		t.Fatalf("ReleaseNotes = %q, want resolved local path", config.ReleaseNotes)
+	if config.Publish.ReleaseNotes != filepath.Join(directory, "notes.md") {
+		t.Fatalf("ReleaseNotes = %q, want resolved local path", config.Publish.ReleaseNotes)
 	}
 }
 
@@ -125,20 +125,20 @@ release_notes: notes.md
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.ReleaseSource == nil {
+	if config.Fetch.ReleaseSource == nil {
 		t.Fatal("ReleaseSource is nil")
 	}
-	if config.ReleaseSource.LocalPath != "builds/*.apk" {
-		t.Fatalf("LocalPath = %q, want unresolved relative path", config.ReleaseSource.LocalPath)
+	if config.Fetch.ReleaseSource.LocalPath != "builds/*.apk" {
+		t.Fatalf("LocalPath = %q, want unresolved relative path", config.Fetch.ReleaseSource.LocalPath)
 	}
-	if config.Icon != "media/icon.png" {
-		t.Fatalf("Icon = %q, want unresolved relative path", config.Icon)
+	if config.Publish.Icon != "media/icon.png" {
+		t.Fatalf("Icon = %q, want unresolved relative path", config.Publish.Icon)
 	}
-	if !reflect.DeepEqual(config.Images, []string{"media/one.png", "https://example.com/two.png"}) {
-		t.Fatalf("Images = %v, want unresolved relative paths and unchanged URLs", config.Images)
+	if !reflect.DeepEqual(config.Publish.Images, []string{"media/one.png", "https://example.com/two.png"}) {
+		t.Fatalf("Images = %v, want unresolved relative paths and unchanged URLs", config.Publish.Images)
 	}
-	if config.ReleaseNotes != "notes.md" {
-		t.Fatalf("ReleaseNotes = %q, want unresolved relative path", config.ReleaseNotes)
+	if config.Publish.ReleaseNotes != "notes.md" {
+		t.Fatalf("ReleaseNotes = %q, want unresolved relative path", config.Publish.ReleaseNotes)
 	}
 }
 
@@ -217,6 +217,49 @@ release_source:
 	}
 }
 
+func TestParseFetchConfigValidatesSourceOnly(t *testing.T) {
+	config, err := ParseFetchConfig(strings.NewReader("repository: https://github.com/example/app\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Repository != "https://github.com/example/app" {
+		t.Fatalf("Repository = %q", config.Repository)
+	}
+
+	// A document without a source cannot be a fetch config.
+	if _, err := ParseFetchConfig(strings.NewReader("name: Example\n")); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("ParseFetchConfig(metadata only) = %v, want ErrInvalidConfig", err)
+	}
+
+	// Invalid source settings are validated.
+	if _, err := ParseFetchConfig(strings.NewReader("repository: https://github.com/example/app\nmatch: \"[\"\n")); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("ParseFetchConfig(invalid match) = %v, want ErrInvalidConfig", err)
+	}
+}
+
+func TestParsePublishConfigValidatesMetadataOnly(t *testing.T) {
+	config, err := ParsePublishConfig(strings.NewReader("name: Example\nmetadata_sources: []\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Name != "Example" {
+		t.Fatalf("Name = %q", config.Name)
+	}
+	if config.MetadataSources == nil {
+		t.Fatal("MetadataSources = nil, want non-nil empty slice")
+	}
+
+	// A source-only document is valid metadata (no source is required).
+	if _, err := ParsePublishConfig(strings.NewReader("repository: https://github.com/example/app\n")); err != nil {
+		t.Fatalf("ParsePublishConfig(source only) = %v", err)
+	}
+
+	// Invalid metadata is validated.
+	if _, err := ParsePublishConfig(strings.NewReader("metadata_sources: [nope]\n")); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("ParsePublishConfig(invalid metadata source) = %v, want ErrInvalidConfig", err)
+	}
+}
+
 func TestLoadConfigPreservesEmptyMetadataSources(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "zapstore.yaml")
 	if err := os.WriteFile(configPath, []byte("repository: https://github.com/example/app\nmetadata_sources: []\n"), 0o600); err != nil {
@@ -226,11 +269,11 @@ func TestLoadConfigPreservesEmptyMetadataSources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.MetadataSources == nil {
+	if config.Publish.MetadataSources == nil {
 		t.Fatal("MetadataSources = nil, want non-nil empty slice")
 	}
-	if len(config.MetadataSources) != 0 {
-		t.Fatalf("MetadataSources = %v, want empty", config.MetadataSources)
+	if len(config.Publish.MetadataSources) != 0 {
+		t.Fatalf("MetadataSources = %v, want empty", config.Publish.MetadataSources)
 	}
 }
 
@@ -248,11 +291,11 @@ channel: nightly
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.PrereleaseChannel != "beta" {
-		t.Errorf("PrereleaseChannel = %q, want beta", config.PrereleaseChannel)
+	if config.Fetch.PrereleaseChannel != "beta" {
+		t.Errorf("PrereleaseChannel = %q, want beta", config.Fetch.PrereleaseChannel)
 	}
-	if config.Channel != "nightly" {
-		t.Errorf("Channel = %q, want nightly", config.Channel)
+	if config.Publish.Channel != "nightly" {
+		t.Errorf("Channel = %q, want nightly", config.Publish.Channel)
 	}
 }
 
