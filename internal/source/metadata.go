@@ -166,32 +166,40 @@ func (f *MetadataFetcher) FetchMetadataWithResult(ctx context.Context, sources [
 }
 
 // FetchAutomaticMetadata uses Fastlane metadata when present. It fetches the
-// native repository source only when the Fastlane directory is absent.
+// native repository source when Fastlane is absent, has no description, or
+// the Fastlane lookup fails.
 func (f *MetadataFetcher) FetchAutomaticMetadata(ctx context.Context, fallback string) error {
 	f.FetchAutomaticMetadataWithResult(ctx, fallback)
 	return nil
 }
 
-// FetchAutomaticMetadataWithResult uses Fastlane metadata when present and
-// returns individual source failures without making them fatal.
+// FetchAutomaticMetadataWithResult uses Fastlane metadata when it includes a
+// description. Otherwise it fills the remaining empty fields from the native
+// repository source. Fastlane failures other than "not found" (for example a
+// GitHub contents API 403) are recorded and do not skip that fallback.
+// A cancelled context stops the lookup.
 func (f *MetadataFetcher) FetchAutomaticMetadataWithResult(ctx context.Context, fallback string) *MetadataResult {
 	result := &MetadataResult{}
 	meta, err := f.fetchMetadataSource(ctx, "fastlane")
-	if err == nil {
+	switch {
+	case err == nil:
 		f.mergeMetadata(meta)
-		return result
-	}
-	if !errors.Is(err, errFastlaneUnavailable) {
+		if strings.TrimSpace(meta.Description) != "" {
+			return result
+		}
+	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
 		result.Errors = append(result.Errors, &MetadataError{Source: "fastlane", Err: err})
 		return result
+	case !errors.Is(err, errFastlaneUnavailable):
+		result.Errors = append(result.Errors, &MetadataError{Source: "fastlane", Err: err})
 	}
 
-	meta, err = f.fetchMetadataSource(ctx, fallback)
+	native, err := f.fetchMetadataSource(ctx, fallback)
 	if err != nil {
 		result.Errors = append(result.Errors, &MetadataError{Source: fallback, Err: err})
 		return result
 	}
-	f.mergeMetadata(meta)
+	f.mergeMetadata(native)
 	return result
 }
 
@@ -509,25 +517,34 @@ func (f *MetadataFetcher) fetchFDroidMetadata(ctx context.Context) (*AppMetadata
 		return nil, fmt.Errorf("no F-Droid package configured and no package ID available")
 	}
 
-	// Scrape the F-Droid website for icon and screenshots
+	// Scrape the F-Droid website for description, summary, icon, and screenshots.
+	// fdroiddata YAML no longer carries Summary/Description for most apps;
+	// the package page is the published text.
 	webMeta, err := f.scrapeFDroidWebsite(ctx, packageID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Also fetch metadata from fdroiddata YAML for detailed description, categories, etc.
+	// Also fetch metadata from fdroiddata YAML for categories, license, and
+	// any Summary/Description that the file still contains.
 	metadataURL := fmt.Sprintf("https://gitlab.com/fdroid/fdroiddata/-/raw/master/metadata/%s.yml", packageID)
 	fdMeta, yamlErr := f.fetchFDroidYAML(ctx, metadataURL)
 
 	meta := &AppMetadata{
-		IconURL:   webMeta.IconURL,
-		ImageURLs: webMeta.ImageURLs,
+		IconURL:     webMeta.IconURL,
+		ImageURLs:   webMeta.ImageURLs,
+		Summary:     webMeta.Summary,
+		Description: webMeta.Description,
 	}
 
-	// Merge YAML metadata if available
+	// Merge YAML metadata if available. Non-empty YAML text wins over the page.
 	if yamlErr == nil && fdMeta != nil {
-		meta.Summary = fdMeta.Summary
-		meta.Description = fdMeta.Description
+		if fdMeta.Summary != "" {
+			meta.Summary = fdMeta.Summary
+		}
+		if fdMeta.Description != "" {
+			meta.Description = fdMeta.Description
+		}
 		meta.Website = fdMeta.WebSite
 		meta.License = fdMeta.License
 
@@ -547,11 +564,13 @@ func (f *MetadataFetcher) fetchFDroidMetadata(ctx context.Context) (*AppMetadata
 
 // fdroidWebMeta contains metadata scraped from the F-Droid website.
 type fdroidWebMeta struct {
-	IconURL   string
-	ImageURLs []string
+	Summary     string
+	Description string
+	IconURL     string
+	ImageURLs   []string
 }
 
-// scrapeFDroidWebsite scrapes the F-Droid package page for icon and screenshots.
+// scrapeFDroidWebsite scrapes the F-Droid package page for description, summary, icon, and screenshots.
 func (f *MetadataFetcher) scrapeFDroidWebsite(ctx context.Context, packageID string) (*fdroidWebMeta, error) {
 	url := fmt.Sprintf("https://f-droid.org/en/packages/%s/", packageID)
 
@@ -604,6 +623,19 @@ func (f *MetadataFetcher) scrapeFDroidWebsite(ctx context.Context, packageID str
 			}
 		})
 	}
+
+	doc.Find(".package-summary").First().Each(func(i int, s *goquery.Selection) {
+		meta.Summary = strings.TrimSpace(s.Text())
+	})
+	doc.Find(".package-description").First().Each(func(i int, s *goquery.Selection) {
+		html, err := s.Html()
+		if err == nil {
+			meta.Description = htmlToMarkdown(html)
+		}
+		if meta.Description == "" {
+			meta.Description = strings.TrimSpace(s.Text())
+		}
+	})
 
 	// Extract screenshot URLs from the screenshot gallery
 	// F-Droid uses: <li class="js_slide screenshot"><img src="..." />

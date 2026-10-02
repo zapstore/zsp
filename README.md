@@ -102,9 +102,12 @@ structured HTML/JSON/header extractors, local APK paths and globs. Local paths
 in a loaded file resolve from that file's directory.
 
 Explicit YAML values win over gathered metadata. Without `metadata_sources`,
-GitHub and GitLab try Fastlane then native repository metadata; Gitea tries
-Fastlane. F-Droid and Play Store metadata are opt-in. Use `--skip-metadata` to
-disable external metadata.
+GitHub and GitLab try Fastlane first, then native repository metadata when
+Fastlane is absent, has no full description, or the lookup fails. Fastlane
+values that are present still win. Gitea tries Fastlane only. F-Droid and Play
+Store metadata are opt-in; F-Droid descriptions come from the package page when
+the fdroiddata YAML does not include them. Use `--skip-metadata` to disable
+external metadata.
 
 ## Signing and environment
 
