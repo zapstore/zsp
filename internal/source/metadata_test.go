@@ -448,7 +448,42 @@ func TestFetchAutomaticMetadataFallback(t *testing.T) {
 		}
 	})
 
-	t.Run("does not call GitHub when Fastlane exists", func(t *testing.T) {
+	t.Run("does not call GitHub when Fastlane has a description", func(t *testing.T) {
+		cfg := &config.Config{Repository: "https://github.com/owner/app"}
+		fetcher := NewMetadataFetcher(cfg)
+		fetcher.client = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.URL.Path {
+			case "/repos/owner/app/contents/fastlane/metadata/android":
+				return testResponse(http.StatusOK, `[{"name":"en-US","type":"dir"}]`), nil
+			case "/repos/owner/app/contents/fastlane/metadata/android/en-US":
+				return testResponse(http.StatusOK, `[
+					{"name":"title.txt","type":"file","download_url":"https://raw.test/title"},
+					{"name":"full_description.txt","type":"file","download_url":"https://raw.test/full"}
+				]`), nil
+			case "/repos/owner/app/contents/fastlane/metadata/android/en-US/images":
+				return testResponse(http.StatusNotFound, ""), nil
+			case "/title":
+				return testResponse(http.StatusOK, "Fastlane title"), nil
+			case "/full":
+				return testResponse(http.StatusOK, "Fastlane full description"), nil
+			case "/repos/owner/app":
+				t.Fatal("GitHub fallback must not be called when Fastlane has a description")
+			}
+			return testResponse(http.StatusNotFound, ""), nil
+		})}
+
+		if err := fetcher.FetchAutomaticMetadata(context.Background(), "github"); err != nil {
+			t.Fatalf("FetchAutomaticMetadata() error = %v", err)
+		}
+		if cfg.Name != "Fastlane title" {
+			t.Errorf("Name = %q, want Fastlane metadata", cfg.Name)
+		}
+		if cfg.Description != "Fastlane full description" {
+			t.Errorf("Description = %q, want Fastlane full description", cfg.Description)
+		}
+	})
+
+	t.Run("uses GitHub description when Fastlane has no full description", func(t *testing.T) {
 		cfg := &config.Config{Repository: "https://github.com/owner/app"}
 		fetcher := NewMetadataFetcher(cfg)
 		fetcher.client = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
@@ -462,18 +497,123 @@ func TestFetchAutomaticMetadataFallback(t *testing.T) {
 			case "/title":
 				return testResponse(http.StatusOK, "Fastlane title"), nil
 			case "/repos/owner/app":
-				t.Fatal("GitHub fallback must not be called when Fastlane exists")
+				return testResponse(http.StatusOK, `{
+					"name":"Repository name",
+					"description":"A repository description that is deliberately long enough to avoid a README request."
+				}`), nil
+			default:
+				return testResponse(http.StatusNotFound, ""), nil
 			}
-			return testResponse(http.StatusNotFound, ""), nil
 		})}
 
-		if err := fetcher.FetchAutomaticMetadata(context.Background(), "github"); err != nil {
-			t.Fatalf("FetchAutomaticMetadata() error = %v", err)
+		result := fetcher.FetchAutomaticMetadataWithResult(context.Background(), "github")
+		if result.HasErrors() {
+			t.Fatalf("unexpected metadata errors: %v", result.Errors[0])
 		}
 		if cfg.Name != "Fastlane title" {
-			t.Errorf("Name = %q, want Fastlane metadata", cfg.Name)
+			t.Errorf("Name = %q, want Fastlane title to win", cfg.Name)
+		}
+		if cfg.Description != "A repository description that is deliberately long enough to avoid a README request." {
+			t.Errorf("Description = %q, want GitHub description", cfg.Description)
 		}
 	})
+
+	t.Run("uses GitHub description when Fastlane lookup fails", func(t *testing.T) {
+		cfg := &config.Config{Repository: "https://github.com/owner/app"}
+		fetcher := NewMetadataFetcher(cfg)
+		fetcher.client = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.URL.Path {
+			case "/repos/owner/app/contents/fastlane/metadata/android":
+				return testResponse(http.StatusForbidden, "rate limit"), nil
+			case "/repos/owner/app":
+				return testResponse(http.StatusOK, `{
+					"name":"Repository name",
+					"description":"A repository description that is deliberately long enough to avoid a README request."
+				}`), nil
+			default:
+				return testResponse(http.StatusNotFound, ""), nil
+			}
+		})}
+
+		result := fetcher.FetchAutomaticMetadataWithResult(context.Background(), "github")
+		if !result.HasErrors() {
+			t.Fatal("expected the Fastlane failure to be recorded")
+		}
+		if cfg.Description != "A repository description that is deliberately long enough to avoid a README request." {
+			t.Errorf("Description = %q, want GitHub description", cfg.Description)
+		}
+	})
+}
+
+func TestFetchFDroidMetadataDescription(t *testing.T) {
+	page := `<html><body>
+<img class="package-icon" src="/repo/com.example.app/icon.png">
+<div class="package-summary">Short summary</div>
+<div class="package-description" dir="auto">Full description line.<br><br>Second paragraph.</div>
+<div class="screenshots"><img src="/repo/com.example.app/1.png"></div>
+</body></html>`
+	yamlWithoutText := "Categories:\n  - Strategy Game\nLicense: MPL-2.0\nWebSite: https://example.com\nAutoName: Example\n"
+	yamlWithText := yamlWithoutText + "Summary: YAML summary\nDescription: YAML description\n"
+
+	tests := []struct {
+		name            string
+		yaml            string
+		wantSummary     string
+		wantDescription string
+	}{
+		{
+			name:            "page text when YAML omits description",
+			yaml:            yamlWithoutText,
+			wantSummary:     "Short summary",
+			wantDescription: "Full description line.\n\nSecond paragraph.",
+		},
+		{
+			name:            "YAML text wins over the page",
+			yaml:            yamlWithText,
+			wantSummary:     "YAML summary",
+			wantDescription: "YAML description",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fetcher := NewMetadataFetcherWithPackageID(&config.Config{}, "com.example.app")
+			fetcher.client = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				switch req.URL.Host + req.URL.Path {
+				case "f-droid.org/en/packages/com.example.app/":
+					return testResponse(http.StatusOK, page), nil
+				case "gitlab.com/fdroid/fdroiddata/-/raw/master/metadata/com.example.app.yml":
+					return testResponse(http.StatusOK, tt.yaml), nil
+				default:
+					t.Errorf("unexpected request %s", req.URL)
+					return testResponse(http.StatusNotFound, ""), nil
+				}
+			})}
+
+			meta, err := fetcher.fetchFDroidMetadata(context.Background())
+			if err != nil {
+				t.Fatalf("fetchFDroidMetadata() error = %v", err)
+			}
+			if meta.Summary != tt.wantSummary {
+				t.Errorf("Summary = %q, want %q", meta.Summary, tt.wantSummary)
+			}
+			if meta.Description != tt.wantDescription {
+				t.Errorf("Description = %q, want %q", meta.Description, tt.wantDescription)
+			}
+			if meta.License != "MPL-2.0" || meta.Name != "Example" || meta.Website != "https://example.com" {
+				t.Errorf("YAML fields = name %q license %q website %q", meta.Name, meta.License, meta.Website)
+			}
+			if len(meta.Tags) != 1 || meta.Tags[0] != "strategy game" {
+				t.Errorf("Tags = %v, want [strategy game]", meta.Tags)
+			}
+			if meta.IconURL != "https://f-droid.org/repo/com.example.app/icon.png" {
+				t.Errorf("IconURL = %q", meta.IconURL)
+			}
+			if len(meta.ImageURLs) != 1 || meta.ImageURLs[0] != "https://f-droid.org/repo/com.example.app/1.png" {
+				t.Errorf("ImageURLs = %v", meta.ImageURLs)
+			}
+		})
+	}
 }
 
 func TestFetchFastlaneMetadataErrors(t *testing.T) {

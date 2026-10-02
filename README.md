@@ -144,10 +144,12 @@ When multiple sources are used, metadata is merged with this priority:
 
 When `metadata_sources` is omitted for a GitHub, GitLab, or Gitea-compatible
 repository (Codeberg, Forgejo, self-hosted Gitea), zsp tries Fastlane metadata
-first. For GitHub and GitLab, if the Fastlane Android metadata directory is
-absent, it falls back to that repository's native API and README metadata.
-Gitea/Codeberg currently uses Fastlane only. F-Droid and Play Store metadata are
-only fetched when explicitly selected.
+first. For GitHub and GitLab, if Fastlane is absent, has no full description,
+or the lookup fails, it falls back to that repository's native API and README
+metadata. Fastlane values that are present still win. Gitea/Codeberg currently
+uses Fastlane only. F-Droid and Play Store metadata are only fetched when
+explicitly selected. F-Droid descriptions come from the package page when the
+fdroiddata YAML does not include them.
 
 ### Usage
 
