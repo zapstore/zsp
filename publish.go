@@ -634,12 +634,13 @@ func relays(values []string) []string {
 }
 
 func firstRelay(values []string) string {
-	configured := relays(values)
-	if len(configured) == 0 {
-		return internalnostr.DefaultRelay
-	}
-	if public := publicRelayURL(configured[0]); public != "" {
-		return public
+	for _, relayURL := range relays(values) {
+		if _, ok := internalconfig.RelaySocketPath(relayURL); ok {
+			continue
+		}
+		if public := publicRelayURL(relayURL); public != "" {
+			return public
+		}
 	}
 	return internalnostr.DefaultRelay
 }

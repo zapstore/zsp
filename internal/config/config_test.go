@@ -47,6 +47,8 @@ func TestGetRelayHTTPURLFromRelays(t *testing.T) {
 		{relays: "wss://relay.zapstore.dev", want: "https://relay.zapstore.dev"},
 		{relays: "relay.zapstore.dev", want: "https://relay.zapstore.dev"},
 		{relays: "localhost:3334", want: "http://localhost:3334"},
+		{relays: "/tmp/nostr.sock, wss://relay.example", want: "https://relay.example"},
+		{relays: "unix:///tmp/nostr.sock", want: DefaultRelayHTTPURL},
 	}
 	for _, test := range tests {
 		t.Setenv("RELAYS", test.relays)

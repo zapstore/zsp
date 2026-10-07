@@ -63,6 +63,18 @@ func (p *Publisher) EnsureReachable(ctx context.Context) ([]string, error) {
 	reachable := false
 	for _, relayURL := range p.relayURLs {
 		relayCtx, cancel := context.WithTimeout(ctx, RelayTimeout)
+		if path, ok := socketPath(relayURL); ok {
+			conn, err := dialSocket(relayCtx, path)
+			cancel()
+			if err != nil {
+				unreachable = append(unreachable, relayURL)
+				failures = append(failures, fmt.Errorf("%s: %w", relayURL, err))
+				continue
+			}
+			_ = conn.Close()
+			reachable = true
+			continue
+		}
 		relay, err := nostr.RelayConnect(relayCtx, relayURL)
 		cancel()
 		if err != nil {
@@ -124,6 +136,24 @@ func (p *Publisher) publishToRelay(ctx context.Context, url string, event *nostr
 	ctx, cancel := context.WithTimeout(ctx, RelayTimeout)
 	defer cancel()
 
+	if path, ok := socketPath(url); ok {
+		err := publishSocket(ctx, path, event)
+		if err != nil {
+			// A relay's free-form duplicate wording is not authoritative. Confirm
+			// the exact event is present before treating it as accepted.
+			if isDuplicateError(err) && socketEventExists(ctx, path, event.ID) {
+				result.Success = true
+				result.IsDuplicate = true
+				result.Error = err
+				return result
+			}
+			result.Error = err
+			return result
+		}
+		result.Success = true
+		return result
+	}
+
 	relay, err := nostr.RelayConnect(ctx, url)
 	if err != nil {
 		result.Error = fmt.Errorf("failed to connect: %s", sanitize.Text(err.Error()))
@@ -151,6 +181,19 @@ func (p *Publisher) publishToRelay(ctx context.Context, url string, event *nostr
 
 func eventExists(ctx context.Context, relay *nostr.Relay, eventID string) bool {
 	events, err := relay.QuerySync(ctx, nostr.Filter{IDs: []string{eventID}, Limit: 1})
+	if err != nil {
+		return false
+	}
+	for _, event := range events {
+		if event != nil && event.ID == eventID {
+			return true
+		}
+	}
+	return false
+}
+
+func socketEventExists(ctx context.Context, path, eventID string) bool {
+	events, err := querySocket(ctx, path, nostr.Filter{IDs: []string{eventID}, Limit: 1})
 	if err != nil {
 		return false
 	}
@@ -521,6 +564,10 @@ func relayQueryError(operation string, warnings []error) error {
 func (p *Publisher) queryRelayMultiple(ctx context.Context, url string, filter nostr.Filter) ([]*nostr.Event, error) {
 	ctx, cancel := context.WithTimeout(ctx, RelayTimeout)
 	defer cancel()
+
+	if path, ok := socketPath(url); ok {
+		return querySocket(ctx, path, filter)
+	}
 
 	relay, err := nostr.RelayConnect(ctx, url)
 	if err != nil {

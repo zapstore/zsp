@@ -55,10 +55,33 @@ func GetSignWith() string {
 	return GetEnv("SIGN_WITH")
 }
 
-// GetRelayHTTPURL returns the REST origin corresponding to the first relay in
-// RELAYS. WebSocket schemes are converted to their HTTP equivalents.
+// RelaySocketPath reports whether raw is a Unix socket relay target.
+// Absolute paths and unix:// URLs qualify. The returned path has no scheme.
+func RelaySocketPath(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	var path string
+	switch {
+	case strings.HasPrefix(raw, "/"):
+		path = raw
+	case strings.HasPrefix(raw, "unix://"):
+		path = strings.TrimPrefix(raw, "unix://")
+	default:
+		return "", false
+	}
+	if path == "" || strings.ContainsRune(path, 0) {
+		return "", false
+	}
+	return path, true
+}
+
+// GetRelayHTTPURL returns the REST origin corresponding to the first WebSocket
+// relay in RELAYS. Unix socket targets are skipped. WebSocket schemes are
+// converted to their HTTP equivalents.
 func GetRelayHTTPURL() string {
 	for _, relay := range strings.Split(GetEnv("RELAYS"), ",") {
+		if _, ok := RelaySocketPath(relay); ok {
+			continue
+		}
 		if value := normalizeRelayHTTPURL(relay); value != "" {
 			return value
 		}

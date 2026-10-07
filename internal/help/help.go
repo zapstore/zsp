@@ -58,7 +58,7 @@ func RootHelp() string {
 	b.WriteString(renderBold("ENVIRONMENT") + "\n")
 	b.WriteString("  " + renderAccent("SIGN_WITH") + "       " + renderWhite("Signing method (nsec1..., hex, bunker://)") + "\n")
 	b.WriteString("  " + renderAccent("GITHUB_TOKEN") + "    " + renderWhite("GitHub API token (optional, avoids rate limits)") + "\n")
-	b.WriteString("  " + renderAccent("RELAYS") + "          " + renderWhite("Comma-separated relay URLs (default: wss://relay.zapstore.dev)") + "\n")
+	b.WriteString("  " + renderAccent("RELAYS") + "          " + renderWhite("WebSocket URLs or a Unix socket path (default: wss://relay.zapstore.dev)") + "\n")
 	b.WriteString("  " + renderAccent("BLOSSOM_URL") + "     " + renderWhite("Custom CDN server (default: https://cdn.zapstore.dev)") + "\n\n")
 
 	b.WriteString(renderBold("GLOBAL FLAGS") + "\n")

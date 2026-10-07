@@ -333,6 +333,9 @@ func validatePublishConfig(config PublishConfig) error {
 
 func validateRelayURLs(relayURLs []string) error {
 	for _, relayURL := range relayURLs {
+		if _, ok := internalconfig.RelaySocketPath(relayURL); ok {
+			continue
+		}
 		parsed, err := url.Parse(strings.TrimSpace(relayURL))
 		if err != nil || parsed.Host == "" || (parsed.Scheme != "wss" && !(parsed.Scheme == "ws" && isLoopbackHost(parsed.Hostname()))) {
 			return operationErr(ErrInvalidConfig, false, "relay must use wss outside loopback")

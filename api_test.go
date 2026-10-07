@@ -974,6 +974,30 @@ func TestEffectivePublishTargetsUseContractDefaults(t *testing.T) {
 	}
 }
 
+func TestEffectivePublishTargetsAcceptSocket(t *testing.T) {
+	t.Setenv("BLOSSOM_URL", "")
+	t.Setenv("RELAYS", "/tmp/nostr.sock, unix:///var/run/nostr.sock")
+
+	_, relayURLs, err := effectivePublishTargets(PublishOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/tmp/nostr.sock", "unix:///var/run/nostr.sock"}
+	if !reflect.DeepEqual(relayURLs, want) {
+		t.Fatalf("relay URLs = %v, want %v", relayURLs, want)
+	}
+}
+
+func TestFirstRelaySkipsSocket(t *testing.T) {
+	got := firstRelay([]string{"/tmp/nostr.sock", "wss://relay.example"})
+	if got != "wss://relay.example" {
+		t.Fatalf("firstRelay() = %q, want wss://relay.example", got)
+	}
+	if got := firstRelay([]string{"unix:///tmp/nostr.sock"}); got != internalnostr.DefaultRelay {
+		t.Fatalf("firstRelay(socket) = %q, want default relay", got)
+	}
+}
+
 func TestEffectivePublishTargetsRejectCredentialBearingBlossomURL(t *testing.T) {
 	for _, target := range []string{
 		"https://user:secret@cdn.example.com",
