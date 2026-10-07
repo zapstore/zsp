@@ -18,6 +18,14 @@ import (
 // gitlabArchRegex extracts architecture from GitLab asset names like "APK (arm64-v8a)"
 var gitlabArchRegex = regexp.MustCompile(`\((arm64-v8a|armeabi-v7a|arm|x86_64|x86)\)`)
 
+// semverCore is major.minor.patch with no pre-release or build suffix.
+var semverCore = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+
+// preReleaseIdent matches one SemVer pre-release identifier from NIP-82, plus snapshot.
+// A trailing number still matches (rc42, beta2). Longer names come first so preview
+// is not read as pre. Edition suffixes such as ee and fips do not match.
+var preReleaseIdent = regexp.MustCompile(`(?i)^(preview|develop|alpha|beta|snapshot|dev|rc|pre|a|b)\d*$`)
+
 // gitlabMarkdownLinkRegex matches markdown links in release descriptions.
 // Used to find APKs attached via GitLab uploads (e.g. [app.apk](/uploads/.../app.apk))
 // rather than formal release asset links.
@@ -99,6 +107,9 @@ type gitlabAssetLink struct {
 // FetchLatestRelease fetches the latest release from GitLab that contains valid APKs.
 // Iterates through up to 10 releases to find one with APK assets (for repos that
 // publish desktop and mobile releases separately).
+// Upcoming releases are always skipped. Pre-release tags (v1.2.3-rc.1, v1.2.0-alpha)
+// are skipped unless IncludePreReleases is set. GitLab has no prerelease flag;
+// the tag is the marker.
 func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	// Numeric id is required to resolve markdown /uploads/ attachments.
 	if err := g.ensureNumericProjectID(ctx); err != nil {
@@ -137,9 +148,14 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		return nil, fmt.Errorf("no releases found")
 	}
 
-	// Find the first release with valid APKs
+	// Find the first release with valid APKs.
+	// Upcoming releases are not published yet. Pre-release tags are skipped
+	// unless the caller opted in; edition suffixes such as -ee stay eligible.
 	for _, glRelease := range releases {
-		if glRelease.UpcomingRelease && !g.IncludePreReleases {
+		if glRelease.UpcomingRelease {
+			continue
+		}
+		if !g.IncludePreReleases && semverPreRelease(glRelease.TagName) {
 			continue
 		}
 		if !g.matchesReleaseFilter(glRelease.TagName, glRelease.Name) {
@@ -273,13 +289,14 @@ func (g *GitLab) convertRelease(glRelease *gitlabRelease) *Release {
 	}
 
 	return &Release{
-		Version:   version,
-		TagName:   glRelease.TagName,
-		Name:      glRelease.Name,
-		Changelog: glRelease.Description,
-		Assets:    assets,
-		URL:       glRelease.Links.Self,
-		CreatedAt: createdAt,
+		Version:    version,
+		TagName:    glRelease.TagName,
+		Name:       glRelease.Name,
+		Changelog:  glRelease.Description,
+		Assets:     assets,
+		PreRelease: semverPreRelease(glRelease.TagName),
+		URL:        glRelease.Links.Self,
+		CreatedAt:  createdAt,
 	}
 }
 
@@ -402,6 +419,29 @@ func parseGitLabExternalRedirect(body []byte) (string, bool) {
 		return "", false
 	}
 	return externalURL, true
+}
+
+// semverPreRelease reports whether tag is a SemVer version with a pre-release
+// identifier. GitLab stores that only in the tag. v19.4.0-rc42-ee matches
+// because of rc42; v15.5.4-ee does not. Build metadata after + is ignored.
+func semverPreRelease(tag string) bool {
+	tag = strings.TrimSpace(tag)
+	if strings.HasPrefix(tag, "v") || strings.HasPrefix(tag, "V") {
+		tag = tag[1:]
+	}
+	tag, _, _ = strings.Cut(tag, "+")
+	core, rest, ok := strings.Cut(tag, "-")
+	if !ok || rest == "" || !semverCore.MatchString(core) {
+		return false
+	}
+	for _, seg := range strings.FieldsFunc(rest, func(r rune) bool {
+		return r == '.' || r == '-'
+	}) {
+		if preReleaseIdent.MatchString(seg) {
+			return true
+		}
+	}
+	return false
 }
 
 // matchesReleaseFilter checks whether a release tag or name matches the filter.

@@ -450,3 +450,120 @@ func TestFetchLatestReleaseUsesDescriptionUploads(t *testing.T) {
 		t.Fatalf("numericProjectID = %d, want 6922885", g.numericProjectID)
 	}
 }
+
+func TestSemverPreRelease(t *testing.T) {
+	tests := []struct {
+		tag  string
+		want bool
+	}{
+		{tag: "v1.2.3", want: false},
+		{tag: "4.8.4", want: false},
+		{tag: "v15.5.4-ee", want: false},
+		{tag: "v15.5.4-fips", want: false},
+		{tag: "v15.5.4-ubi8", want: false},
+		{tag: "15.5.4+ee.0", want: false},
+		{tag: "nightly", want: false},
+		{tag: "v1.2.3-rc.1", want: true},
+		{tag: "v1.2.3-rc1", want: true},
+		{tag: "v19.4.0-rc42-ee", want: true},
+		{tag: "v1.2.0-alpha", want: true},
+		{tag: "1.2.3-beta.2", want: true},
+		{tag: "1.2.3-b2", want: true},
+		{tag: "V1.2.3-preview", want: true},
+		{tag: "1.3.2-SNAPSHOT.1", want: true},
+		{tag: "1.0.0-dev", want: true},
+		{tag: "1.0.0-a1", want: true},
+		{tag: "1.2.3-rc.1+build.5", want: true},
+		{tag: "1.2.3-android", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.tag, func(t *testing.T) {
+			if got := semverPreRelease(tt.tag); got != tt.want {
+				t.Fatalf("semverPreRelease(%q) = %v, want %v", tt.tag, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGitLabFetchLatestReleaseSkipsPreReleases(t *testing.T) {
+	apk := func(tag, file string) string {
+		return `{"tag_name":"` + tag + `","assets":{"links":[{"name":"` + file + `","url":"https://example.com/` + file + `"}]}}`
+	}
+	body := `[
+		{"tag_name":"v1.3.0","upcoming_release":true,"assets":{"links":[{"name":"upcoming.apk","url":"https://example.com/upcoming.apk"}]}},
+		` + apk("v1.2.3-rc.1", "rc.apk") + `,
+		` + apk("v19.4.0-rc42-ee", "rc42.apk") + `,
+		` + apk("v1.2.2", "stable.apk") + `,
+		` + apk("v15.5.4-ee", "ee.apk") + `
+	]`
+
+	fetch := func(t *testing.T, include bool) *Release {
+		t.Helper()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/v4/projects/app/releases", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(body))
+		})
+		srv := httptest.NewServer(mux)
+		t.Cleanup(srv.Close)
+		g := &GitLab{
+			cfg:                &config.Config{},
+			baseURL:            srv.URL,
+			projectID:          "app",
+			numericProjectID:   1,
+			client:             srv.Client(),
+			IncludePreReleases: include,
+		}
+		release, err := g.FetchLatestRelease(context.Background())
+		if err != nil {
+			t.Fatalf("FetchLatestRelease() error = %v", err)
+		}
+		return release
+	}
+
+	t.Run("default skips upcoming and prerelease tags", func(t *testing.T) {
+		release := fetch(t, false)
+		if release.TagName != "v1.2.2" {
+			t.Fatalf("tag = %q, want v1.2.2", release.TagName)
+		}
+		if release.PreRelease {
+			t.Fatal("stable release marked pre-release")
+		}
+	})
+
+	t.Run("pre-release flag still skips upcoming", func(t *testing.T) {
+		release := fetch(t, true)
+		if release.TagName != "v1.2.3-rc.1" {
+			t.Fatalf("tag = %q, want v1.2.3-rc.1", release.TagName)
+		}
+		if !release.PreRelease {
+			t.Fatal("rc release not marked pre-release")
+		}
+	})
+
+	t.Run("edition suffix stays eligible", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/v4/projects/app/releases", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`[` + apk("v15.5.4-ee", "ee.apk") + `]`))
+		})
+		srv := httptest.NewServer(mux)
+		t.Cleanup(srv.Close)
+		g := &GitLab{
+			cfg:              &config.Config{},
+			baseURL:          srv.URL,
+			projectID:        "app",
+			numericProjectID: 1,
+			client:           srv.Client(),
+		}
+		release, err := g.FetchLatestRelease(context.Background())
+		if err != nil {
+			t.Fatalf("FetchLatestRelease() error = %v", err)
+		}
+		if release.TagName != "v15.5.4-ee" {
+			t.Fatalf("tag = %q, want v15.5.4-ee", release.TagName)
+		}
+		if release.PreRelease {
+			t.Fatal("edition suffix marked pre-release")
+		}
+	})
+}
