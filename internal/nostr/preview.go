@@ -112,10 +112,8 @@ func BuildPreviewDataFromAPKs(apkInfos []*apk.APKInfo, cfg *config.Config, chang
 
 	for _, apkInfo := range apkInfos {
 		// Convert architectures to platform identifiers for this asset
-		assetPlatforms := make([]string, 0, len(apkInfo.Architectures))
-		for _, arch := range apkInfo.Architectures {
-			p := archToPlatform(arch)
-			assetPlatforms = append(assetPlatforms, p)
+		assetPlatforms := platformsFromAPKInfo(apkInfo)
+		for _, p := range assetPlatforms {
 			platformSet[p] = true
 		}
 		assets = append(assets, AssetPreviewData{

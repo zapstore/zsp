@@ -341,6 +341,22 @@ func archToPlatform(arch string) string {
 	}
 }
 
+// platformsFromAPKInfo returns the NIP-82 platform identifiers for an APK.
+// APKs without native libraries are architecture-independent (pure Java/Kotlin)
+// and run on any ABI; consistent with APKInfo.IsArm64, they are reported as
+// arm64. The result is sorted, de-duplicated, and never empty.
+func platformsFromAPKInfo(apkInfo *apk.APKInfo) []string {
+	platforms := make([]string, 0, len(apkInfo.Architectures))
+	for _, arch := range apkInfo.Architectures {
+		platforms = append(platforms, archToPlatform(arch))
+	}
+	if len(platforms) == 0 {
+		platforms = append(platforms, "android-arm64-v8a")
+	}
+	sort.Strings(platforms)
+	return compactStrings(platforms)
+}
+
 func canonicalStrings(values []string) []string {
 	if len(values) == 0 {
 		return nil
@@ -397,14 +413,7 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		apkURLs = append(apkURLs, params.OriginalURL)
 	}
 	// Convert architectures to platform identifiers
-	platforms := make([]string, 0, len(apkInfo.Architectures))
-	for _, arch := range apkInfo.Architectures {
-		platforms = append(platforms, archToPlatform(arch))
-	}
-	sort.Strings(platforms)
-	if len(platforms) > 0 {
-		platforms = compactStrings(platforms)
-	}
+	platforms := platformsFromAPKInfo(apkInfo)
 	// Build NIP-34 repository pointer if available
 	var nip34Repo, nip34Relay string
 	if cfg.NIP34Repo != nil {

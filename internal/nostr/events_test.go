@@ -534,7 +534,9 @@ func TestBuildEventSetFallbackToLabel(t *testing.T) {
 }
 
 func TestBuildEventSetArchitectureIndependent(t *testing.T) {
-	// APKs with no native libraries omit architecture restrictions.
+	// APKs with no native libraries (pure Java/Kotlin) run on any ABI and are
+	// reported as arm64, consistent with APKInfo.IsArm64. A recognized f tag
+	// must be emitted, otherwise the relay rejects the events.
 	apkInfo := &apk.APKInfo{
 		PackageID:     "com.example.app",
 		VersionName:   "1.0.0",
@@ -554,10 +556,18 @@ func TestBuildEventSetArchitectureIndependent(t *testing.T) {
 		Pubkey:  pubkey,
 	})
 
-	// An absent f tag means architecture-independent.
-	fTags := filterExactTag(events.AppMetadata.Tags, "f")
-	if len(fTags) != 0 {
-		t.Errorf("expected no f tags for arch-independent APK, got %d", len(fTags))
+	want := nostr.Tags{{"f", "android-arm64-v8a"}}
+	if got := filterExactTag(events.AppMetadata.Tags, "f"); !reflect.DeepEqual(got, want) {
+		t.Errorf("app metadata f tags = %v, want %v", got, want)
+	}
+	if got := filterExactTag(events.Release.Tags, "f"); !reflect.DeepEqual(got, want) {
+		t.Errorf("release f tags = %v, want %v", got, want)
+	}
+	if len(events.SoftwareAssets) == 0 {
+		t.Fatal("expected at least one software asset")
+	}
+	if got := filterExactTag(events.SoftwareAssets[0].Tags, "f"); !reflect.DeepEqual(got, want) {
+		t.Errorf("asset f tags = %v, want %v", got, want)
 	}
 }
 
@@ -858,5 +868,36 @@ func TestBuildEventSetReleaseTimestampCanAlsoApplyToAppMetadata(t *testing.T) {
 	}
 	if events.AppMetadata.CreatedAt != expectedTS {
 		t.Errorf("expected app metadata created_at %d, got %d", expectedTS, events.AppMetadata.CreatedAt)
+	}
+}
+
+func TestPlatformsFromAPKInfo(t *testing.T) {
+	tests := []struct {
+		name  string
+		archs []string
+		want  []string
+	}{
+		{"arm64 only", []string{"arm64-v8a"}, []string{"android-arm64-v8a"}},
+		{
+			"multiple sorted and de-duplicated",
+			[]string{"x86_64", "arm64-v8a", "arm64-v8a", "armeabi-v7a"},
+			[]string{"android-arm64-v8a", "android-armeabi-v7a", "android-x86_64"},
+		},
+		{
+			"no native libs falls back to arm64 (consistent with IsArm64)",
+			nil,
+			[]string{"android-arm64-v8a"},
+		},
+		{"empty slice falls back to arm64", []string{}, []string{"android-arm64-v8a"}},
+		{"unknown arch keeps android- prefix", []string{"mips"}, []string{"android-mips"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := platformsFromAPKInfo(&apk.APKInfo{Architectures: tt.archs})
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("platformsFromAPKInfo(%v) = %v, want %v", tt.archs, got, tt.want)
+			}
+		})
 	}
 }
