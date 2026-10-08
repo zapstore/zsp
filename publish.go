@@ -660,6 +660,8 @@ func publishEvent(ctx context.Context, publisher *internalnostr.Publisher, event
 		if relay.Error != nil {
 			if relay.IsDuplicate {
 				message = "event already exists"
+			} else if detail := publicDetail(strings.TrimPrefix(relay.Error.Error(), "failed to publish: ")); detail != "" {
+				message = detail
 			} else {
 				message = "relay rejected event"
 			}
