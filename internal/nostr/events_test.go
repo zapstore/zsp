@@ -850,11 +850,11 @@ func TestBuildEventSetReleaseTimestampCanAlsoApplyToAppMetadata(t *testing.T) {
 	expectedTS := nostr.Timestamp(releaseTS.Unix())
 
 	events := BuildEventSet(BuildEventSetParams{
-		APKInfo:                   apkInfo,
-		Config:                    cfg,
-		Pubkey:                    pubkey,
-		ReleaseTimestamp:          releaseTS,
-		UseReleaseTimestampForApp: true,
+		APKInfo:             apkInfo,
+		Config:              cfg,
+		Pubkey:              pubkey,
+		ReleaseTimestamp:    releaseTS,
+		AppCreatedAtRelease: true,
 	})
 
 	if events.Release.CreatedAt != expectedTS {

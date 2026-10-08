@@ -44,14 +44,15 @@ type PublishOptions struct {
 	Commit string // Git commit hash for reproducible builds
 
 	// Behavior flags
-	Quiet             bool // No prompts or progress output
-	SkipPreview       bool
-	OverwriteRelease  bool
-	OverwriteAppEvent bool
-	SkipMetadata      bool
-	SkipAppEvent      bool // Publish only release events (kind 30063/3063), skip kind 32267
-	NoCompress        bool // Preserve original icon and screenshot bytes
-	Check             bool // Run the complete validation pipeline without publishing
+	Quiet               bool // No prompts or progress output
+	SkipPreview         bool
+	OverwriteRelease    bool
+	OverwriteAppEvent   bool
+	AppCreatedAtRelease bool // Use release date for kind 32267 created_at
+	SkipMetadata        bool
+	SkipAppEvent        bool // Publish only release events (kind 30063/3063), skip kind 32267
+	NoCompress          bool // Preserve original icon and screenshot bytes
+	Check               bool // Run the complete validation pipeline without publishing
 
 	// Server options
 	Port int
@@ -172,6 +173,7 @@ func parsePublishFlags(opts *Options, args []string) {
 	fs.IntVar(&opts.Publish.Port, "port", 0, "Custom port for browser preview")
 	fs.BoolVar(&opts.Publish.OverwriteRelease, "overwrite-release", false, "Bypass cache and re-publish even if release unchanged")
 	fs.BoolVar(&opts.Publish.OverwriteAppEvent, "overwrite-app-event", false, "Publish kind 32267 even if the application event is unchanged")
+	fs.BoolVar(&opts.Publish.AppCreatedAtRelease, "app-created-at-release", false, "Use release date for kind 32267 created_at (indexer compatibility)")
 	fs.BoolVar(&opts.Publish.SkipMetadata, "skip-metadata", false, "Skip fetching metadata from external sources")
 	fs.BoolVar(&opts.Publish.SkipAppEvent, "skip-app-event", false, "Publish only release events, skip app metadata (kind 32267)")
 	fs.BoolVar(&opts.Publish.NoCompress, "no-compress", false, "Preserve original icon and screenshot bytes")

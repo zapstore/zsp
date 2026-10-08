@@ -382,9 +382,9 @@ type BuildEventSetParams struct {
 	Channel          string    // Release channel: main (default), beta, nightly, dev
 	ReleaseVersion   string    // Kind 30063 version (source release). Empty uses the APK versionName.
 	ReleaseTimestamp time.Time // Release publish date (zero means use current time)
-	// UseReleaseTimestampForApp sets kind 32267 created_at to ReleaseTimestamp.
+	// AppCreatedAtRelease sets kind 32267 created_at to ReleaseTimestamp.
 	// When false, app metadata keeps current-time created_at.
-	UseReleaseTimestampForApp bool
+	AppCreatedAtRelease bool
 	// MinReleaseTimestamp ensures Release.CreatedAt is strictly greater than this value.
 	// Used with --overwrite-release to guarantee NIP-33 replacement when the relay
 	// has an existing event with the same or newer timestamp.
@@ -498,7 +498,7 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		for _, asset := range eventSet.SoftwareAssets {
 			asset.CreatedAt = ts
 		}
-		if params.UseReleaseTimestampForApp {
+		if params.AppCreatedAtRelease {
 			eventSet.AppMetadata.CreatedAt = ts
 		}
 	}

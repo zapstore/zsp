@@ -61,6 +61,20 @@ func TestParseCommand_AcceptsRootFlags(t *testing.T) {
 	}
 }
 
+func TestParseCommand_AcceptsAppCreatedAtRelease(t *testing.T) {
+	oldArgs := os.Args
+	t.Cleanup(func() { os.Args = oldArgs })
+	os.Args = []string{"zsp", "publish", "--app-created-at-release", "zapstore.yaml"}
+
+	opts := ParseCommand()
+	if opts.FlagParseError != nil {
+		t.Fatal(opts.FlagParseError)
+	}
+	if !opts.Publish.AppCreatedAtRelease {
+		t.Fatal("expected AppCreatedAtRelease")
+	}
+}
+
 func TestParseCommand_AcceptsOverwriteAppEvent(t *testing.T) {
 	oldArgs := os.Args
 	t.Cleanup(func() { os.Args = oldArgs })

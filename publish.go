@@ -186,7 +186,7 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 		IconURL: media.iconURL, ImageURLs: media.imageURLs, Changelog: releaseNotes,
 		Channel: publishChannel,
 		Commit:  options.Commit, ReleaseVersion: verified.releaseVersion, ReleaseTimestamp: verified.releasedAt,
-		MinReleaseTimestamp: existingReleaseTimestamp,
+		AppCreatedAtRelease: options.AppCreatedAtRelease, MinReleaseTimestamp: existingReleaseTimestamp,
 	})
 	if options.SkipAppEvent {
 		events.AppMetadata = nil

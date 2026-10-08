@@ -149,6 +149,7 @@ type PublishOptions struct {
 	SkipProofCheck       bool           `json:"skip_proof_check"`
 	OverwriteRelease     bool           `json:"overwrite_release"`
 	OverwriteAppEvent    bool           `json:"overwrite_app_event"`
+	AppCreatedAtRelease  bool           `json:"app_created_at_release"`
 	Preview              bool           `json:"preview"`
 	BrowserPort          int            `json:"browser_port"`
 	OnProgress           func(Progress) `json:"-"`
