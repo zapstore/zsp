@@ -10,6 +10,7 @@ import (
 	"github.com/zapstore/zsp/internal/apk"
 	"github.com/zapstore/zsp/internal/cli"
 	"github.com/zapstore/zsp/internal/help"
+	"github.com/zapstore/zsp/internal/sanitize"
 	"github.com/zapstore/zsp/internal/ui"
 )
 
@@ -29,7 +30,7 @@ func run(handler *cli.SignalHandler) int {
 		if options.Global.JSON {
 			_ = json.NewEncoder(os.Stderr).Encode(cliErrorDocument{
 				OK: false, Operation: string(options.Command),
-				Error: cliErrorBody{Code: "invalid_arguments", Summary: "The command arguments are invalid.", Retryable: false, NextSteps: []cliNextStep{}},
+				Error: cliErrorBody{Code: "invalid_arguments", Summary: "The command arguments are invalid.", Detail: ui.SanitizeErrorMessage(options.FlagParseError), Retryable: false, NextSteps: []cliNextStep{}},
 			})
 		} else {
 			ui.WritePanel(os.Stderr, "error", "Invalid command arguments", nil, []string{options.FlagParseError.Error(), "Run zsp --help to see available commands."})
@@ -39,7 +40,7 @@ func run(handler *cli.SignalHandler) int {
 	if options.UnknownSubcommand != "" {
 		if options.Global.JSON {
 			if err := json.NewEncoder(os.Stderr).Encode(cliErrorDocument{
-				OK: false, Operation: options.UnknownSubcommand,
+				OK: false, Operation: sanitize.Text(options.UnknownSubcommand),
 				Error: cliErrorBody{Code: "invalid_arguments", Summary: "The command is not supported.", Retryable: false, NextSteps: []cliNextStep{}},
 			}); err != nil {
 				return 1
@@ -75,7 +76,7 @@ func run(handler *cli.SignalHandler) int {
 		if options.UnknownSubcommand != "" {
 			if options.Global.JSON {
 				_ = json.NewEncoder(os.Stderr).Encode(cliErrorDocument{
-					OK: false, Operation: options.UnknownSubcommand,
+					OK: false, Operation: sanitize.Text(options.UnknownSubcommand),
 					Error: cliErrorBody{Code: "invalid_arguments", Summary: "The command is not supported.", Retryable: false},
 				})
 				return 1

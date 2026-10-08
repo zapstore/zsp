@@ -19,6 +19,7 @@ import (
 	"github.com/PaesslerAG/jsonpath"
 	"github.com/PuerkitoBio/goquery"
 	"github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/internal/sanitize"
 )
 
 // webCache stores HTTP caching headers for a versionless direct URL.
@@ -272,7 +273,7 @@ func (w *Web) extractAssetURL(ctx context.Context, repo *config.ReleaseSource) (
 	// must satisfy the same HTTPS-outside-loopback rule so a compromised or
 	// misconfigured page cannot redirect the download to an insecure target.
 	if err := validateDownloadURL(assetURL); err != nil {
-		return "", fmt.Errorf("extracted asset value %q is not a valid download URL: %w", assetURL, err)
+		return "", fmt.Errorf("extracted asset URL %s is not a valid download URL: %s", sanitize.URL(assetURL), sanitize.Text(err.Error()))
 	}
 
 	return assetURL, nil
@@ -451,7 +452,7 @@ func extractWithPattern(value, pattern string) (string, error) {
 
 	matches := re.FindStringSubmatch(value)
 	if len(matches) < 2 {
-		return "", fmt.Errorf("pattern %q did not match value %q", pattern, value)
+		return "", fmt.Errorf("pattern %q did not match", pattern)
 	}
 
 	return matches[1], nil

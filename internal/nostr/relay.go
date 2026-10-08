@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/zapstore/zsp/internal/sanitize"
 )
 
 const (
@@ -66,7 +67,7 @@ func (p *Publisher) EnsureReachable(ctx context.Context) ([]string, error) {
 		cancel()
 		if err != nil {
 			unreachable = append(unreachable, relayURL)
-			failures = append(failures, fmt.Errorf("%s: %w", relayURL, err))
+			failures = append(failures, relayFailure(relayURL, err))
 			continue
 		}
 		_ = relay.Close()
@@ -76,6 +77,16 @@ func (p *Publisher) EnsureReachable(ctx context.Context) ([]string, error) {
 		return unreachable, nil
 	}
 	return unreachable, relayQueryError("reachability", failures)
+}
+
+// relayFailure renders a relay failure without credentials: the relay URL is
+// reduced to its public form and the underlying error is sanitized.
+func relayFailure(relayURL string, err error) error {
+	public := sanitize.URL(relayURL)
+	if public == "" {
+		public = "relay"
+	}
+	return fmt.Errorf("%s: %s", public, sanitize.Text(err.Error()))
 }
 
 // PublishResult contains the result of publishing to a single relay.
@@ -115,7 +126,7 @@ func (p *Publisher) publishToRelay(ctx context.Context, url string, event *nostr
 
 	relay, err := nostr.RelayConnect(ctx, url)
 	if err != nil {
-		result.Error = fmt.Errorf("failed to connect: %w", err)
+		result.Error = fmt.Errorf("failed to connect: %s", sanitize.Text(err.Error()))
 		return result
 	}
 	defer relay.Close()
@@ -127,10 +138,10 @@ func (p *Publisher) publishToRelay(ctx context.Context, url string, event *nostr
 		if isDuplicateError(err) && eventExists(ctx, relay, event.ID) {
 			result.Success = true
 			result.IsDuplicate = true
-			result.Error = err // Keep error for informational purposes
+			result.Error = errors.New(sanitize.Text(err.Error())) // kept for diagnostics only
 			return result
 		}
-		result.Error = fmt.Errorf("failed to publish: %w", err)
+		result.Error = fmt.Errorf("failed to publish: %s", sanitize.Text(err.Error()))
 		return result
 	}
 
@@ -175,7 +186,7 @@ func (p *Publisher) FetchIdentityProofsByCertificate(ctx context.Context, certHa
 	for _, relayURL := range p.relayURLs {
 		events, err := p.queryRelayMultiple(ctx, relayURL, filter)
 		if err != nil {
-			warnings = append(warnings, fmt.Errorf("%s: %w", relayURL, err))
+			warnings = append(warnings, relayFailure(relayURL, err))
 			continue
 		}
 		completed++
@@ -217,7 +228,7 @@ func (p *Publisher) FetchApplicationEvents(ctx context.Context, appID string, au
 			}
 			events, err := p.queryRelayMultiple(ctx, relayURL, filter)
 			if err != nil {
-				warnings = append(warnings, fmt.Errorf("%s: %w", relayURL, err))
+				warnings = append(warnings, relayFailure(relayURL, err))
 				continue
 			}
 			relayCompleted = true
@@ -265,7 +276,7 @@ func (p *Publisher) FindAppEvents(ctx context.Context, appID string) (AppEventLo
 	for _, relayURL := range p.relayURLs {
 		events, err := p.queryRelayMultiple(ctx, relayURL, filter)
 		if err != nil {
-			warnings = append(warnings, fmt.Errorf("%s: %w", relayURL, err))
+			warnings = append(warnings, relayFailure(relayURL, err))
 			continue
 		}
 		completed++
@@ -416,7 +427,7 @@ func (p *Publisher) HighestReleaseVersionCode(ctx context.Context, publishers ma
 				}
 				events, err := p.queryRelayMultiple(ctx, relayURL, filter)
 				if err != nil {
-					warnings = append(warnings, fmt.Errorf("%s: %w", relayURL, err))
+					warnings = append(warnings, relayFailure(relayURL, err))
 					continue
 				}
 				relayCompleted = true
@@ -513,7 +524,7 @@ func (p *Publisher) queryRelayMultiple(ctx context.Context, url string, filter n
 
 	relay, err := nostr.RelayConnect(ctx, url)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect: %w", err)
+		return nil, fmt.Errorf("failed to connect: %s", sanitize.Text(err.Error()))
 	}
 	defer relay.Close()
 

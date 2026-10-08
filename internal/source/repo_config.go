@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
@@ -115,7 +114,7 @@ func fetchGiteaRepoConfig(ctx context.Context, client *http.Client, cfg *config.
 	if err != nil {
 		return nil, fmt.Errorf("creating Gitea repo config request: %w", err)
 	}
-	if token := os.Getenv("GITEA_TOKEN"); token != "" {
+	if token := config.GetEnv("GITEA_TOKEN"); token != "" {
 		req.Header.Set("Authorization", "token "+token)
 	}
 	return doRepoConfigRequest(client, req)

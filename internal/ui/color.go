@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/zapstore/zsp/internal/sanitize"
 )
 
 var (
@@ -284,19 +284,10 @@ func PrintJSONError(err error) {
 	fmt.Fprintln(os.Stderr, string(data))
 }
 
-// SanitizeErrorMessage redacts potentially sensitive path information from error messages.
-// Replaces the user's home directory with ~ to avoid leaking usernames or system structure.
+// SanitizeErrorMessage redacts private material from error messages before
+// they are shown: credential-bearing URL components, registered secrets
+// (private keys, tokens, passwords), authorization values, control
+// characters, and the user's home directory.
 func SanitizeErrorMessage(err error) string {
-	if err == nil {
-		return ""
-	}
-	msg := err.Error()
-
-	// Replace home directory with ~
-	homeDir, homeErr := os.UserHomeDir()
-	if homeErr == nil && homeDir != "" {
-		msg = strings.ReplaceAll(msg, homeDir, "~")
-	}
-
-	return msg
+	return sanitize.ErrMessage(err)
 }

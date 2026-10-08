@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/zapstore/zsp/internal/sanitize"
 )
 
 var (
@@ -42,7 +43,7 @@ func StatusLine(kind, message string) string {
 	default:
 		mark, style = "ℹ", InfoStyle
 	}
-	message = trimMessage(message)
+	message = sanitize.Text(trimMessage(message))
 	if NoColor {
 		return fmt.Sprintf("%s %s", mark, message)
 	}

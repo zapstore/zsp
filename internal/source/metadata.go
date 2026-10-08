@@ -14,6 +14,7 @@ import (
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/internal/sanitize"
 	"gopkg.in/yaml.v3"
 )
 
@@ -112,7 +113,10 @@ type MetadataError struct {
 }
 
 func (e *MetadataError) Error() string {
-	return fmt.Sprintf("failed to fetch %s metadata: %v", e.Source, e.Err)
+	if e.Err == nil {
+		return fmt.Sprintf("failed to fetch %s metadata", e.Source)
+	}
+	return fmt.Sprintf("failed to fetch %s metadata: %s", e.Source, sanitize.Text(e.Err.Error()))
 }
 
 // MetadataResult contains the result of fetching metadata from multiple sources.

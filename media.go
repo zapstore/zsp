@@ -151,12 +151,12 @@ func loadReleaseNotes(ctx context.Context, location string) (string, error) {
 		}
 		file, err := os.Open(location)
 		if err != nil {
-			return "", wrapOperationError(ErrInvalidConfig, err, false, "read release notes")
+			return "", wrapOperationError(ErrInvalidConfig, err, false, "read release notes"+causeDetail(err))
 		}
 		defer file.Close()
 		data, err := io.ReadAll(io.LimitReader(file, maxReleaseNotesSize+1))
 		if err != nil {
-			return "", wrapOperationError(ErrInvalidConfig, err, false, "read release notes")
+			return "", wrapOperationError(ErrInvalidConfig, err, false, "read release notes"+causeDetail(err))
 		}
 		if len(data) > maxReleaseNotesSize {
 			return "", operationErr(ErrInvalidConfig, false, "release notes exceed %d bytes", maxReleaseNotesSize)
@@ -178,7 +178,7 @@ func loadReleaseNotes(ctx context.Context, location string) (string, error) {
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
-		return "", wrapOperationError(ErrInvalidConfig, err, false, "create release notes request")
+		return "", wrapOperationError(ErrInvalidConfig, err, false, "create release notes request"+causeDetail(err))
 	}
 	response, err := source.DoWithTorFallback(ctx, client, request)
 	if err != nil {
@@ -186,7 +186,7 @@ func loadReleaseNotes(ctx context.Context, location string) (string, error) {
 			return "", contextErr
 		}
 		sentinel, retryable := sourceErrorClassification(err)
-		return "", wrapOperationError(sentinel, err, retryable, "fetch release notes")
+		return "", wrapOperationError(sentinel, err, retryable, "fetch release notes"+causeDetail(err))
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -203,7 +203,7 @@ func loadReleaseNotes(ctx context.Context, location string) (string, error) {
 		if contextErr := contextOperationError(ctx.Err(), "read release notes"); contextErr != nil {
 			return "", contextErr
 		}
-		return "", wrapOperationError(ErrTemporaryFailure, err, true, "read release notes")
+		return "", wrapOperationError(ErrTemporaryFailure, err, true, "read release notes"+causeDetail(err))
 	}
 	if len(data) > maxReleaseNotesSize {
 		return "", operationErr(ErrInvalidConfig, false, "release notes exceed %d bytes", maxReleaseNotesSize)

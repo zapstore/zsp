@@ -46,7 +46,11 @@ func preparePublishMetadata(ctx context.Context, config PublishConfig, candidate
 			return PublishConfig{}, nil, nil, operationCodeErr(err, "cancelled", false, "metadata preparation cancelled")
 		}
 		for _, metadataError := range result.Errors {
-			warnings = append(warnings, "metadata source "+metadataError.Source+" failed")
+			detail := ""
+			if metadataError.Err != nil {
+				detail = causeDetail(metadataError.Err)
+			}
+			warnings = append(warnings, "metadata source "+metadataError.Source+" failed"+detail)
 		}
 	}
 	prepared := fromInternalPublishConfig(internal)

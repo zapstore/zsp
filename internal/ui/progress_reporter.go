@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/zapstore/zsp"
+	"github.com/zapstore/zsp/internal/sanitize"
 )
 
 // ProgressReporter translates library progress events into terminal output.
@@ -75,8 +76,8 @@ func (r *ProgressReporter) Finish() {
 }
 
 func progressMessage(update zsp.Progress) string {
-	phase := strings.TrimSpace(update.Phase)
-	target := strings.TrimSpace(update.Target)
+	phase := sanitize.Text(strings.TrimSpace(update.Phase))
+	target := sanitize.Truncate(sanitize.Text(strings.TrimSpace(update.Target)), 120)
 	if target == "" {
 		return strings.Title(phase)
 	}

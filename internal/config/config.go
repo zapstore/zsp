@@ -13,6 +13,7 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
+	"github.com/zapstore/zsp/internal/sanitize"
 	"gopkg.in/yaml.v3"
 )
 
@@ -705,7 +706,8 @@ func (v *VersionExtractor) Mode() string {
 func ValidateURL(rawURL string) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("malformed URL: %w", err)
+		// The parse error quotes the raw input, which may carry credentials.
+		return fmt.Errorf("malformed URL: %s", sanitize.Text(err.Error()))
 	}
 
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {

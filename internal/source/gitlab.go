@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/internal/sanitize"
 )
 
 // gitlabArchRegex extracts architecture from GitLab asset names like "APK (arm64-v8a)"
@@ -344,7 +345,7 @@ func (g *GitLab) doAssetDownload(ctx context.Context, client *http.Client, downl
 		return nil, fmt.Errorf("follow GitLab external redirect: %w", err)
 	} else if again {
 		resp.Body.Close()
-		return nil, fmt.Errorf("GitLab external redirect loop for %s", downloadURL)
+		return nil, fmt.Errorf("GitLab external redirect loop for %s", sanitize.URL(downloadURL))
 	}
 
 	return resp, nil

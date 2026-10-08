@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/zapstore/zsp/internal/apk"
+	"github.com/zapstore/zsp/internal/sanitize"
 	"github.com/zapstore/zsp/internal/source"
 )
 
@@ -31,7 +32,7 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 		SkipHTTPCache:      options.SkipHTTPCache,
 	})
 	if err != nil {
-		return nil, wrapOperationError(ErrInvalidConfig, err, false, "create source")
+		return nil, wrapOperationError(ErrInvalidConfig, err, false, "create source"+causeDetail(err))
 	}
 	report(options, "fetch", "resolve", config.Repository, 0, 0)
 	release, err := src.FetchLatestRelease(ctx)
@@ -43,7 +44,7 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 			return nil, contextErr
 		}
 		sentinel, retryable := sourceErrorClassification(err)
-		return nil, wrapOperationError(sentinel, err, retryable, "resolve source")
+		return nil, wrapOperationError(sentinel, err, retryable, "resolve source"+causeDetail(err))
 	}
 	if release == nil || !releaseMatches(release, config.ReleaseFilter) {
 		return nil, operationErr(ErrNoAPK, false, "no matching release")
@@ -81,7 +82,8 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 			closeAPKs(results)
 			return nil, contextOperationError(err, "fetch")
 		}
-		report(options, "fetch", "download", candidate.Name, 0, candidate.Size)
+		displayName := safeAssetName(candidate.Name)
+		report(options, "fetch", "download", displayName, 0, candidate.Size)
 		path := candidate.LocalPath
 		managed := false
 		tempDir := ""
@@ -89,10 +91,10 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 			tempDir, err = os.MkdirTemp("", "zsp-fetch-*")
 			if err != nil {
 				closeAPKs(results)
-				return nil, wrapOperationError(ErrSourceFailed, err, false, "create temporary directory")
+				return nil, wrapOperationError(ErrSourceFailed, err, false, "create temporary directory"+causeDetail(err))
 			}
 			path, err = src.Download(ctx, candidate, tempDir, func(done, total int64) {
-				report(options, "fetch", "download", candidate.Name, done, total)
+				report(options, "fetch", "download", displayName, done, total)
 			})
 			if err != nil {
 				_ = os.RemoveAll(tempDir)
@@ -101,17 +103,17 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 					return nil, contextOperationError(ctx.Err(), "fetch")
 				}
 				lastDownloadError = err
-				report(options, "fetch", "warning", candidate.Name+": download failed", 0, 0)
+				report(options, "fetch", "warning", displayName+": download failed", 0, 0)
 				continue
 			}
 			managed = true
 		}
-		report(options, "fetch", "verify", candidate.Name, 0, 0)
+		report(options, "fetch", "verify", displayName, 0, 0)
 		if info, statErr := os.Stat(path); statErr != nil || info.Size() > source.MaxDownloadSize {
 			if managed {
 				_ = os.RemoveAll(tempDir)
 			}
-			report(options, "fetch", "warning", candidate.Name+": APK exceeds the size limit", 0, 0)
+			report(options, "fetch", "warning", displayName+": APK exceeds the size limit", 0, 0)
 			continue
 		}
 		parsed, parseErr := apk.Parse(path)
@@ -119,21 +121,21 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 			if managed {
 				_ = os.RemoveAll(tempDir)
 			}
-			report(options, "fetch", "warning", candidate.Name+": invalid or unsigned APK", 0, 0)
+			report(options, "fetch", "warning", displayName+": invalid or unsigned APK", 0, 0)
 			continue
 		}
 		if parsed.IsWatch() || !parsed.IsArm64() {
 			if managed {
 				_ = os.RemoveAll(tempDir)
 			}
-			report(options, "fetch", "warning", candidate.Name+": unsupported Android platform", 0, 0)
+			report(options, "fetch", "warning", displayName+": unsupported Android platform", 0, 0)
 			continue
 		}
 		if _, duplicate := seen[parsed.SHA256]; duplicate {
 			if managed {
 				_ = os.RemoveAll(tempDir)
 			}
-			report(options, "fetch", "warning", candidate.Name+": duplicate APK omitted", 0, 0)
+			report(options, "fetch", "warning", displayName+": duplicate APK omitted", 0, 0)
 			continue
 		}
 		seen[parsed.SHA256] = struct{}{}
@@ -178,7 +180,7 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 	if len(results) == 0 {
 		if lastDownloadError != nil {
 			sentinel, retryable := sourceErrorClassification(lastDownloadError)
-			return nil, wrapOperationError(sentinel, lastDownloadError, retryable, "download APK candidates")
+			return nil, wrapOperationError(sentinel, lastDownloadError, retryable, "download APK candidates"+causeDetail(lastDownloadError))
 		}
 		return nil, operationErr(ErrNoAPK, false, "no candidate passed APK verification")
 	}
@@ -188,6 +190,12 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 		}
 	}
 	return results, nil
+}
+
+// safeAssetName reduces a source-controlled asset name to display-safe text
+// for progress output and warnings, which may reach JSON consumers.
+func safeAssetName(name string) string {
+	return sanitize.Truncate(sanitize.Text(name), 120)
 }
 
 func cloneFetchConfig(config FetchConfig) FetchConfig {

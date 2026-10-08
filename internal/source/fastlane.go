@@ -224,7 +224,7 @@ func (f *MetadataFetcher) giteaContents(ctx context.Context, baseURL, owner, rep
 		return nil, fmt.Errorf("creating Gitea Fastlane request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	if token := os.Getenv("GITEA_TOKEN"); token != "" {
+	if token := config.GetEnv("GITEA_TOKEN"); token != "" {
 		req.Header.Set("Authorization", "token "+token)
 	}
 

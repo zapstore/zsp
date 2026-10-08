@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
 	"github.com/nbd-wtf/go-nostr/nip46"
+	"github.com/zapstore/zsp/internal/sanitize"
 )
 
 // SignerType represents the type of signer.
@@ -63,9 +65,10 @@ func NewSigner(ctx context.Context, signWith string) (Signer, error) {
 		// Pad with leading zeros to 64 characters (32 bytes)
 		hexKey := fmt.Sprintf("%064s", signWith)
 		hexKey = strings.ReplaceAll(hexKey, " ", "0")
+		sanitize.Register(hexKey, signWith)
 		nsec, err := nip19.EncodePrivateKey(hexKey)
 		if err != nil {
-			return nil, fmt.Errorf("invalid hex private key: %w", err)
+			return nil, fmt.Errorf("invalid hex private key: %s", sanitize.Text(err.Error()))
 		}
 		return NewNsecSigner(nsec)
 	}
@@ -94,18 +97,20 @@ type NsecSigner struct {
 
 // NewNsecSigner creates a signer from an nsec.
 func NewNsecSigner(nsec string) (*NsecSigner, error) {
+	sanitize.Register(nsec)
 	prefix, data, err := nip19.Decode(nsec)
 	if err != nil {
-		return nil, fmt.Errorf("invalid nsec: %w", err)
+		return nil, fmt.Errorf("invalid nsec: %s", sanitize.Text(err.Error()))
 	}
 	if prefix != "nsec" {
 		return nil, fmt.Errorf("expected nsec, got %s", prefix)
 	}
 
 	privateKey := data.(string)
+	sanitize.Register(privateKey)
 	publicKey, err := nostr.GetPublicKey(privateKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to derive public key: %w", err)
+		return nil, fmt.Errorf("failed to derive public key: %s", sanitize.Text(err.Error()))
 	}
 
 	return &NsecSigner{
@@ -124,7 +129,12 @@ func (s *NsecSigner) PublicKey() string {
 
 func (s *NsecSigner) Sign(ctx context.Context, event *nostr.Event) error {
 	event.PubKey = s.publicKey
-	return event.Sign(s.privateKey)
+	if err := event.Sign(s.privateKey); err != nil {
+		// go-nostr quotes the secret key in this error ("Sign called with
+		// invalid secret key '%s'"); sanitize before it can escape.
+		return errors.New(sanitize.Text(err.Error()))
+	}
+	return nil
 }
 
 // Close clears sensitive key material from memory.
@@ -147,25 +157,29 @@ type BunkerSigner struct {
 
 // NewBunkerSigner creates a signer from a bunker:// URL.
 func NewBunkerSigner(ctx context.Context, bunkerURL string) (*BunkerSigner, error) {
+	// The bunker URL carries a NIP-46 secret; record it and the URL itself so
+	// neither can appear in an error message.
+	sanitize.Register(bunkerURL, bunkerURLSecret(bunkerURL))
+
 	// Extract the target pubkey from the bunker URL.
 	// The URL format is: bunker://<remote-signer-pubkey>?relay=...&secret=...
 	// A remote bunker keeps a client key for that pubkey. A loopback bunker uses
 	// the shared local client key.
 	targetPubkey, err := extractBunkerTargetPubkey(bunkerURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid bunker URL: %w", err)
+		return nil, fmt.Errorf("invalid bunker URL: %s", sanitize.Text(err.Error()))
 	}
 
 	clientSecretKey, err := bunkerClientKey(bunkerURL, targetPubkey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get client key: %w", err)
+		return nil, fmt.Errorf("failed to get client key: %s", sanitize.Text(err.Error()))
 	}
 
 	// Connect to bunker
 	bunker, err := nip46.ConnectBunker(ctx, clientSecretKey, bunkerURL, nil, func(string) {})
 	if err != nil {
 		if !strings.Contains(err.Error(), "already connected") {
-			return nil, fmt.Errorf("failed to connect to bunker: %w", err)
+			return nil, fmt.Errorf("failed to connect to bunker: %s", sanitize.Text(err.Error()))
 		}
 		// "already connected" means the secret was already used.
 		// This is okay if we're using the same client key that originally connected.
@@ -178,9 +192,9 @@ func NewBunkerSigner(ctx context.Context, bunkerURL string) (*BunkerSigner, erro
 		// was already used with a different client key (e.g., from another app).
 		// The user needs to generate a new bunker URL.
 		if strings.Contains(err.Error(), "no permission") {
-			return nil, fmt.Errorf("failed to get public key from bunker: %w\n\nThis bunker URL's secret appears to have been used with a different application.\nPlease generate a new bunker connection URL from your signer (e.g., nsec.app)", err)
+			return nil, fmt.Errorf("failed to get public key from bunker: %s\n\nThis bunker URL's secret appears to have been used with a different application.\nPlease generate a new bunker connection URL from your signer (e.g., nsec.app)", sanitize.Text(err.Error()))
 		}
-		return nil, fmt.Errorf("failed to get public key from bunker: %w", err)
+		return nil, fmt.Errorf("failed to get public key from bunker: %s", sanitize.Text(err.Error()))
 	}
 
 	return &BunkerSigner{
@@ -189,12 +203,22 @@ func NewBunkerSigner(ctx context.Context, bunkerURL string) (*BunkerSigner, erro
 	}, nil
 }
 
+// bunkerURLSecret extracts the NIP-46 secret query parameter from a bunker
+// URL for redaction. It returns "" when the URL cannot be parsed.
+func bunkerURLSecret(bunkerURL string) string {
+	parsed, err := url.Parse(bunkerURL)
+	if err != nil {
+		return ""
+	}
+	return parsed.Query().Get("secret")
+}
+
 // extractBunkerTargetPubkey extracts the target pubkey from a bunker URL.
 // The URL format is: bunker://<remote-signer-pubkey>?relay=...&secret=...
 func extractBunkerTargetPubkey(bunkerURL string) (string, error) {
 	parsed, err := url.Parse(bunkerURL)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse URL: %w", err)
+		return "", fmt.Errorf("failed to parse URL: %s", sanitize.Text(err.Error()))
 	}
 	if parsed.Scheme != "bunker" {
 		return "", fmt.Errorf("expected bunker:// scheme, got %s://", parsed.Scheme)
@@ -252,6 +276,7 @@ func getOrCreateBunkerClientKey(targetPubkey string) (string, error) {
 	if err == nil {
 		key := strings.TrimSpace(string(data))
 		if len(key) == 64 && isValidHex(key) {
+			sanitize.Register(key)
 			if err := os.Chmod(keyPath, 0o600); err != nil {
 				return "", fmt.Errorf("secure bunker client key: %w", err)
 			}
@@ -266,6 +291,7 @@ func getOrCreateBunkerClientKey(targetPubkey string) (string, error) {
 		return "", fmt.Errorf("failed to generate random key: %w", err)
 	}
 	clientKey := hex.EncodeToString(keyBytes[:])
+	sanitize.Register(clientKey)
 
 	// Ensure directory exists
 	if err := os.MkdirAll(filepath.Dir(keyPath), 0700); err != nil {
@@ -325,7 +351,16 @@ func (s *BunkerSigner) PublicKey() string {
 
 func (s *BunkerSigner) Sign(ctx context.Context, event *nostr.Event) error {
 	event.PubKey = s.publicKey
-	return s.bunker.SignEvent(ctx, event)
+	if err := s.bunker.SignEvent(ctx, event); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return context.Canceled
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return context.DeadlineExceeded
+		}
+		return errors.New(sanitize.Text(err.Error()))
+	}
+	return nil
 }
 
 func (s *BunkerSigner) Close() error {

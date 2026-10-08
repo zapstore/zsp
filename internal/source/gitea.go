@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -42,7 +41,7 @@ func NewGitea(cfg *config.Config) (*Gitea, error) {
 		baseURL: baseURL,
 		owner:   parts[0],
 		repo:    parts[1],
-		token:   os.Getenv("GITEA_TOKEN"),
+		token:   config.GetEnv("GITEA_TOKEN"),
 		client:  newSecureHTTPClient(30 * time.Second),
 	}, nil
 }

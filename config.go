@@ -22,7 +22,7 @@ func ParseConfig(r io.Reader) (Config, error) {
 		return Config{}, err
 	}
 	if err := parsed.Validate(); err != nil {
-		return Config{}, wrapOperationError(ErrInvalidConfig, err, false, "validate config")
+		return Config{}, wrapOperationError(ErrInvalidConfig, err, false, "validate config"+causeDetail(err))
 	}
 	return fromInternalConfig(parsed), nil
 }
@@ -36,7 +36,7 @@ func ParseFetchConfig(r io.Reader) (FetchConfig, error) {
 		return FetchConfig{}, err
 	}
 	if err := parsed.ValidateSource(); err != nil {
-		return FetchConfig{}, wrapOperationError(ErrInvalidConfig, err, false, "validate config")
+		return FetchConfig{}, wrapOperationError(ErrInvalidConfig, err, false, "validate config"+causeDetail(err))
 	}
 	return fromInternalFetchConfig(parsed), nil
 }
@@ -50,7 +50,7 @@ func ParsePublishConfig(r io.Reader) (PublishConfig, error) {
 		return PublishConfig{}, err
 	}
 	if err := parsed.ValidateMetadata(); err != nil {
-		return PublishConfig{}, wrapOperationError(ErrInvalidConfig, err, false, "validate config")
+		return PublishConfig{}, wrapOperationError(ErrInvalidConfig, err, false, "validate config"+causeDetail(err))
 	}
 	return fromInternalPublishConfig(parsed), nil
 }
@@ -58,7 +58,7 @@ func ParsePublishConfig(r io.Reader) (PublishConfig, error) {
 func parseInternalConfig(r io.Reader) (*internalconfig.Config, error) {
 	parsed, err := internalconfig.Parse(r)
 	if err != nil {
-		return nil, wrapOperationError(ErrInvalidConfig, err, false, "parse config")
+		return nil, wrapOperationError(ErrInvalidConfig, err, false, "parse config"+causeDetail(err))
 	}
 	return parsed, nil
 }
@@ -68,7 +68,7 @@ func parseInternalConfig(r io.Reader) (*internalconfig.Config, error) {
 func LoadConfig(path string) (Config, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return Config{}, wrapOperationError(ErrInvalidConfig, err, false, "open config")
+		return Config{}, wrapOperationError(ErrInvalidConfig, err, false, "open config"+causeDetail(err))
 	}
 	defer file.Close()
 	result, err := ParseConfig(file)
@@ -77,7 +77,7 @@ func LoadConfig(path string) (Config, error) {
 	}
 	absolutePath, err := filepath.Abs(path)
 	if err != nil {
-		return Config{}, wrapOperationError(ErrInvalidConfig, err, false, "resolve config path")
+		return Config{}, wrapOperationError(ErrInvalidConfig, err, false, "resolve config path"+causeDetail(err))
 	}
 	baseDir := filepath.Dir(absolutePath)
 	if releaseSource := result.Fetch.ReleaseSource; releaseSource != nil && releaseSource.LocalPath != "" && !filepath.IsAbs(releaseSource.LocalPath) {
@@ -204,7 +204,7 @@ func fetchInternalConfig(config FetchConfig) (*internalconfig.Config, error) {
 		}
 		pointer, err := internalconfig.ParseNaddr(config.Repository)
 		if err != nil {
-			return nil, wrapOperationError(ErrInvalidConfig, err, false, "validate repository naddr")
+			return nil, wrapOperationError(ErrInvalidConfig, err, false, "validate repository naddr"+causeDetail(err))
 		}
 		internal.NIP34Repo = pointer
 	}
@@ -249,11 +249,11 @@ func fetchInternalConfig(config FetchConfig) (*internalconfig.Config, error) {
 	}
 	internal.CanonicalizeForgeURLs()
 	if err := internal.Validate(); err != nil {
-		return nil, wrapOperationError(ErrInvalidConfig, err, false, "validate fetch configuration")
+		return nil, wrapOperationError(ErrInvalidConfig, err, false, "validate fetch configuration"+causeDetail(err))
 	}
 	if config.Match != "" {
 		if _, err := regexp.Compile(config.Match); err != nil {
-			return nil, wrapOperationError(ErrInvalidConfig, err, false, "validate match")
+			return nil, wrapOperationError(ErrInvalidConfig, err, false, "validate match"+causeDetail(err))
 		}
 	}
 	switch internal.GetSourceType() {
@@ -318,7 +318,7 @@ func validatePublishInput(config PublishConfig, options PublishOptions) error {
 // release-notes paths must be absolute.
 func validatePublishConfig(config PublishConfig) error {
 	if err := toPublishInternalConfig(config).ValidateMetadata(); err != nil {
-		return wrapOperationError(ErrInvalidConfig, err, false, "validate publish configuration")
+		return wrapOperationError(ErrInvalidConfig, err, false, "validate publish configuration"+causeDetail(err))
 	}
 	for _, location := range append([]string{config.Icon}, config.Images...) {
 		if location != "" && !strings.Contains(location, "://") && !filepath.IsAbs(location) {

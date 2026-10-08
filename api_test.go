@@ -738,6 +738,18 @@ func TestCauseDetailSurfacesSanitizedMessage(t *testing.T) {
 	}
 }
 
+func TestOperationErrorsCanCarrySanitizedDetail(t *testing.T) {
+	cause := errors.New(`Get "https://cdn.example/icon?token=secret": dial tcp: lookup failed`)
+	err := wrapOperationError(ErrSourceFailed, cause, true, "load icon"+causeDetail(cause))
+	const want = `source failed: load icon: Get "https://cdn.example/icon": dial tcp: lookup failed`
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+	if strings.Contains(err.Error(), "secret") {
+		t.Fatal("sanitized detail leaked a credential")
+	}
+}
+
 func TestDescriptorMismatchNamesDifferingFields(t *testing.T) {
 	tests := []struct {
 		name string

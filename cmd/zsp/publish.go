@@ -25,6 +25,7 @@ type cliErrorDocument struct {
 type cliErrorBody struct {
 	Code      string         `json:"code"`
 	Summary   string         `json:"summary"`
+	Detail    string         `json:"detail,omitempty"`
 	Retryable bool           `json:"retryable"`
 	Context   map[string]any `json:"context,omitempty"`
 	NextSteps []cliNextStep  `json:"next_steps"`
@@ -326,7 +327,7 @@ func writePublishError(opts *cli.Options, err error, candidates []*zsp.APK, part
 	if errors.As(err, &operationError) {
 		retryable = operationError.Retryable()
 	}
-	body := cliErrorBody{Code: code, Summary: safeSummary(code), Retryable: retryable, NextSteps: []cliNextStep{}}
+	body := cliErrorBody{Code: code, Summary: safeSummary(code), Detail: ui.SanitizeErrorMessage(err), Retryable: retryable, NextSteps: []cliNextStep{}}
 	if code == "proof_required" {
 		if len(candidates) == 1 {
 			body.Context = map[string]any{"certificate_hash": candidates[0].CertificateHash}

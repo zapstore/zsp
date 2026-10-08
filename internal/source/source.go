@@ -19,6 +19,7 @@ import (
 
 	"github.com/zapstore/zsp/internal/apk"
 	"github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/internal/sanitize"
 	"golang.org/x/net/proxy"
 )
 
@@ -205,7 +206,7 @@ func checkHTTPStatus(resp *http.Response, serviceName string) error {
 	case http.StatusOK:
 		return nil
 	case http.StatusNotFound:
-		return fmt.Errorf("%s returned 404 Not Found: %s", serviceName, resp.Request.URL)
+		return fmt.Errorf("%s returned 404 Not Found: %s", serviceName, sanitize.URL(resp.Request.URL.String()))
 	case http.StatusForbidden:
 		return fmt.Errorf("%s access forbidden (403): you may be rate limited or IP blocked", serviceName)
 	case http.StatusTooManyRequests:
@@ -476,7 +477,7 @@ func prepareDownloadDest(destDir, name string) (string, error) {
 func doGet(ctx context.Context, client *http.Client, rawURL string, headers map[string]string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid download URL: %s", sanitize.Text(err.Error()))
 	}
 	for key, value := range headers {
 		req.Header.Set(key, value)
@@ -488,7 +489,7 @@ func doGet(ctx context.Context, client *http.Client, rawURL string, headers map[
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		return nil, fmt.Errorf("download failed with status %d: %s", resp.StatusCode, rawURL)
+		return nil, fmt.Errorf("download failed with status %d: %s", resp.StatusCode, sanitize.URL(rawURL))
 	}
 	return resp, nil
 }

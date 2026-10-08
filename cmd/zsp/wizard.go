@@ -225,7 +225,21 @@ func wizardError(title string, err error) int {
 		return 1
 	}
 	ui.PrintInfo(summary)
+	if reason := wizardFailureReason(err); reason != "" {
+		ui.PrintInfo("Reason: " + reason)
+	}
 	return 1
+}
+
+// wizardFailureReason renders the sanitized cause of a failed wizard step so a
+// canned summary does not hide an actionable reason (wrong password, malformed
+// keystore, unreachable signer). Credentials and key material are redacted
+// before display.
+func wizardFailureReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	return strings.Join(strings.Fields(ui.SanitizeErrorMessage(err)), " ")
 }
 
 func wizardFailurePresentation(title string, err error) (kind, summary string, details []ui.KeyValue) {
@@ -644,7 +658,8 @@ func wizardSigner(ctx context.Context) (nostrpkg.Signer, error) {
 		}
 		switch kind {
 		case "bunker:// URL":
-			signWith, err = ui.PromptField("Bunker URL", "Remote signing connection.", false, true)
+			// The bunker URL carries a NIP-46 secret; never echo it to the terminal.
+			signWith, err = ui.PromptField("Bunker URL", "Remote signing connection.", true, true)
 		default:
 			signWith, err = ui.PromptSecret("Nostr nsec")
 		}

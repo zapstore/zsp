@@ -8,14 +8,35 @@ import (
 	"strings"
 
 	"github.com/joho/godotenv"
+	"github.com/zapstore/zsp/internal/sanitize"
 )
 
 // DefaultRelayHTTPURL is the REST origin used when RELAYS is unset.
 const DefaultRelayHTTPURL = "https://relay.zapstore.dev"
 
+// secretEnvNames identifies environment values that must never appear in
+// output: signer material, credentials, and passwords. GetEnv registers every
+// value it reads for one of these names with the sanitize package.
+var secretEnvNames = map[string]bool{
+	"SIGN_WITH":             true,
+	"KEYSTORE_PASSWORD":     true,
+	"KEYSTORE_KEY_PASSWORD": true,
+	"GITHUB_TOKEN":          true,
+	"GITEA_TOKEN":           true,
+}
+
 // GetEnv resolves a setting from the process environment, then from .env in
 // the process's exact working directory. It never searches parent directories.
+// Values read for a secret name are recorded for redaction.
 func GetEnv(name string) string {
+	value := lookupEnv(name)
+	if secretEnvNames[name] {
+		sanitize.Register(value)
+	}
+	return value
+}
+
+func lookupEnv(name string) string {
 	if value, exists := os.LookupEnv(name); exists {
 		return value
 	}

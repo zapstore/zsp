@@ -499,6 +499,21 @@ func TestWizardRelayTargetsRedactsCredentialsAndQueries(t *testing.T) {
 	}
 }
 
+func TestWizardFailureReasonIsSanitized(t *testing.T) {
+	reason := wizardFailureReason(errors.New("failed to connect to bunker: dial tcp 127.0.0.1:1: connection refused"))
+	if reason != "failed to connect to bunker: dial tcp 127.0.0.1:1: connection refused" {
+		t.Fatalf("reason = %q", reason)
+	}
+	secret := "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqpj0f0h"
+	reason = wizardFailureReason(errors.New("sign failed for " + secret))
+	if strings.Contains(reason, secret) || strings.Contains(reason, "nsec1") {
+		t.Fatalf("reason leaked key material: %q", reason)
+	}
+	if got := wizardFailureReason(nil); got != "" {
+		t.Fatalf("reason = %q, want empty", got)
+	}
+}
+
 func TestWizardCancellationSummaryStatesWhatChanged(t *testing.T) {
 	tests := []struct {
 		title string

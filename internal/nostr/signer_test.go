@@ -2,11 +2,13 @@ package nostr
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
 	gonostr "github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
+	"github.com/zapstore/zsp/internal/sanitize"
 )
 
 func TestLoopbackBunkerUsesSharedClientKey(t *testing.T) {
@@ -49,6 +51,44 @@ func TestNewSignerRejectsNpub(t *testing.T) {
 	_, err = NewSigner(t.Context(), npub)
 	if err == nil || !strings.Contains(err.Error(), "npub cannot sign") {
 		t.Fatalf("NewSigner(npub) error = %v", err)
+	}
+}
+
+func TestNsecSignerRegistersKeyForRedaction(t *testing.T) {
+	nsec, err := nip19.EncodePrivateKey(gonostr.GeneratePrivateKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := NewNsecSigner(nsec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// go-nostr quotes the secret key in signing errors; registered key
+	// material must be redacted wherever text is shown.
+	leak := "Sign called with invalid secret key '" + signer.privateKey + "': encoding/hex: invalid byte"
+	redacted := sanitize.Text(leak)
+	if strings.Contains(redacted, signer.privateKey) || strings.Contains(redacted, nsec) {
+		t.Fatalf("sanitized error leaked key material: %q", redacted)
+	}
+}
+
+func TestBunkerURLErrorsHideSecret(t *testing.T) {
+	const secret = "verysecretbunkervalue123"
+	_, err := NewBunkerSigner(context.Background(), "bunker://not-a-valid-pubkey?relay=wss://relay.example&secret="+secret)
+	if err == nil {
+		t.Fatal("NewBunkerSigner() error = nil")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("bunker error leaked the NIP-46 secret: %v", err)
+	}
+}
+
+func TestBunkerURLSecretExtraction(t *testing.T) {
+	if got := bunkerURLSecret("bunker://pubkey?relay=wss://relay.example&secret=hidden"); got != "hidden" {
+		t.Fatalf("bunkerURLSecret() = %q", got)
+	}
+	if got := bunkerURLSecret("://not a url"); got != "" {
+		t.Fatalf("bunkerURLSecret(invalid) = %q", got)
 	}
 }
 

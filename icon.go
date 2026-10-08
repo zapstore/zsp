@@ -7,7 +7,7 @@ import "github.com/zapstore/zsp/internal/apk"
 func Icon(path string) ([]byte, error) {
 	info, err := apk.Parse(path)
 	if err != nil {
-		return nil, err
+		return nil, wrapOperationError(ErrInvalidAPK, err, false, "read APK"+causeDetail(err))
 	}
 	if len(info.Icon) == 0 {
 		return nil, nil

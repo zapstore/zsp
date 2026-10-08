@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 
@@ -19,6 +18,7 @@ import (
 	internalconfig "github.com/zapstore/zsp/internal/config"
 	"github.com/zapstore/zsp/internal/identity"
 	internalnostr "github.com/zapstore/zsp/internal/nostr"
+	"github.com/zapstore/zsp/internal/sanitize"
 )
 
 // Publish uploads one verified APK and publishes its NIP-82 events.
@@ -52,7 +52,7 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 	}
 	parsed, err := apk.Parse(path)
 	if err != nil {
-		return nil, wrapOperationError(ErrInvalidAPK, err, false, "verify APK")
+		return nil, wrapOperationError(ErrInvalidAPK, err, false, "verify APK"+causeDetail(err))
 	}
 	if parsed.SHA256 != verified.hash {
 		return nil, operationErr(ErrInvalidAPK, false, "APK changed after Fetch")
@@ -72,9 +72,9 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 		}
 		sentinel, retryable := networkErrorClassification(err)
 		if errors.Is(sentinel, ErrRateLimited) || errors.Is(sentinel, ErrTemporaryFailure) {
-			return nil, wrapOperationError(sentinel, err, retryable, "create signer")
+			return nil, wrapOperationError(sentinel, err, retryable, "create signer"+causeDetail(err))
 		}
-		return nil, operationErr(ErrSigner, false, "create signer")
+		return nil, operationErr(ErrSigner, false, "%s", "create signer"+causeDetail(err))
 	}
 	defer signer.Close()
 	result = &PublishResult{
@@ -88,7 +88,7 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 			return nil, contextErr
 		}
 		sentinel, retryable := relayQueryErrorClassification(err)
-		return nil, wrapOperationError(sentinel, err, retryable, "reach relay")
+		return nil, wrapOperationError(sentinel, err, retryable, "reach relay"+causeDetail(err))
 	}
 	for _, relayURL := range unreachable {
 		result.Warnings = append(result.Warnings, "couldn't reach relay "+publicRelayURL(relayURL))
@@ -105,12 +105,12 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 				return nil, contextErr
 			}
 			sentinel, retryable := relayQueryErrorClassification(proofErr)
-			return nil, wrapOperationError(sentinel, proofErr, retryable, "check C1 proof")
+			return nil, wrapOperationError(sentinel, proofErr, retryable, "check C1 proof"+causeDetail(proofErr))
 		}
 		result.Warnings = append(result.Warnings, safeRelayQueryWarnings("C1 proof", proofWarnings)...)
 		certificate, certificateErr := apk.ExtractCertificate(path)
 		if certificateErr != nil {
-			return nil, wrapOperationError(ErrInvalidAPK, certificateErr, false, "extract signing certificate")
+			return nil, wrapOperationError(ErrInvalidAPK, certificateErr, false, "extract signing certificate"+causeDetail(certificateErr))
 		}
 		authorizedPublishers = activeC1Publishers(proofs, parsed.CertFingerprint, certificate)
 		if len(authorizedPublishers) == 0 {
@@ -130,7 +130,7 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 				return nil, contextErr
 			}
 			sentinel, retryable := relayQueryErrorClassification(checkErr)
-			return nil, wrapOperationError(sentinel, checkErr, retryable, "check published releases")
+			return nil, wrapOperationError(sentinel, checkErr, retryable, "check published releases"+causeDetail(checkErr))
 		}
 		result.Warnings = append(result.Warnings, safeRelayQueryWarnings("published release", warnings)...)
 		publishedVersionCode = versionCode
@@ -174,7 +174,7 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 				return nil, contextErr
 			}
 			sentinel, retryable := relayQueryErrorClassification(appErr)
-			return nil, wrapOperationError(sentinel, appErr, retryable, "find existing application event")
+			return nil, wrapOperationError(sentinel, appErr, retryable, "find existing application event"+causeDetail(appErr))
 		}
 		result.Warnings = append(result.Warnings, safeRelayQueryWarnings("application event", appWarnings)...)
 		if existing := newestAuthorizedApplication(appEvents, parsed.PackageID, authorizedPublishers); existing != nil {
@@ -227,7 +227,7 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 		}
 		preview := internalnostr.NewPreviewServer(previewData, releaseNotes, media.iconURL, options.BrowserPort)
 		if _, err := preview.Start(); err != nil {
-			return nil, wrapOperationError(ErrTemporaryFailure, err, true, "start preview")
+			return nil, wrapOperationError(ErrTemporaryFailure, err, true, "start preview"+causeDetail(err))
 		}
 		approved, err := preview.WaitDecision(ctx)
 		_ = preview.Close()
@@ -235,7 +235,7 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return nil, contextOperationError(err, "wait for preview")
 			}
-			return nil, wrapOperationError(ErrTemporaryFailure, err, true, "wait for preview")
+			return nil, wrapOperationError(ErrTemporaryFailure, err, true, "wait for preview"+causeDetail(err))
 		}
 		if !approved {
 			return nil, operationErr(nil, false, "publication rejected in preview")
@@ -245,7 +245,7 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, contextOperationError(err, "sign events")
 		}
-		return nil, wrapOperationError(ErrTemporaryFailure, err, true, "sign events")
+		return nil, wrapOperationError(ErrTemporaryFailure, err, true, "sign events"+causeDetail(err))
 	}
 	if events.AppMetadata != nil {
 		result.Events.Application = events.AppMetadata.ID
@@ -266,12 +266,12 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 				Accepted: false, Message: "upload failed",
 			})
 			sentinel, retryable := blossomErrorClassification(uploadErr)
-			return result, wrapOperationError(sentinel, uploadErr, retryable, "upload "+blob.label+uploadErrorDetail(uploadErr))
+			return result, wrapOperationError(sentinel, uploadErr, retryable, "upload "+blob.label+uploadFailureDetail(uploadErr))
 		}
 		if mismatch := descriptorMismatch(upload, blob.url, blob.hash, int64(len(blob.data)), blob.mimeType); mismatch != "" {
 			result.Status = statusAfterExternal(result)
 			result.Uploads = append(result.Uploads, BlobResult{
-				URL: upload.URL, Hash: upload.SHA256, Size: upload.Size, Type: upload.Type,
+				URL: sanitize.URL(upload.URL), Hash: upload.SHA256, Size: upload.Size, Type: upload.Type,
 				Accepted: false, Message: "Blossom returned an unexpected descriptor",
 			})
 			return result, operationErr(ErrTemporaryFailure, true, "Blossom returned an invalid descriptor for %s%s", blob.label, mismatch)
@@ -295,20 +295,20 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 			Uploaded: uploadedBytes, Accepted: false, Message: "upload failed",
 		})
 		sentinel, retryable := blossomErrorClassification(err)
-		return result, wrapOperationError(sentinel, err, retryable, "upload APK"+uploadErrorDetail(err))
+		return result, wrapOperationError(sentinel, err, retryable, "upload APK"+uploadFailureDetail(err))
 	}
 	expectedAPKURL := blossomURL + "/" + verified.hash + ".apk"
 	if mismatch := descriptorMismatch(upload, expectedAPKURL, verified.hash, parsed.FileSize,
 		"application/vnd.android.package-archive"); mismatch != "" {
 		result.Status = statusAfterExternal(result)
 		result.Uploads = append(result.Uploads, BlobResult{
-			URL: upload.URL, Hash: upload.SHA256, Size: upload.Size, Type: upload.Type,
+			URL: sanitize.URL(upload.URL), Hash: upload.SHA256, Size: upload.Size, Type: upload.Type,
 			Accepted: false, Message: "Blossom returned an unexpected descriptor",
 		})
 		return result, operationErr(ErrTemporaryFailure, true, "Blossom returned an invalid APK descriptor%s", mismatch)
 	}
 	result.Uploads = append(result.Uploads, BlobResult{
-		URL: upload.URL, Hash: upload.SHA256, Size: upload.Size,
+		URL: sanitize.URL(upload.URL), Hash: upload.SHA256, Size: upload.Size,
 		Type: upload.Type, Uploaded: upload.Size, Accepted: true,
 	})
 
@@ -419,6 +419,16 @@ func causeDetail(err error) string {
 	return ""
 }
 
+// uploadFailureDetail renders why an upload failed: the Blossom status and
+// server reason when the server answered, otherwise the sanitized cause text
+// (for example a connection error).
+func uploadFailureDetail(err error) string {
+	if detail := uploadErrorDetail(err); detail != "" {
+		return detail
+	}
+	return causeDetail(err)
+}
+
 // descriptorReason returns the specific disagreement reported by a descriptor
 // validation error, without the sentinel prefix, or "" when err is not one.
 func descriptorReason(err error) string {
@@ -455,28 +465,11 @@ func descriptorMismatch(got *blossom.UploadResult, wantURL, wantHash string, wan
 	return ": mismatch in " + strings.Join(different, ", ")
 }
 
-// reasonURLPattern matches absolute URLs in server-supplied reason text. Quotes
-// are excluded because reasons often quote a URL.
-var reasonURLPattern = regexp.MustCompile(`\w+://[^\s"']+`)
-
-// publicDetail strips credentials, query parameters, and fragments from every
-// URL in arbitrary detail text, mirroring publicRelayURL: text from a server or
-// a fetch may echo a configured endpoint that carries a token.
+// publicDetail strips credentials, query parameters, fragments, and other
+// private material from arbitrary detail text: text from a server or a fetch
+// may echo a configured endpoint that carries a token.
 func publicDetail(detail string) string {
-	detail = strings.TrimSpace(detail)
-	if detail == "" {
-		return ""
-	}
-	return reasonURLPattern.ReplaceAllStringFunc(detail, func(candidate string) string {
-		parsed, err := url.Parse(candidate)
-		if err != nil {
-			return "URL"
-		}
-		parsed.User = nil
-		parsed.RawQuery = ""
-		parsed.Fragment = ""
-		return parsed.String()
-	})
+	return sanitize.Text(strings.TrimSpace(detail))
 }
 
 func networkErrorClassification(err error) (error, bool) {
@@ -665,6 +658,7 @@ func publishEvent(ctx context.Context, publisher *internalnostr.Publisher, event
 			} else {
 				message = "relay rejected event"
 			}
+			message = sanitize.Truncate(message, 1000)
 		}
 		results = append(results, RelayResult{
 			RelayURL: publicRelayURL(relay.RelayURL), EventID: event.ID, Accepted: relay.Success,

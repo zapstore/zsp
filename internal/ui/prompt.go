@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/huh"
+	"github.com/zapstore/zsp/internal/sanitize"
 	"golang.org/x/term"
 )
 
@@ -315,12 +316,12 @@ func PrintHeader(message string) {
 // PrintSuccess prints a success message.
 func PrintSuccess(message string) {
 	checkmark := "✓"
-	fmt.Printf("%s %s\n", Success(checkmark), trimMessage(message))
+	fmt.Printf("%s %s\n", Success(checkmark), sanitize.Text(trimMessage(message)))
 }
 
 // ErrorMessage formats an error consistently across CLI commands.
 func ErrorMessage(message string) string {
-	return fmt.Sprintf("%s %s", Error("×"), trimMessage(message))
+	return fmt.Sprintf("%s %s", Error("×"), sanitize.Text(trimMessage(message)))
 }
 
 // WriteError writes a consistently formatted error to writer.
@@ -336,16 +337,16 @@ func PrintError(message string) {
 // PrintWarning prints a warning message.
 func PrintWarning(message string) {
 	warning := "⚠"
-	fmt.Printf("%s %s\n", Warning(warning), trimMessage(message))
+	fmt.Printf("%s %s\n", Warning(warning), sanitize.Text(trimMessage(message)))
 }
 
 // PrintInfo prints an info message.
 func PrintInfo(message string) {
 	info := "ℹ"
-	fmt.Printf("%s %s\n", Info(info), trimMessage(message))
+	fmt.Printf("%s %s\n", Info(info), sanitize.Text(trimMessage(message)))
 }
 
 // PrintKeyValue prints a key-value pair.
 func PrintKeyValue(key, value string) {
-	fmt.Printf("%s: %s\n", Bold(key), value)
+	fmt.Printf("%s: %s\n", Bold(key), sanitize.Text(value))
 }
