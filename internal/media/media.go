@@ -36,12 +36,18 @@ type Result struct {
 // Process decodes and optimizes supported raster formats without converting
 // them to another format. Unsupported formats are returned unchanged.
 func Process(data []byte, mimeType string, maxWidth int, compress bool) (Result, error) {
+	// Empty input is not a usable image. Rejecting it here keeps a zero-byte
+	// blob from being prepared and later rejected by the Blossom server for a
+	// zero X-Content-Length.
+	if len(data) == 0 {
+		return Result{}, fmt.Errorf("detecting image format: empty image data")
+	}
 	result := Result{
 		Data:         data,
 		MimeType:     normalizeMimeType(mimeType),
 		OriginalSize: len(data),
 	}
-	if !compress || len(data) == 0 {
+	if !compress {
 		return withHash(result), nil
 	}
 	if result.MimeType == "image/webp" || result.MimeType == "image/gif" || result.MimeType == "image/svg+xml" {

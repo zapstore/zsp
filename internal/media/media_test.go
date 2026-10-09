@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"strings"
 	"testing"
 )
 
@@ -91,6 +92,21 @@ func TestProcess(t *testing.T) {
 				t.Fatal("compressed result did not receive a new content hash")
 			}
 		})
+	}
+}
+
+func TestProcessRejectsEmptyImage(t *testing.T) {
+	for _, compress := range []bool{true, false} {
+		result, err := Process(nil, "image/png", IconMaxWidth, compress)
+		if err == nil {
+			t.Fatalf("Process(compress=%v) error = nil, want an empty-image error", compress)
+		}
+		if len(result.Data) != 0 || result.Hash != "" {
+			t.Fatalf("Process(compress=%v) returned a result for empty input: %+v", compress, result)
+		}
+		if !strings.Contains(err.Error(), "detecting image format") {
+			t.Fatalf("Process(compress=%v) error = %q, want it classified as an unreadable image", compress, err)
+		}
 	}
 }
 

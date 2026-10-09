@@ -42,6 +42,41 @@ func TestPrepareMediaUsesAPKIcon(t *testing.T) {
 	}
 }
 
+func TestPrepareMediaSkipsEmptyScreenshot(t *testing.T) {
+	pngBytes := tinyPNG(t, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/empty/") {
+			w.Header().Set("Content-Type", "image/png")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(pngBytes)
+	}))
+	t.Cleanup(server.Close)
+
+	plan, warnings, err := prepareMedia(t.Context(), PublishConfig{
+		imageSets: [][]string{
+			{server.URL + "/empty/1.png"},
+			{server.URL + "/ok/1.png"},
+		},
+	}, &apk.APKInfo{Icon: pngBytes}, "https://cdn.example", true)
+	if err != nil {
+		t.Fatalf("prepareMedia() error = %v", err)
+	}
+	if len(plan.imageURLs) != 1 || !strings.Contains(plan.imageURLs[0], ".png") {
+		t.Fatalf("images = %v, want the fallback screenshot", plan.imageURLs)
+	}
+	for _, blob := range plan.blobs {
+		if len(blob.data) == 0 {
+			t.Fatalf("prepared a zero-byte blob: %+v", blob)
+		}
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "image 1") || !strings.Contains(warnings[0], "empty image data") {
+		t.Fatalf("warnings = %v", warnings)
+	}
+}
+
 func TestPrepareMediaFallsBackWhenAPKIconIsMissing(t *testing.T) {
 	pngBytes := tinyPNG(t, 8)
 	var got string
