@@ -32,6 +32,8 @@ func preparePublishMetadata(ctx context.Context, config PublishConfig, candidate
 	internal.MetadataSources = overrides.MetadataSources
 
 	var warnings []string
+	var iconCandidates []string
+	var imageSets [][]string
 	if config.MetadataSources == nil || len(config.MetadataSources) > 0 {
 		sources := source.DefaultMetadataSources(internal)
 		fetcher := source.NewMetadataFetcherWithPackageID(internal, parsed.PackageID)
@@ -52,7 +54,15 @@ func preparePublishMetadata(ctx context.Context, config PublishConfig, candidate
 			}
 			warnings = append(warnings, "metadata source "+metadataError.Source+" failed"+detail)
 		}
+		if config.Icon == "" {
+			iconCandidates = fetcher.IconCandidates()
+		}
+		if len(config.Images) == 0 {
+			imageSets = fetcher.ImageSets()
+		}
 	}
 	prepared := fromInternalPublishConfig(internal)
+	prepared.iconCandidates = iconCandidates
+	prepared.imageSets = imageSets
 	return prepared, internal, warnings, nil
 }

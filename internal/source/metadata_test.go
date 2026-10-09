@@ -213,6 +213,34 @@ func TestFetchLocalFastlaneMetadata(t *testing.T) {
 	}
 }
 
+func TestMergeMetadataKeepsMediaFallbacks(t *testing.T) {
+	cfg := &config.Config{}
+	fetcher := NewMetadataFetcher(cfg)
+	fetcher.mergeMetadata(&AppMetadata{
+		IconURL:     "https://example.com/fastlane.png",
+		ImageURLs:   []string{"https://example.com/1.png", "https://example.com/2.png"},
+		Description: "from fastlane",
+	})
+	fetcher.mergeMetadata(&AppMetadata{
+		IconURL:   "https://example.com/fdroid.png",
+		ImageURLs: []string{"https://example.com/alt.png"},
+	})
+	if cfg.Icon != "" {
+		t.Fatalf("Icon = %q, want the APK icon to stay unset", cfg.Icon)
+	}
+	icons := fetcher.IconCandidates()
+	if len(icons) != 2 || icons[0] != "https://example.com/fastlane.png" || icons[1] != "https://example.com/fdroid.png" {
+		t.Fatalf("IconCandidates = %v", icons)
+	}
+	if len(cfg.Images) != 2 || cfg.Images[0] != "https://example.com/1.png" {
+		t.Fatalf("Images = %v, want the first source only", cfg.Images)
+	}
+	sets := fetcher.ImageSets()
+	if len(sets) != 2 || len(sets[0]) != 2 || sets[1][0] != "https://example.com/alt.png" {
+		t.Fatalf("ImageSets = %v", sets)
+	}
+}
+
 func TestFetchMetadataStopsWhenContextIsCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()

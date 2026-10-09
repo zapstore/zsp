@@ -36,6 +36,12 @@ type MetadataFetcher struct {
 	client    *http.Client
 	PackageID string // App package ID (e.g., "com.example.app") - set from APK parsing
 	APKName   string // App name from APK - takes priority over metadata sources
+
+	// iconCandidates and imageSets keep every metadata source's media, in source
+	// order. The publish icon tries the APK first, then these URLs. Screenshots
+	// use the first set that yields a usable image.
+	iconCandidates []string
+	imageSets      [][]string
 }
 
 // NewMetadataFetcher creates a new metadata fetcher.
@@ -752,7 +758,8 @@ func (f *MetadataFetcher) fetchPlayStoreMetadata(ctx context.Context) (*AppMetad
 }
 
 // mergeMetadata merges fetched metadata into config, only filling empty fields.
-// Name priority: YAML config > APK name > metadata sources.
+// Name priority: YAML config > APK name > metadata sources. Icon URLs are kept
+// as fallbacks and are not copied onto the config: the APK icon is tried first.
 func (f *MetadataFetcher) mergeMetadata(meta *AppMetadata) {
 	if meta == nil {
 		return
@@ -783,18 +790,42 @@ func (f *MetadataFetcher) mergeMetadata(meta *AppMetadata) {
 	if len(f.cfg.Tags) == 0 && len(meta.Tags) > 0 {
 		f.cfg.Tags = meta.Tags
 	}
-	if len(f.cfg.Images) == 0 && len(meta.ImageURLs) > 0 {
-		for _, imageURL := range meta.ImageURLs {
-			if config.ValidateURL(imageURL) == nil || isLocalMetadataFile(imageURL) {
-				f.cfg.Images = append(f.cfg.Images, imageURL)
-			}
+	if locations := acceptedMediaLocations(meta.ImageURLs); len(locations) > 0 {
+		f.imageSets = append(f.imageSets, locations)
+		if len(f.cfg.Images) == 0 {
+			f.cfg.Images = append(f.cfg.Images, locations...)
 		}
 	}
-	if f.cfg.Icon == "" && meta.IconURL != "" {
-		if config.ValidateURL(meta.IconURL) == nil || isLocalMetadataFile(meta.IconURL) {
-			f.cfg.Icon = meta.IconURL
+	if locations := acceptedMediaLocations([]string{meta.IconURL}); len(locations) == 1 {
+		f.iconCandidates = append(f.iconCandidates, locations[0])
+	}
+}
+
+// IconCandidates returns icon URLs from each metadata source, in source order.
+func (f *MetadataFetcher) IconCandidates() []string {
+	return append([]string(nil), f.iconCandidates...)
+}
+
+// ImageSets returns screenshot URLs from each metadata source, in source order.
+func (f *MetadataFetcher) ImageSets() [][]string {
+	if len(f.imageSets) == 0 {
+		return nil
+	}
+	sets := make([][]string, len(f.imageSets))
+	for i, set := range f.imageSets {
+		sets[i] = append([]string(nil), set...)
+	}
+	return sets
+}
+
+func acceptedMediaLocations(values []string) []string {
+	var accepted []string
+	for _, value := range values {
+		if config.ValidateURL(value) == nil || isLocalMetadataFile(value) {
+			accepted = append(accepted, value)
 		}
 	}
+	return accepted
 }
 
 func isLocalMetadataFile(value string) bool {

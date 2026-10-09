@@ -154,10 +154,12 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 	result.Warnings = append(result.Warnings, metadataWarnings...)
 	var media mediaPlan
 	if !options.SkipAppEvent {
-		media, err = prepareMedia(ctx, preparedConfig, parsed, blossomURL, !options.SkipMediaCompression)
+		var mediaWarnings []string
+		media, mediaWarnings, err = prepareMedia(ctx, preparedConfig, parsed, blossomURL, !options.SkipMediaCompression)
 		if err != nil {
 			return nil, err
 		}
+		result.Warnings = append(result.Warnings, mediaWarnings...)
 	}
 	releaseNotes, err := loadReleaseNotes(ctx, preparedConfig.ReleaseNotes)
 	if err != nil {

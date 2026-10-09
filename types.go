@@ -42,6 +42,11 @@ type PublishConfig struct {
 	// metadata fetching, or non-empty to select explicit sources.
 	MetadataSources []string
 	baseDir         string
+	// iconCandidates are metadata icon URLs, tried after the APK icon.
+	iconCandidates []string
+	// imageSets are screenshot lists from metadata sources, in source order.
+	// Empty means use Images as the only list.
+	imageSets [][]string
 }
 
 // ReleaseSource describes a local, forge, F-Droid, or web release source.
