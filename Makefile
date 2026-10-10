@@ -11,7 +11,8 @@ DIST := dist/$(NAME)-$(or $(REF),dev)-$(GOARCH)
 release:
 	mkdir -p dist
 	rm -rf $(DIST)
-	CGO_ENABLED=0 go build -trimpath \
+	# The WebP encoder compiles the bundled libwebp.
+	CGO_ENABLED=1 go build -trimpath \
 		-ldflags '-s -w $(if $(REF),-X main.version=$(REF))' \
 		-o $(DIST) ./cmd/zsp
 

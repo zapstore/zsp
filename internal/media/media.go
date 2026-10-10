@@ -7,20 +7,20 @@ import (
 	"encoding/hex"
 	"fmt"
 	"image"
-	"image/jpeg"
-	"image/png"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"strings"
 
-	_ "image/gif"
-
+	"github.com/chai2010/webp"
 	"golang.org/x/image/draw"
-	"golang.org/x/image/webp"
+	_ "golang.org/x/image/webp"
 )
 
 const (
 	IconMaxWidth       = 512
 	ScreenshotMaxWidth = 1440
-	jpegQuality        = 88
+	webpQuality        = 80
 	maxDecodedPixels   = 40_000_000
 )
 
@@ -33,8 +33,10 @@ type Result struct {
 	Changed      bool
 }
 
-// Process decodes and optimizes supported raster formats without converting
-// them to another format. Unsupported formats are returned unchanged.
+// Process resizes PNG, JPEG, GIF, and WebP that exceed maxWidth and encodes
+// PNG, JPEG, and GIF as WebP. A GIF contributes its first frame. WebP already
+// within maxWidth is returned unchanged. SVG and other formats are returned
+// unchanged. compress false returns the original bytes.
 func Process(data []byte, mimeType string, maxWidth int, compress bool) (Result, error) {
 	// Empty input is not a usable image. Rejecting it here keeps a zero-byte
 	// blob from being prepared and later rejected by the Blossom server for a
@@ -50,7 +52,7 @@ func Process(data []byte, mimeType string, maxWidth int, compress bool) (Result,
 	if !compress {
 		return withHash(result), nil
 	}
-	if result.MimeType == "image/webp" || result.MimeType == "image/gif" || result.MimeType == "image/svg+xml" {
+	if result.MimeType == "image/svg+xml" {
 		return withHash(result), nil
 	}
 
@@ -59,11 +61,16 @@ func Process(data []byte, mimeType string, maxWidth int, compress bool) (Result,
 		return Result{}, fmt.Errorf("detecting image format: %w", err)
 	}
 	result.MimeType = format.mimeType
-	if format.mimeType != "image/png" && format.mimeType != "image/jpeg" {
+	if format.mimeType != "image/png" && format.mimeType != "image/jpeg" && format.mimeType != "image/gif" && format.mimeType != "image/webp" {
 		return withHash(result), nil
 	}
 	if format.width <= 0 || format.height <= 0 || int64(format.width)*int64(format.height) > maxDecodedPixels {
 		return Result{}, fmt.Errorf("image dimensions %dx%d exceed processing limit", format.width, format.height)
+	}
+
+	needsResize := maxWidth > 0 && format.width > maxWidth
+	if format.mimeType == "image/webp" && !needsResize {
+		return withHash(result), nil
 	}
 
 	src, _, err := image.Decode(bytes.NewReader(data))
@@ -71,34 +78,35 @@ func Process(data []byte, mimeType string, maxWidth int, compress bool) (Result,
 		return Result{}, fmt.Errorf("decoding %s image: %w", format.name, err)
 	}
 
-	var dst image.Image = src
-	width := src.Bounds().Dx()
-	if maxWidth > 0 && width > maxWidth {
-		height := src.Bounds().Dy() * maxWidth / width
+	dst := src
+	if needsResize {
+		height := src.Bounds().Dy() * maxWidth / src.Bounds().Dx()
 		if height < 1 {
 			height = 1
 		}
-		resized := image.NewRGBA(image.Rect(0, 0, maxWidth, height))
+		resized := image.NewNRGBA(image.Rect(0, 0, maxWidth, height))
 		draw.CatmullRom.Scale(resized, resized.Bounds(), src, src.Bounds(), draw.Over, nil)
 		dst = resized
 	}
 
-	var output bytes.Buffer
-	switch format.mimeType {
-	case "image/png":
-		encoder := png.Encoder{CompressionLevel: png.BestCompression}
-		if err := encoder.Encode(&output, dst); err != nil {
-			return Result{}, fmt.Errorf("encoding PNG image: %w", err)
-		}
-	case "image/jpeg":
-		if err := jpeg.Encode(&output, dst, &jpeg.Options{Quality: jpegQuality}); err != nil {
-			return Result{}, fmt.Errorf("encoding JPEG image: %w", err)
-		}
+	encoded, err := encodeWebP(dst)
+	if err != nil {
+		return Result{}, err
 	}
-
-	result.Data = output.Bytes()
+	result.Data = encoded
+	result.MimeType = "image/webp"
 	result.Changed = !bytes.Equal(data, result.Data)
 	return withHash(result), nil
+}
+
+func encodeWebP(img image.Image) ([]byte, error) {
+	var output bytes.Buffer
+	// Exact keeps RGB under transparent pixels so icons do not grow a halo.
+	err := webp.Encode(&output, img, &webp.Options{Quality: webpQuality, Exact: true})
+	if err != nil {
+		return nil, fmt.Errorf("encoding WebP image: %w", err)
+	}
+	return output.Bytes(), nil
 }
 
 func withHash(result Result) Result {
@@ -142,7 +150,3 @@ func normalizeMimeType(mimeType string) string {
 		return "application/octet-stream"
 	}
 }
-
-// Keep the WebP decoder linked so DecodeConfig recognizes WebP input. There
-// is intentionally no WebP encoder: preserving the source format is required.
-var _ = webp.DecodeConfig

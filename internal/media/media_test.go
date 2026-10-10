@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"image"
 	"image/color"
+	"image/gif"
 	"image/jpeg"
 	"image/png"
 	"strings"
@@ -22,25 +23,36 @@ func TestProcess(t *testing.T) {
 		wantSame  bool
 	}{
 		{
-			name: "large PNG icon is resized",
+			name: "large PNG icon is resized to WebP",
 			encode: func() []byte {
 				return encodePNGTestImage(1024, 512)
 			},
 			mimeType:  "image/png",
 			maxWidth:  IconMaxWidth,
 			compress:  true,
-			wantMIME:  "image/png",
+			wantMIME:  "image/webp",
 			wantWidth: 512,
 		},
 		{
-			name: "large JPEG screenshot is resized",
+			name: "PNG within the width cap becomes WebP",
+			encode: func() []byte {
+				return encodePNGTestImage(64, 64)
+			},
+			mimeType:  "image/png",
+			maxWidth:  IconMaxWidth,
+			compress:  true,
+			wantMIME:  "image/webp",
+			wantWidth: 64,
+		},
+		{
+			name: "large JPEG screenshot is resized to WebP",
 			encode: func() []byte {
 				return encodeJPEGTestImage(2880, 1440)
 			},
 			mimeType:  "image/jpeg",
 			maxWidth:  ScreenshotMaxWidth,
 			compress:  true,
-			wantMIME:  "image/jpeg",
+			wantMIME:  "image/webp",
 			wantWidth: 1440,
 		},
 		{
@@ -55,13 +67,26 @@ func TestProcess(t *testing.T) {
 			wantSame: true,
 		},
 		{
-			name:     "WebP preserves format",
-			encode:   func() []byte { return []byte("RIFF....WEBP") },
-			mimeType: "image/webp",
-			maxWidth: ScreenshotMaxWidth,
-			compress: true,
-			wantMIME: "image/webp",
-			wantSame: true,
+			name: "GIF becomes WebP",
+			encode: func() []byte {
+				return encodeGIFTestImage(16, 16)
+			},
+			mimeType:  "image/gif",
+			maxWidth:  ScreenshotMaxWidth,
+			compress:  true,
+			wantMIME:  "image/webp",
+			wantWidth: 16,
+		},
+		{
+			name: "wide GIF is resized to WebP",
+			encode: func() []byte {
+				return encodeGIFTestImage(1024, 512)
+			},
+			mimeType:  "image/gif",
+			maxWidth:  IconMaxWidth,
+			compress:  true,
+			wantMIME:  "image/webp",
+			wantWidth: 512,
 		},
 	}
 
@@ -131,6 +156,48 @@ func encodeJPEGTestImage(width, height int) []byte {
 		}
 	}
 	_ = jpeg.Encode(&buf, img, &jpeg.Options{Quality: 100})
+	return buf.Bytes()
+}
+
+func TestProcessKeepsWebPWithinTheWidthCap(t *testing.T) {
+	original, err := Process(encodePNGTestImage(64, 32), "image/png", 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := Process(original.Data, "image/webp", IconMaxWidth, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.MimeType != "image/webp" || !bytes.Equal(again.Data, original.Data) {
+		t.Fatalf("in-limit WebP changed: mime %s equal %v", again.MimeType, bytes.Equal(again.Data, original.Data))
+	}
+}
+
+func TestProcessResizesWideWebP(t *testing.T) {
+	original, err := Process(encodePNGTestImage(1024, 512), "image/png", 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resized, err := Process(original.Data, "image/webp", IconMaxWidth, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resized.MimeType != "image/webp" {
+		t.Fatalf("MIME type = %q", resized.MimeType)
+	}
+	config, _, err := image.DecodeConfig(bytes.NewReader(resized.Data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Width != IconMaxWidth {
+		t.Fatalf("width = %d, want %d", config.Width, IconMaxWidth)
+	}
+}
+
+func encodeGIFTestImage(width, height int) []byte {
+	var buf bytes.Buffer
+	img := image.NewPaletted(image.Rect(0, 0, width, height), color.Palette{color.Black, color.White})
+	_ = gif.Encode(&buf, img, nil)
 	return buf.Bytes()
 }
 

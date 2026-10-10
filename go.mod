@@ -7,6 +7,7 @@ require (
 	github.com/PuerkitoBio/goquery v1.11.0
 	github.com/avast/apkparser v0.0.0-20251022140151-7294e274bf65
 	github.com/avast/apkverifier v0.0.0-20251022140917-74acdc5f8b3f
+	github.com/chai2010/webp v1.4.0
 	github.com/charmbracelet/bubbles v0.21.1-0.20250623103423-23b8fd6302d7
 	github.com/charmbracelet/huh v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
