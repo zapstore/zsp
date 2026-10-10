@@ -55,6 +55,42 @@ func TestFilterCandidatesPrecedence(t *testing.T) {
 			want:   []string{"app-universal.apk", "app-offline-universal.apk"},
 		},
 		{
+			name: "debug and test-signed lose to an fdroid release",
+			assets: []string{
+				"antivocale-debug-arm64-v8a.apk",
+				"antivocale-fdroid-testsigned-arm64-v8a.apk",
+				"app-fdroid-arm64-v8a-release.apk",
+			},
+			want: []string{"app-fdroid-arm64-v8a-release.apk"},
+		},
+		{
+			name:   "debug remains when it is the only build",
+			assets: []string{"app-debug-arm64-v8a.apk"},
+			want:   []string{"app-debug-arm64-v8a.apk"},
+		},
+		{
+			name:   "test-signed remains when it is the only build",
+			assets: []string{"app-test-signed-arm64-v8a.apk"},
+			want:   []string{"app-test-signed-arm64-v8a.apk"},
+		},
+		{
+			name: "production release beats debug and fdroid",
+			assets: []string{
+				"app-debug-arm64-v8a.apk",
+				"app-fdroid-arm64-v8a.apk",
+				"app-arm64-v8a.apk",
+			},
+			want: []string{"app-arm64-v8a.apk"},
+		},
+		{
+			name: "debug token does not match a longer word",
+			assets: []string{
+				"app-debugging-arm64-v8a.apk",
+				"app-debug-arm64-v8a.apk",
+			},
+			want: []string{"app-debugging-arm64-v8a.apk"},
+		},
+		{
 			name: "fdroid is fallback only",
 			assets: []string{
 				"app-fdroid-arm64-v8a.apk",

@@ -360,16 +360,19 @@ func filterCandidates(assets []*source.Asset, match string) ([]*source.Asset, er
 		result = append(result, asset)
 	}
 	result = omitGooglePlayCandidates(result)
-	result = preferNonFDroidCandidates(result)
+	// A debug or test-signed APK must not count as the preferred non-fdroid build.
+	result = preferWhenAlternativeExists(result, nonProductionFilenamePattern.MatchString)
+	result = preferWhenAlternativeExists(result, fdroidFilenamePattern.MatchString)
 	return omitUniversalCandidatesWhenArm64Exists(result), nil
 }
 
 var excludedFilenamePattern = regexp.MustCompile(`(?i)(^|[^a-z0-9])(x86_64|x86|armeabi-v7a|armeabi|unsigned|split|config)([^a-z0-9]|$)`)
 var (
-	fdroidFilenamePattern     = regexp.MustCompile(`(?i)(^|[^a-z0-9])f-?droid([^a-z0-9]|$)`)
-	googlePlayFilenamePattern = regexp.MustCompile(`(?i)(^|[^a-z0-9])(google|play|playstore)([^a-z0-9]|$)`)
-	arm64FilenamePattern      = regexp.MustCompile(`(?i)(^|[^a-z0-9])arm64-v8a([^a-z0-9]|$)`)
-	universalFilenamePattern  = regexp.MustCompile(`(?i)(^|[^a-z0-9])universal([^a-z0-9]|$)`)
+	fdroidFilenamePattern        = regexp.MustCompile(`(?i)(^|[^a-z0-9])f-?droid([^a-z0-9]|$)`)
+	nonProductionFilenamePattern = regexp.MustCompile(`(?i)(^|[^a-z0-9])(debug|test[-_]?signed)([^a-z0-9]|$)`)
+	googlePlayFilenamePattern    = regexp.MustCompile(`(?i)(^|[^a-z0-9])(google|play|playstore)([^a-z0-9]|$)`)
+	arm64FilenamePattern         = regexp.MustCompile(`(?i)(^|[^a-z0-9])arm64-v8a([^a-z0-9]|$)`)
+	universalFilenamePattern     = regexp.MustCompile(`(?i)(^|[^a-z0-9])universal([^a-z0-9]|$)`)
 )
 
 func excludedFilename(name string) bool {
@@ -382,11 +385,13 @@ func omitGooglePlayCandidates(candidates []*source.Asset) []*source.Asset {
 	})
 }
 
-func preferNonFDroidCandidates(candidates []*source.Asset) []*source.Asset {
+// preferWhenAlternativeExists drops names matched by excluded when any other
+// candidate remains. Matched names stay when they are the only candidates.
+func preferWhenAlternativeExists(candidates []*source.Asset, excluded func(string) bool) []*source.Asset {
 	for _, candidate := range candidates {
-		if !fdroidFilenamePattern.MatchString(candidate.Name) {
+		if !excluded(candidate.Name) {
 			return filterAssets(candidates, func(candidate *source.Asset) bool {
-				return !fdroidFilenamePattern.MatchString(candidate.Name)
+				return !excluded(candidate.Name)
 			})
 		}
 	}
