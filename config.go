@@ -80,6 +80,8 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, wrapOperationError(ErrInvalidConfig, err, false, "resolve config path"+causeDetail(err))
 	}
 	baseDir := filepath.Dir(absolutePath)
+	result.Fetch.baseDir = baseDir
+	result.Publish.baseDir = baseDir
 	if releaseSource := result.Fetch.ReleaseSource; releaseSource != nil && releaseSource.LocalPath != "" && !filepath.IsAbs(releaseSource.LocalPath) {
 		releaseSource.LocalPath = filepath.Join(baseDir, releaseSource.LocalPath)
 	}

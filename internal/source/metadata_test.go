@@ -180,6 +180,20 @@ func TestMetadataFetcherCreation(t *testing.T) {
 	}
 }
 
+func TestDefaultMetadataSourcesUsesLocalFastlane(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, fastlaneMetadataPath, "en-US"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got := DefaultMetadataSources(&config.Config{BaseDir: root, ReleaseSource: &config.ReleaseSource{LocalPath: "app.apk"}})
+	if len(got) != 1 || got[0] != "fastlane" {
+		t.Fatalf("sources = %v, want local fastlane", got)
+	}
+	if got := DefaultMetadataSources(&config.Config{ReleaseSource: &config.ReleaseSource{LocalPath: "app.apk"}}); got != nil {
+		t.Fatalf("sources = %v, want none without a local tree or repository", got)
+	}
+}
+
 func TestFetchLocalFastlaneMetadata(t *testing.T) {
 	root := t.TempDir()
 	base := filepath.Join(root, fastlaneMetadataPath, "en-US")

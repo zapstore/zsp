@@ -18,6 +18,14 @@ import (
 
 const fastlaneMetadataPath = "fastlane/metadata/android"
 
+func hasLocalFastlane(baseDir string) bool {
+	if baseDir == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(baseDir, fastlaneMetadataPath))
+	return err == nil && info.IsDir()
+}
+
 // errFastlaneUnavailable indicates that a repository does not contain Fastlane
 // metadata. It is distinct from a failed request so callers can safely select
 // the native repository metadata fallback only when Fastlane is absent.

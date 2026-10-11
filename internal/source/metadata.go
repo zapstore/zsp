@@ -108,6 +108,9 @@ func DefaultMetadataSources(cfg *config.Config) []string {
 		// No native Gitea repo-metadata source yet — Fastlane only.
 		return []string{"fastlane"}
 	default:
+		if hasLocalFastlane(cfg.BaseDir) {
+			return []string{"fastlane"}
+		}
 		return nil
 	}
 }

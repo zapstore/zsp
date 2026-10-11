@@ -2,6 +2,7 @@ package zsp
 
 import (
 	"context"
+	"os"
 
 	"github.com/zapstore/zsp/internal/apk"
 	internalconfig "github.com/zapstore/zsp/internal/config"
@@ -15,6 +16,8 @@ func preparePublishMetadata(ctx context.Context, config PublishConfig, candidate
 	}
 	if config.baseDir != "" {
 		internal.BaseDir = config.baseDir
+	} else if wd, wdErr := os.Getwd(); wdErr == nil {
+		internal.BaseDir = wd
 	}
 	overrides := toPublishInternalConfig(config)
 	internal.Name = overrides.Name
