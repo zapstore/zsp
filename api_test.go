@@ -24,6 +24,7 @@ import (
 	gonostr "github.com/nbd-wtf/go-nostr"
 	"gopkg.in/yaml.v3"
 
+	"github.com/zapstore/zsp/internal/apk"
 	"github.com/zapstore/zsp/internal/blossom"
 	"github.com/zapstore/zsp/internal/identity"
 	internalnostr "github.com/zapstore/zsp/internal/nostr"
@@ -49,7 +50,7 @@ func TestPublicStructFieldsMatchContract(t *testing.T) {
 		{FetchOptions{}, []string{"OnProgress", "SkipHTTPCache"}},
 		{APK{}, []string{"Hash", "Filename", "SourceURL", "Size", "AppID", "VersionName", "VersionCode", "MinSDK", "TargetSDK", "Name", "CertificateHash", "LineageHashes", "Architectures", "Permissions"}},
 		{Progress{}, []string{"Operation", "Phase", "Target", "Completed", "Total"}},
-		{PublishOptions{}, []string{"BlossomURL", "Relays", "Channel", "Commit", "SkipAppEvent", "SkipMediaCompression", "SkipProofCheck", "OverwriteRelease", "OverwriteAppEvent", "AppCreatedAtRelease", "Preview", "BrowserPort", "OnProgress"}},
+		{PublishOptions{}, []string{"BlossomURL", "Relays", "Channel", "Commit", "SkipAppEvent", "SkipMediaCompression", "SkipProofCheck", "OverwriteRelease", "OverwriteAppEvent", "AppCreatedAtRelease", "Preview", "BrowserPort", "OnProgress", "ProofSigner"}},
 		{EventIDs{}, []string{"Application", "Release", "Assets"}},
 		{PublishResult{}, []string{"ID", "Status", "AppID", "CertificateHash", "LineageHashes", "Events", "Uploads", "Relays", "Warnings"}},
 		{BlobResult{}, []string{"URL", "Hash", "Size", "Type", "Uploaded", "Accepted", "Message"}},
@@ -111,6 +112,41 @@ release_notes: notes.md
 	}
 	if config.Publish.ReleaseNotes != filepath.Join(directory, "notes.md") {
 		t.Fatalf("ReleaseNotes = %q, want resolved local path", config.Publish.ReleaseNotes)
+	}
+	if config.Fetch.baseDir != directory || config.Publish.baseDir != directory {
+		t.Fatalf("baseDir = %q %q, want the config directory", config.Fetch.baseDir, config.Publish.baseDir)
+	}
+}
+
+func TestPreparePublishMetadataReadsLocalFastlane(t *testing.T) {
+	directory := t.TempDir()
+	base := filepath.Join(directory, "fastlane", "metadata", "android", "en-US")
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "short_description.txt"), []byte("Short one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "full_description.txt"), []byte("Long one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(directory, "zapstore.yaml")
+	if err := os.WriteFile(configPath, []byte("metadata_sources: [fastlane]\nrelease_source: app.apk\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, _, warnings, err := preparePublishMetadata(t.Context(), config.Publish, &APK{fetchConfig: config.Fetch}, &apk.APKInfo{PackageID: "dev.example", Label: "Zaplite"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v", warnings)
+	}
+	if prepared.Summary != "Short one" || prepared.Description != "Long one" {
+		t.Fatalf("summary = %q description = %q", prepared.Summary, prepared.Description)
 	}
 }
 

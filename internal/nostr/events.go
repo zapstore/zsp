@@ -371,9 +371,8 @@ type BuildEventSetParams struct {
 	APKInfo     *apk.APKInfo
 	Config      *config.Config
 	Pubkey      string
-	OriginalURL string // Original download URL (from release source)
-	// BlossomURL is retained for source compatibility. Asset URL tags are
-	// deliberately built from OriginalURL only.
+	OriginalURL string // Original download URL (from release source). Not a kind 3063 url tag.
+	// BlossomURL is the APK download URL, <server>/<sha256>.apk. It is the kind 3063 url tag.
 	BlossomURL       string
 	IconURL          string
 	ImageURLs        []string
@@ -405,12 +404,11 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		name = apkInfo.PackageID
 	}
 
-	// Asset events may contain a stable source URL. Blossom discovery uses the
-	// content hash and configured server, so publishing its derived URL here
-	// would create a second, non-source URL tag.
+	// The phone downloads the url tag. A local APK has no source URL, and a
+	// source URL is not the file Blossom stored. The tag is the Blossom URL.
 	var apkURLs []string
-	if params.OriginalURL != "" {
-		apkURLs = append(apkURLs, params.OriginalURL)
+	if params.BlossomURL != "" {
+		apkURLs = append(apkURLs, params.BlossomURL)
 	}
 	// Convert architectures to platform identifiers
 	platforms := platformsFromAPKInfo(apkInfo)

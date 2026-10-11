@@ -3,6 +3,7 @@ package zsp
 import (
 	"context"
 	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -112,14 +113,27 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 		if certificateErr != nil {
 			return nil, wrapOperationError(ErrInvalidAPK, certificateErr, false, "extract signing certificate"+causeDetail(certificateErr))
 		}
-		authorizedPublishers = activeC1Publishers(proofs, parsed.CertFingerprint, certificate)
+		active := activeC1Proof(proofs, parsed.CertFingerprint, certificate, time.Now())
+		c1Status = "active"
+		if options.ProofSigner != nil && c1ProofNeedsRenewal(active, signer.PublicKey(), time.Now()) {
+			c1Status = "created"
+			if active != nil {
+				c1Status = "renewed"
+			}
+			reportPublish(options, "publish", "proof", "creating C1 proof", 0, 0)
+			created, createErr := createC1Proof(ctx, options.ProofSigner, signer, certificate, active, publisher)
+			if createErr != nil {
+				return nil, createErr
+			}
+			active = created
+		}
+		authorizedPublishers = c1Publishers(active)
 		if len(authorizedPublishers) == 0 {
 			return nil, operationErr(ErrProofRequired, false, "no active proof found for certificate %s", parsed.CertFingerprint)
 		}
 		if _, authorized := authorizedPublishers[signer.PublicKey()]; !authorized {
 			return nil, operationErr(ErrProofUnauthorized, false, "signer is not the active proof owner or delegate")
 		}
-		c1Status = "active"
 		var publishedVersionCode int64
 		reportPublish(options, "publish", "release", "published releases", 0, 0)
 		versionCode, publishedAt, warnings, checkErr := publisher.HighestReleaseVersionCode(
@@ -185,7 +199,8 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 	}
 	events := internalnostr.BuildEventSet(internalnostr.BuildEventSetParams{
 		APKInfo: parsed, Config: eventConfig, Pubkey: signer.PublicKey(), OriginalURL: verified.originalURL,
-		IconURL: media.iconURL, ImageURLs: media.imageURLs, Changelog: releaseNotes,
+		BlossomURL: blossomURL + "/" + verified.hash + ".apk",
+		IconURL:    media.iconURL, ImageURLs: media.imageURLs, Changelog: releaseNotes,
 		Channel: publishChannel,
 		Commit:  options.Commit, ReleaseVersion: verified.releaseVersion, ReleaseTimestamp: verified.releasedAt,
 		AppCreatedAtRelease: options.AppCreatedAtRelease, MinReleaseTimestamp: existingReleaseTimestamp,
@@ -517,9 +532,14 @@ func safeRelayQueryWarnings(operation string, warnings []error) []string {
 }
 
 func activeC1Publishers(proofs []*gonostr.Event, certHash string, certificate *x509.Certificate) map[string]struct{} {
+	return c1Publishers(activeC1Proof(proofs, certHash, certificate, time.Now()))
+}
+
+// activeC1Proof returns the newest valid proof across all authors.
+func activeC1Proof(proofs []*gonostr.Event, certHash string, certificate *x509.Certificate, now time.Time) *gonostr.Event {
 	var activeProof *gonostr.Event
 	for _, proof := range proofs {
-		decodedProof, validationErr := identity.ValidateActiveProofEvent(proof, certificate, time.Now())
+		decodedProof, validationErr := identity.ValidateActiveProofEvent(proof, certificate, now)
 		if validationErr != nil || decodedProof.CertHash != certHash {
 			continue
 		}
@@ -528,6 +548,10 @@ func activeC1Publishers(proofs []*gonostr.Event, certHash string, certificate *x
 			activeProof = proof
 		}
 	}
+	return activeProof
+}
+
+func c1Publishers(activeProof *gonostr.Event) map[string]struct{} {
 	if activeProof == nil {
 		return nil
 	}
@@ -536,6 +560,84 @@ func activeC1Publishers(proofs []*gonostr.Event, certHash string, certificate *x
 		authorized[(*delegation)[1]] = struct{}{}
 	}
 	return authorized
+}
+
+const c1RenewBefore = 30 * 24 * time.Hour
+
+// c1ProofNeedsRenewal reports whether the signer should publish a proof:
+// none is active, or the signer's own proof expires soon. A proof owned by
+// another key is never replaced.
+func c1ProofNeedsRenewal(active *gonostr.Event, pubkey string, now time.Time) bool {
+	if active == nil {
+		return true
+	}
+	if active.PubKey != pubkey {
+		return false
+	}
+	proof, err := identity.ParseIdentityProofFromEvent(active)
+	return err == nil && time.Unix(proof.Expiry, 0).Sub(now) < c1RenewBefore
+}
+
+// createC1Proof builds a proof and publishes it. One relay must accept it.
+func createC1Proof(ctx context.Context, proofSigner ProofSigner, signer internalnostr.Signer, certificate *x509.Certificate, previous *gonostr.Event, publisher *internalnostr.Publisher) (*gonostr.Event, error) {
+	event, err := buildC1Proof(ctx, proofSigner, signer, certificate, previous, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	for _, relayResult := range publisher.Publish(ctx, event) {
+		if relayResult.Success {
+			return event, nil
+		}
+	}
+	if contextErr := contextOperationError(ctx.Err(), "publish C1 proof"); contextErr != nil {
+		return nil, contextErr
+	}
+	return nil, operationErr(ErrPublishRejected, true, "no relay accepted the C1 proof")
+}
+
+// buildC1Proof asks proofSigner for the certificate signature and signs the
+// 30509 event with the Nostr signer. A renewal keeps the delegation of the
+// proof it replaces.
+func buildC1Proof(ctx context.Context, proofSigner ProofSigner, signer internalnostr.Signer, certificate *x509.Certificate, previous *gonostr.Event, now time.Time) (*gonostr.Event, error) {
+	createdAt := now.Unix()
+	expiry := now.Add(identity.DefaultExpiry).Unix()
+	signed, err := proofSigner.SignProof(ctx, createdAt, expiry)
+	if err != nil {
+		if contextErr := contextOperationError(ctx.Err(), "sign C1 proof"); contextErr != nil {
+			return nil, contextErr
+		}
+		return nil, operationErr(ErrSigner, false, "%s", "sign C1 proof"+causeDetail(err))
+	}
+	certHash := identity.ComputeCertHash(certificate)
+	if signed.PublicKey != signer.PublicKey() {
+		return nil, operationErr(ErrSigner, false, "C1 proof signer names a different Nostr key than SIGN_WITH")
+	}
+	if signed.CertificateHash != certHash {
+		return nil, operationErr(ErrSigner, false, "C1 proof signer holds a different certificate than the APK")
+	}
+	proof := &identity.IdentityProof{
+		CertHash:  certHash,
+		Signature: base64.StdEncoding.EncodeToString(signed.Signature),
+		CreatedAt: createdAt,
+		Expiry:    expiry,
+	}
+	event := internalnostr.BuildIdentityProofEvent(proof.ToEventTags(), signer.PublicKey(), createdAt)
+	event.Tags = append(event.Tags, gonostr.Tag{"cert", base64.StdEncoding.EncodeToString(certificate.Raw)})
+	if previous != nil && previous.PubKey == signer.PublicKey() {
+		if delegation := previous.Tags.GetFirst([]string{"delegation"}); delegation != nil {
+			event.Tags = append(event.Tags, gonostr.Tag{"delegation", (*delegation)[1]})
+		}
+	}
+	if err := signer.Sign(ctx, event); err != nil {
+		if contextErr := contextOperationError(ctx.Err(), "sign C1 proof event"); contextErr != nil {
+			return nil, contextErr
+		}
+		return nil, operationErr(ErrSigner, false, "%s", "sign C1 proof event"+causeDetail(err))
+	}
+	if _, err := identity.ValidateActiveProofEvent(event, certificate, now); err != nil {
+		return nil, operationErr(ErrSigner, false, "%s", "C1 proof is invalid"+causeDetail(err))
+	}
+	return event, nil
 }
 
 func newestAuthorizedApplication(events []*gonostr.Event, appID string, authorized map[string]struct{}) *gonostr.Event {

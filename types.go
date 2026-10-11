@@ -2,6 +2,7 @@
 package zsp
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"time"
@@ -158,6 +159,21 @@ type PublishOptions struct {
 	Preview              bool           `json:"preview"`
 	BrowserPort          int            `json:"browser_port"`
 	OnProgress           func(Progress) `json:"-"`
+	// ProofSigner, when set, creates or renews the signer's C1 proof during
+	// Publish. It is not used when another key owns the active proof.
+	ProofSigner ProofSigner `json:"-"`
+}
+
+// ProofSigner signs the NIP-C1 proof message with the APK certificate key.
+type ProofSigner interface {
+	SignProof(ctx context.Context, createdAt, expiry int64) (ProofSignature, error)
+}
+
+// ProofSignature is a certificate signature over the C1 proof message.
+type ProofSignature struct {
+	PublicKey       string // Nostr public key named in the message, lowercase hex
+	CertificateHash string // SHA-256 of the certificate DER, lowercase hex
+	Signature       []byte // ASN.1 DER ECDSA or PKCS#1 v1.5, both over SHA-256
 }
 
 // EventIDs identifies the events produced for a publication.
