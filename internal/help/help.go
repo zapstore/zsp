@@ -49,17 +49,17 @@ func RootHelp() string {
 
 	b.WriteString(renderBold("EXAMPLES") + "\n")
 	writeExample(&b, "zsp", "Start the interactive app setup wizard")
-	writeExample(&b, "zsp publish config.yaml", "Publish from config file")
-	writeExample(&b, "zsp publish app.apk", "Publish local APK")
-	writeExample(&b, "zsp publish -r github.com/org/repo", "Fetch and publish from GitHub (open source)")
-	writeExample(&b, "zsp publish -s github.com/user/app", "Closed-source (releases only, no source code)")
+	writeExample(&b, "zsp publish", "Publish from zapstore.yaml")
+	writeExample(&b, "zsp publish -r github.com/org/repo", "Override repository in zapstore.yaml")
+	writeExample(&b, "zsp publish -s ./app-release.apk", "Override release_source in zapstore.yaml")
 	b.WriteString("\n")
 
 	b.WriteString(renderBold("ENVIRONMENT") + "\n")
 	b.WriteString("  " + renderAccent("SIGN_WITH") + "       " + renderWhite("Signing method (nsec1..., hex, bunker://)") + "\n")
 	b.WriteString("  " + renderAccent("GITHUB_TOKEN") + "    " + renderWhite("GitHub API token (optional, avoids rate limits)") + "\n")
 	b.WriteString("  " + renderAccent("RELAYS") + "          " + renderWhite("WebSocket URLs or a Unix socket path (default: wss://relay.zapstore.dev)") + "\n")
-	b.WriteString("  " + renderAccent("BLOSSOM_URL") + "     " + renderWhite("Custom CDN server (default: https://cdn.zapstore.dev)") + "\n\n")
+	b.WriteString("  " + renderAccent("BLOSSOM_URL") + "     " + renderWhite("Custom CDN server (default: https://cdn.zapstore.dev)") + "\n")
+	b.WriteString("  " + renderAccent("HOTBOX_SOCKET") + "   " + renderWhite("Hotbox socket; with HOTBOX_PIN, publish creates the C1 proof") + "\n\n")
 
 	b.WriteString(renderBold("GLOBAL FLAGS") + "\n")
 	b.WriteString("  " + renderAccent("-h, --help") + "      " + renderWhite("Show help") + "\n")
@@ -88,11 +88,11 @@ func PublishHelp() string {
 	b.WriteString("\n")
 
 	b.WriteString(renderBold("USAGE") + "\n")
-	b.WriteString("  " + renderAccent("zsp publish") + " [options] [config.yaml | app.apk]\n\n")
+	b.WriteString("  " + renderAccent("zsp publish") + " [options] [zapstore.yaml]\n\n")
 
 	b.WriteString(renderGreyDark("  With no argument, loads zapstore.yaml from the current directory.") + "\n")
-	b.WriteString(renderGreyDark("  With a config file, publishes according to that configuration.") + "\n")
-	b.WriteString(renderGreyDark("  With an APK file, publishes that APK directly.") + "\n\n")
+	b.WriteString(renderGreyDark("  A config path loads that file instead.") + "\n")
+	b.WriteString(renderGreyDark("  A local APK belongs in release_source. Source flags override the loaded file.") + "\n\n")
 
 	// Source flags
 	b.WriteString(renderBold("SOURCE FLAGS") + "\n")
@@ -151,16 +151,16 @@ func PublishHelp() string {
 	b.WriteString(renderGreyDark("  # Publish from config file") + "\n")
 	b.WriteString("  " + renderAccent("zsp publish zapstore.yaml") + "\n\n")
 
-	b.WriteString(renderGreyDark("  # Publish local APK with repository metadata") + "\n")
-	b.WriteString("  " + renderAccent("zsp publish app-release.apk -r github.com/user/app") + "\n\n")
+	b.WriteString(renderGreyDark("  # Publish the APK named by release_source") + "\n")
+	b.WriteString("  " + renderAccent("zsp publish") + "\n\n")
 
-	b.WriteString(renderGreyDark("  # Fetch latest release from GitHub and publish") + "\n")
+	b.WriteString(renderGreyDark("  # Override the repository in zapstore.yaml") + "\n")
 	b.WriteString("  " + renderAccent("zsp publish -r github.com/AeonBTC/mempal") + "\n\n")
 
-	b.WriteString(renderGreyDark("  # Closed-source app (releases on GitHub, but no source code)") + "\n")
-	b.WriteString("  " + renderAccent("zsp publish -s github.com/user/app -m playstore") + "\n\n")
+	b.WriteString(renderGreyDark("  # Override release_source with a local APK") + "\n")
+	b.WriteString("  " + renderAccent("zsp publish -s ./app-release.apk") + "\n\n")
 
-	b.WriteString(renderGreyDark("  # Open source: GitHub repo + F-Droid builds") + "\n")
+	b.WriteString(renderGreyDark("  # Override repository and release source") + "\n")
 	b.WriteString("  " + renderAccent("zsp publish -r github.com/user/app -s f-droid.org/packages/com.example") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Select one APK when several candidates verify") + "\n")
@@ -175,7 +175,8 @@ func PublishHelp() string {
 	// Config section
 	b.WriteString(renderBold("CONFIGURATION") + "\n")
 	b.WriteString(renderGreyDark("  Config files are YAML. Minimal example:") + "\n\n")
-	b.WriteString("  " + renderAccent("repository:") + " " + renderWhite("https://github.com/user/app") + "\n\n")
+	b.WriteString("  " + renderAccent("repository:") + "     " + renderWhite("https://github.com/user/app") + "\n")
+	b.WriteString("  " + renderAccent("release_source:") + " " + renderWhite("./app-release.apk") + "\n\n")
 	b.WriteString(renderGreyDark("  Full example with all options:") + "\n\n")
 	b.WriteString("  " + renderAccent("repository:") + "      " + renderWhite("https://github.com/user/app") + "\n")
 	b.WriteString("  " + renderAccent("name:") + "            " + renderWhite("My App") + "\n")

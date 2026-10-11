@@ -11,9 +11,27 @@ import (
 
 	"github.com/zapstore/zsp"
 	"github.com/zapstore/zsp/internal/cli"
+	"github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/internal/hotbox"
 	"github.com/zapstore/zsp/internal/ui"
 	"golang.org/x/term"
 )
+
+type hotboxSigner struct{ client hotbox.Client }
+
+func (s hotboxSigner) SignProof(ctx context.Context, createdAt, expiry int64) (zsp.ProofSignature, error) {
+	proof, err := s.client.SignProof(ctx, createdAt, expiry)
+	return zsp.ProofSignature{PublicKey: proof.PublicKey, CertificateHash: proof.CertificateHash, Signature: proof.Signature}, err
+}
+
+// hotboxProofSigner returns a C1 proof signer when HOTBOX_SOCKET and HOTBOX_PIN are set.
+func hotboxProofSigner() zsp.ProofSigner {
+	socket, pin := config.GetHotbox()
+	if socket == "" {
+		return nil
+	}
+	return hotboxSigner{client: hotbox.Client{Socket: socket, PIN: pin}}
+}
 
 type cliErrorDocument struct {
 	OK        bool               `json:"ok"`
@@ -94,6 +112,7 @@ func publishCommand(ctx context.Context, opts *cli.Options) int {
 		Preview:              !opts.Publish.SkipPreview && !opts.Publish.Quiet && !opts.Global.JSON && term.IsTerminal(int(os.Stdin.Fd())),
 		BrowserPort:          opts.Publish.Port,
 		OnProgress:           progress,
+		ProofSigner:          hotboxProofSigner(),
 	})
 	if err != nil {
 		if result != nil {
@@ -107,27 +126,27 @@ func publishCommand(ctx context.Context, opts *cli.Options) int {
 
 func loadPublicConfig(opts *cli.Options) (zsp.Config, error) {
 	var config zsp.Config
-	var err error
 	if len(opts.Args) > 1 {
-		return config, fmt.Errorf("publish accepts at most one config or APK argument")
+		return config, &cliOperationError{
+			code:    "invalid_arguments",
+			message: "publish accepts at most one zapstore.yaml path",
+			cause:   zsp.ErrInvalidConfig,
+		}
 	}
 	if len(opts.Args) == 1 && strings.HasSuffix(strings.ToLower(opts.Args[0]), ".apk") {
-		path, pathErr := filepath.Abs(opts.Args[0])
-		if pathErr != nil {
-			return config, pathErr
+		return config, &cliOperationError{
+			code:    "invalid_arguments",
+			message: "publish reads zapstore.yaml; set release_source to the APK path",
+			cause:   zsp.ErrInvalidConfig,
 		}
-		config.Fetch.ReleaseSource = &zsp.ReleaseSource{LocalPath: path}
-	} else if len(opts.Args) == 0 && (opts.Publish.RepoURL != "" || opts.Publish.ReleaseSource != "") {
-		// Flags provide the source configuration.
-	} else {
-		path := "zapstore.yaml"
-		if len(opts.Args) == 1 {
-			path = opts.Args[0]
-		}
-		config, err = zsp.LoadConfig(path)
-		if err != nil {
-			return config, err
-		}
+	}
+	path := "zapstore.yaml"
+	if len(opts.Args) == 1 {
+		path = opts.Args[0]
+	}
+	config, err := zsp.LoadConfig(path)
+	if err != nil {
+		return config, err
 	}
 	if opts.Publish.RepoURL != "" {
 		config.Fetch.Repository = normalizeRepoURL(opts.Publish.RepoURL)
@@ -342,7 +361,7 @@ func writePublishError(opts *cli.Options, err error, candidates []*zsp.APK, part
 	if code == "apk_selection_required" {
 		body.Context = map[string]any{"candidates": candidates}
 		body.NextSteps = []cliNextStep{{
-			Command: "zsp publish --quiet --skip-preview --apk-hash <sha256> <input>",
+			Command: "zsp publish --quiet --skip-preview --apk-hash <sha256>",
 			Reason:  "Select one verified APK by its exact hash.",
 		}}
 	}
@@ -366,6 +385,7 @@ func writePublishError(opts *cli.Options, err error, candidates []*zsp.APK, part
 		ui.WritePanel(os.Stderr, "error", safeSummary(code), nil, []string{ui.SanitizeErrorMessage(err)})
 		if code == "proof_required" {
 			fmt.Fprintln(os.Stderr, ui.StatusLine("info", ui.RenderCommand("zsp")))
+			fmt.Fprintln(os.Stderr, ui.StatusLine("info", "Or run hotbox and add its HOTBOX_SOCKET and HOTBOX_PIN to .env; zsp publish then creates the proof"))
 		} else if code == "apk_selection_required" {
 			for _, candidate := range candidates {
 				fmt.Fprintln(os.Stderr, ui.StatusLine("info", candidate.Filename+" "+candidate.Hash))

@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -11,6 +13,55 @@ import (
 	"github.com/zapstore/zsp/internal/cli"
 	"github.com/zapstore/zsp/internal/ui"
 )
+
+func TestLoadPublicConfigRejectsAPKArgument(t *testing.T) {
+	_, err := loadPublicConfig(&cli.Options{Args: []string{"app-release.apk"}})
+	if !errors.Is(err, zsp.ErrInvalidConfig) {
+		t.Fatalf("loadPublicConfig error = %v, want ErrInvalidConfig", err)
+	}
+	var coded codedError
+	if !errors.As(err, &coded) || coded.Code() != "invalid_arguments" {
+		t.Fatalf("code = %v, want invalid_arguments", err)
+	}
+	if !strings.Contains(err.Error(), "release_source") {
+		t.Fatalf("error = %v, want release_source", err)
+	}
+}
+
+func TestLoadPublicConfigRequiresZapstoreYAML(t *testing.T) {
+	t.Chdir(t.TempDir())
+	_, err := loadPublicConfig(&cli.Options{})
+	opts := &cli.Options{}
+	opts.Publish.RepoURL = "github.com/example/app"
+	_, flagged := loadPublicConfig(opts)
+	if err == nil || flagged == nil {
+		t.Fatal("publish must load zapstore.yaml even when source flags are set")
+	}
+}
+
+func TestLoadPublicConfigAppliesReleaseSourceFlag(t *testing.T) {
+	dir := t.TempDir()
+	apk := filepath.Join(dir, "app-release.apk")
+	if err := os.WriteFile(apk, []byte("apk"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "zapstore.yaml")
+	if err := os.WriteFile(configPath, []byte("repository: https://github.com/example/app\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := &cli.Options{Args: []string{configPath}}
+	opts.Publish.ReleaseSource = apk
+	config, err := loadPublicConfig(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Fetch.Repository != "https://github.com/example/app" {
+		t.Fatalf("Repository = %q", config.Fetch.Repository)
+	}
+	if config.Fetch.ReleaseSource == nil || config.Fetch.ReleaseSource.LocalPath != apk {
+		t.Fatalf("ReleaseSource = %#v, want local path %s", config.Fetch.ReleaseSource, apk)
+	}
+}
 
 func TestSelectPublicAPKWrapsSelectionSentinel(t *testing.T) {
 	options := &cli.Options{}

@@ -58,8 +58,18 @@ func TestCLI(t *testing.T) {
 	})
 
 	t.Run("check no result envelope", func(t *testing.T) {
-		result := runZSP(t, context.Background(), "publish", "--check", "--skip-metadata", "-s", t.TempDir())
+		dir := t.TempDir()
+		writeZapstoreYAML(t, dir)
+		result := runZSPDir(t, context.Background(), dir, "publish", "--check", "--skip-metadata", "-s", t.TempDir())
 		requireErrorEnvelope(t, result, 1, "check", "source_failed")
+	})
+
+	t.Run("apk argument rejected", func(t *testing.T) {
+		result := runZSP(t, context.Background(), "publish", "app.apk")
+		requireErrorEnvelope(t, result, 1, "publish", "invalid_arguments")
+		if !strings.Contains(result.stderr, "release_source") {
+			t.Fatalf("stderr = %q, want release_source", result.stderr)
+		}
 	})
 
 	t.Run("unknown command envelope", func(t *testing.T) {
@@ -74,8 +84,10 @@ func TestCLI(t *testing.T) {
 			<-r.Context().Done()
 		})
 
+		dir := t.TempDir()
+		writeZapstoreYAML(t, dir)
 		command := exec.Command(zspBinary, "publish", "--check", "--skip-metadata", "-s", serverURL+"/release.apk")
-		command.Dir = t.TempDir()
+		command.Dir = dir
 		var stdout, stderr bytes.Buffer
 		command.Stdout = &stdout
 		command.Stderr = &stderr
@@ -107,10 +119,23 @@ type commandResult struct {
 	exitCode int
 }
 
+func writeZapstoreYAML(t *testing.T, dir string) {
+	t.Helper()
+	body := "repository: https://github.com/example/app\n"
+	if err := os.WriteFile(filepath.Join(dir, "zapstore.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func runZSP(t *testing.T, ctx context.Context, arguments ...string) commandResult {
 	t.Helper()
+	return runZSPDir(t, ctx, t.TempDir(), arguments...)
+}
+
+func runZSPDir(t *testing.T, ctx context.Context, dir string, arguments ...string) commandResult {
+	t.Helper()
 	command := exec.CommandContext(ctx, zspBinary, arguments...)
-	command.Dir = t.TempDir()
+	command.Dir = dir
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr

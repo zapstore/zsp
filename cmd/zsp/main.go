@@ -9,6 +9,7 @@ import (
 
 	"github.com/zapstore/zsp/internal/apk"
 	"github.com/zapstore/zsp/internal/cli"
+	"github.com/zapstore/zsp/internal/config"
 	"github.com/zapstore/zsp/internal/help"
 	"github.com/zapstore/zsp/internal/sanitize"
 	"github.com/zapstore/zsp/internal/ui"
@@ -107,6 +108,17 @@ func run(handler *cli.SignalHandler) int {
 			return 1
 		}
 		return 0
+	}
+	if err := config.CheckDotEnvPermissions(); err != nil {
+		if options.Global.JSON {
+			_ = json.NewEncoder(os.Stderr).Encode(cliErrorDocument{
+				OK: false, Operation: string(options.Command),
+				Error: cliErrorBody{Code: "insecure_env", Summary: ".env is readable by other users.", Detail: err.Error(), Retryable: false, NextSteps: []cliNextStep{}},
+			})
+		} else {
+			ui.WritePanel(os.Stderr, "error", ".env is readable by other users", nil, []string{err.Error()})
+		}
+		return 1
 	}
 	switch options.Command {
 	case cli.CommandPublish:

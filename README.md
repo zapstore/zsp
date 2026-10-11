@@ -25,13 +25,12 @@ creation and publication. The proof is published to `RELAYS`. Add a
 
 ## Publish
 
-Publish a local APK:
+`zsp publish` reads `zapstore.yaml`. A local build sets `release_source` to
+the signed APK:
 
-```sh
-zsp publish app-release.apk
+```yaml
+release_source: ./app-release.apk
 ```
-
-Publish from `zapstore.yaml`:
 
 ```sh
 zsp publish
@@ -123,14 +122,21 @@ a private key.
 | `KEYSTORE_PASSWORD` | JKS/PKCS#12 store password |
 | `KEYSTORE_KEY_PASSWORD` | Optional JKS private-key password |
 | `GITHUB_TOKEN` | Optional GitHub API token |
+| `HOTBOX_SOCKET`, `HOTBOX_PIN` | Hotbox socket and PIN; `publish` creates or renews the C1 proof |
 
 Values resolve from the process environment, then `.env` in the exact current
-working directory.
+working directory. A `.env` that holds `SIGN_WITH` or `HOTBOX_PIN` must be
+mode 0600 (`chmod 600 .env`); zsp refuses one that other users can read.
+
+With [hotbox](../hotbox), paste the block it prints into `.env`. `zsp publish`
+then creates the certificate proof (kind 30509) when none is active, or renews
+your own proof within 30 days of expiry, and publishes the release in the same
+run. A proof owned by another key is never replaced.
 
 ## Command surface
 
 ```text
-zsp publish [options] [zapstore.yaml | app.apk]
+zsp publish [options] [zapstore.yaml]
 zsp utils extract-apk <app.apk>
 ```
 

@@ -30,7 +30,7 @@ const c1RenewalWindow = 90 * 24 * time.Hour
 // runWizard is the interactive entry point for `zsp`.
 func runWizard(ctx context.Context) int {
 	if !isTTY() {
-		ui.WritePanel(os.Stderr, "error", "Interactive terminal required", nil, []string{"Run a command such as zsp publish <input> instead"})
+		ui.WritePanel(os.Stderr, "error", "Interactive terminal required", nil, []string{"Run zsp publish from a directory that has zapstore.yaml"})
 		return 1
 	}
 	fmt.Println(ui.InfoStyle.Italic(true).Render("This wizard will help you configure zapstore.yaml for publishing your app to catalog relays and prove ownership."))

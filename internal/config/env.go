@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -19,6 +20,7 @@ const DefaultRelayHTTPURL = "https://relay.zapstore.dev"
 // value it reads for one of these names with the sanitize package.
 var secretEnvNames = map[string]bool{
 	"SIGN_WITH":             true,
+	"HOTBOX_PIN":            true,
 	"KEYSTORE_PASSWORD":     true,
 	"KEYSTORE_KEY_PASSWORD": true,
 	"GITHUB_TOKEN":          true,
@@ -53,6 +55,40 @@ func lookupEnv(name string) string {
 
 func GetSignWith() string {
 	return GetEnv("SIGN_WITH")
+}
+
+// CheckDotEnvPermissions refuses a .env in the working directory that other
+// users can read when it holds SIGN_WITH or HOTBOX_PIN: either one lets the
+// reader sign as the user.
+func CheckDotEnvPermissions() error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+	path := filepath.Join(cwd, ".env")
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm()&0o077 == 0 {
+		return nil
+	}
+	values, err := godotenv.Read(path)
+	if err != nil {
+		return nil
+	}
+	for _, name := range []string{"SIGN_WITH", "HOTBOX_PIN"} {
+		if values[name] != "" {
+			return fmt.Errorf(".env holds %s and is readable by other users; run chmod 600 .env", name)
+		}
+	}
+	return nil
+}
+
+// GetHotbox returns the hotbox socket and PIN, or empty strings when either is unset.
+func GetHotbox() (socket, pin string) {
+	socket, pin = GetEnv("HOTBOX_SOCKET"), GetEnv("HOTBOX_PIN")
+	if socket == "" || pin == "" {
+		return "", ""
+	}
+	return socket, pin
 }
 
 // RelaySocketPath reports whether raw is a Unix socket relay target.
