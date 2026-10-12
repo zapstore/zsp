@@ -38,6 +38,13 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 	release, err := src.FetchLatestRelease(ctx)
 	if err != nil {
 		if errors.Is(err, source.ErrNotModified) {
+			// A source may refresh cached validators even when reporting
+			// not modified (e.g. an ETag that moved for volatile fields).
+			if !options.SkipHTTPCache {
+				if committer, ok := src.(source.CacheCommitter); ok {
+					_ = committer.CommitCache()
+				}
+			}
 			return nil, operationErr(ErrNoNewAPK, false, "no new APKs")
 		}
 		if contextErr := contextOperationError(ctx.Err(), "fetch"); contextErr != nil {

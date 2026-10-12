@@ -2,6 +2,8 @@ package source
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,15 +11,19 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/zapstore/zsp/internal/config"
 )
 
-// githubETagCache stores the ETag from /releases/latest for conditional requests.
-type githubETagCache struct {
-	ETag string `json:"etag"`
+// githubCache stores validators for /releases/latest: the ETag for conditional
+// requests and a fingerprint of the release fields zsp consumes. Volatile
+// fields (asset download counts, reactions) move the ETag on their own.
+type githubCache struct {
+	ETag        string `json:"etag,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 // GitHub implements Source for GitHub releases.
@@ -31,7 +37,7 @@ type GitHub struct {
 	apiBase            string
 	SkipHTTPCache      bool // Set to true to bypass ETag checks
 	IncludePreReleases bool // Set to true to include pre-releases (--pre-release)
-	pendingETag        string
+	pendingCache       *githubCache
 }
 
 // NewGitHub creates a new GitHub source.
@@ -86,44 +92,44 @@ func (g *GitHub) cacheFilePath() string {
 	return filepath.Join(g.cacheDir, filepath.Base(g.owner)+"_"+filepath.Base(g.repo)+".json")
 }
 
-func (g *GitHub) loadCache() *githubETagCache {
+func (g *GitHub) loadCache() *githubCache {
 	data, err := os.ReadFile(g.cacheFilePath())
 	if err != nil {
 		return nil
 	}
-	var cache githubETagCache
-	if err := json.Unmarshal(data, &cache); err != nil || cache.ETag == "" {
+	var cache githubCache
+	if err := json.Unmarshal(data, &cache); err != nil || (cache.ETag == "" && cache.Fingerprint == "") {
 		return nil
 	}
 	return &cache
 }
 
-func (g *GitHub) saveCache(etag string) error {
+func (g *GitHub) saveCache(cache *githubCache) error {
 	if err := os.MkdirAll(g.cacheDir, 0o755); err != nil {
 		return err
 	}
-	data, err := json.Marshal(githubETagCache{ETag: etag})
+	data, err := json.Marshal(cache)
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(g.cacheFilePath(), data, 0o644)
 }
 
-// CommitCache persists the ETag from the last successful fetch.
+// CommitCache persists the validators from the last successful fetch.
 func (g *GitHub) CommitCache() error {
-	if g.pendingETag == "" {
+	if g.pendingCache == nil {
 		return nil
 	}
-	if err := g.saveCache(g.pendingETag); err != nil {
+	if err := g.saveCache(g.pendingCache); err != nil {
 		return err
 	}
-	g.pendingETag = ""
+	g.pendingCache = nil
 	return nil
 }
 
 // ClearHTTPCache deletes the persisted ETag so the next fetch is unconditional.
 func (g *GitHub) ClearHTTPCache() error {
-	g.pendingETag = ""
+	g.pendingCache = nil
 	err := os.Remove(g.cacheFilePath())
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -152,8 +158,10 @@ func (g *GitHub) setGitHubHeaders(req *http.Request) {
 // a pre-release (when not opted in), or carries no valid APKs, falls back to scanning
 // the most recent releases list to find one that qualifies.
 // Uses conditional requests (ETag/If-None-Match) on the fast path. Returns
-// ErrNotModified if the latest release has not changed since the last fetch.
-// Set SkipHTTPCache to true to bypass the ETag check and always fetch fresh data.
+// ErrNotModified if the latest release has not changed since the last fetch;
+// an ETag that moved only because of volatile fields (asset download counts,
+// reactions) still counts as unchanged. Set SkipHTTPCache to true to bypass
+// the check and always fetch fresh data.
 //
 // Note: /releases/latest always returns the latest stable release — GitHub excludes
 // prereleases from that endpoint by design. When IncludePreReleases is set we skip
@@ -169,8 +177,10 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		return nil, err
 	}
 	g.setGitHubHeaders(req)
+	var cache *githubCache
 	if !g.SkipHTTPCache {
-		if cache := g.loadCache(); cache != nil {
+		cache = g.loadCache()
+		if cache != nil && cache.ETag != "" {
 			req.Header.Set("If-None-Match", cache.ETag)
 		}
 	}
@@ -207,8 +217,14 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	if !ghRelease.Draft && !(ghRelease.Prerelease && !g.IncludePreReleases) && g.matchesReleaseFilter(ghRelease.TagName, ghRelease.Name) {
 		release := g.convertRelease(&ghRelease)
 		if HasValidAPKs(release.Assets) {
+			fingerprint := releaseFingerprint(&ghRelease)
 			if etag := resp.Header.Get("ETag"); etag != "" {
-				g.pendingETag = etag
+				g.pendingCache = &githubCache{ETag: etag, Fingerprint: fingerprint}
+			}
+			if cache != nil && cache.Fingerprint != "" && cache.Fingerprint == fingerprint {
+				// The ETag moved but nothing zsp consumes did. Treat as not
+				// modified; the refreshed validators are committed by Fetch.
+				return nil, ErrNotModified
 			}
 			return release, nil
 		}
@@ -273,6 +289,35 @@ func (g *GitHub) fetchLatestFromList(ctx context.Context) (*Release, error) {
 	}
 
 	return nil, fmt.Errorf("no releases with valid APKs found in the last %d releases for %s/%s", maxReleasesToCheck, g.owner, g.repo)
+}
+
+// releaseFingerprint hashes the release fields zsp consumes, so an ETag that
+// moved only because of volatile fields still detects as unchanged. An asset
+// replaced in place with identical metadata is not detectable; SkipHTTPCache
+// covers that case.
+func releaseFingerprint(release *githubRelease) string {
+	assets := slices.Clone(release.Assets)
+	slices.SortFunc(assets, func(a, b githubAsset) int {
+		if byName := strings.Compare(a.Name, b.Name); byName != 0 {
+			return byName
+		}
+		return strings.Compare(a.BrowserDownloadURL, b.BrowserDownloadURL)
+	})
+	payload, _ := json.Marshal(struct {
+		TagName     string
+		Name        string
+		Body        string
+		Prerelease  bool
+		Draft       bool
+		PublishedAt string
+		HTMLURL     string
+		Assets      []githubAsset
+	}{
+		release.TagName, release.Name, release.Body, release.Prerelease,
+		release.Draft, release.PublishedAt, release.HTMLURL, assets,
+	})
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
 }
 
 // convertRelease converts a GitHub release to our Release type.

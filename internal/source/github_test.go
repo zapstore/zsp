@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -142,8 +143,8 @@ func TestGitHubFetchLatestReleaseUsesETag(t *testing.T) {
 	if release.Version != "1.0.0" {
 		t.Fatalf("version = %q, want 1.0.0", release.Version)
 	}
-	if github.pendingETag != etag {
-		t.Fatalf("pendingETag = %q, want %q", github.pendingETag, etag)
+	if github.pendingCache == nil || github.pendingCache.ETag != etag {
+		t.Fatalf("pendingCache = %+v, want ETag %q", github.pendingCache, etag)
 	}
 	if err := github.CommitCache(); err != nil {
 		t.Fatal(err)
@@ -171,6 +172,70 @@ func TestGitHubFetchLatestReleaseUsesETag(t *testing.T) {
 	}
 	if len(ifNone) != 4 || ifNone[0] != "" || ifNone[1] != etag || ifNone[2] != "" || ifNone[3] != "" {
 		t.Fatalf("If-None-Match headers = %v, want [\"\", %q, \"\", \"\"]", ifNone, etag)
+	}
+}
+
+// TestGitHubFetchLatestReleaseIgnoresETagOnlyChanges covers a release whose
+// ETag moved because of volatile fields (asset download counts) while the
+// content zsp consumes stayed the same: the fetch reports ErrNotModified and
+// refreshes the stored validators.
+func TestGitHubFetchLatestReleaseIgnoresETagOnlyChanges(t *testing.T) {
+	body := func(downloads int) string {
+		return fmt.Sprintf(`{"tag_name":"v1.0.0","name":"1.0.0","draft":false,"prerelease":false,"published_at":"2026-01-01T00:00:00Z","assets":[{"name":"app.apk","browser_download_url":"https://example.com/app.apk","size":1,"download_count":%d}]}`, downloads)
+	}
+	var ifNone []string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		ifNone = append(ifNone, request.Header.Get("If-None-Match"))
+		switch request.Header.Get("If-None-Match") {
+		case `"rel-1"`:
+			writer.Header().Set("ETag", `"rel-2"`)
+			_, _ = writer.Write([]byte(body(8000)))
+		case `"rel-2"`:
+			writer.WriteHeader(http.StatusNotModified)
+		default:
+			writer.Header().Set("ETag", `"rel-1"`)
+			_, _ = writer.Write([]byte(body(1)))
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	github := &GitHub{
+		cfg:      &config.Config{},
+		owner:    "owner",
+		repo:     "repo",
+		client:   server.Client(),
+		cacheDir: t.TempDir(),
+		apiBase:  server.URL,
+	}
+
+	release, err := github.FetchLatestRelease(t.Context())
+	if err != nil {
+		t.Fatalf("first FetchLatestRelease() = %v", err)
+	}
+	if !HasValidAPKs(release.Assets) {
+		t.Fatalf("first release assets = %+v, want a valid APK", release.Assets)
+	}
+	if err := github.CommitCache(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = github.FetchLatestRelease(t.Context())
+	if !errors.Is(err, ErrNotModified) {
+		t.Fatalf("second FetchLatestRelease() = %v, want ErrNotModified", err)
+	}
+	if github.pendingCache == nil || github.pendingCache.ETag != `"rel-2"` {
+		t.Fatalf("pendingCache = %+v, want refreshed ETag %q", github.pendingCache, `"rel-2"`)
+	}
+	if err := github.CommitCache(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = github.FetchLatestRelease(t.Context())
+	if !errors.Is(err, ErrNotModified) {
+		t.Fatalf("third FetchLatestRelease() = %v, want ErrNotModified", err)
+	}
+	if len(ifNone) != 3 || ifNone[0] != "" || ifNone[1] != `"rel-1"` || ifNone[2] != `"rel-2"` {
+		t.Fatalf("If-None-Match headers = %v, want [\"\" %q %q]", ifNone, `"rel-1"`, `"rel-2"`)
 	}
 }
 
