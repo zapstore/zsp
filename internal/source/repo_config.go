@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -54,68 +55,79 @@ func resolveIndexerConfig(ctx context.Context, indexerCfg *config.Config, client
 	return cfg, nil
 }
 
-func fetchRepoConfig(ctx context.Context, client *http.Client, cfg *config.Config) ([]byte, error) {
+// FetchRepoConfig returns the bytes of zapstore.yaml at the repository root
+// on the default branch. Every failure except cancellation is reported as
+// unavailable.
+func FetchRepoConfig(ctx context.Context, repository string) ([]byte, error) {
+	return fetchRepoConfig(ctx, newSecureHTTPClient(30*time.Second), &config.Config{Repository: repository})
+}
+
+// RepoFileURL returns the HTTPS URL of filePath, relative to the repository
+// root, on the default branch of a GitHub, GitLab, or Gitea repository.
+func RepoFileURL(repository, filePath string) (string, bool) {
+	return repoFileURL(&config.Config{Repository: repository}, filePath)
+}
+
+func repoFileURL(cfg *config.Config, filePath string) (string, bool) {
+	filePath = strings.TrimPrefix(path.Clean("/"+filePath), "/")
+	if filePath == "" {
+		return "", false
+	}
+	escaped := escapeRepoPath(filePath)
 	switch repositoryMetadataHost(cfg) {
 	case config.SourceGitHub:
-		return fetchGitHubRepoConfig(ctx, client, cfg)
+		repoPath := config.GetGitHubRepo(cfg.Repository)
+		if repoPath == "" {
+			return "", false
+		}
+		// raw.githubusercontent.com (not the Contents API) does not consume
+		// GitHub API rate limit; indexers hit this for every app.
+		return fmt.Sprintf("https://raw.githubusercontent.com/%s/HEAD/%s", repoPath, escaped), true
 	case config.SourceGitLab:
-		return fetchGitLabRepoConfig(ctx, client, cfg)
+		baseURL, repoPath := config.GetGitLabRepoWithBase(cfg.Repository)
+		if repoPath == "" {
+			return "", false
+		}
+		return fmt.Sprintf("%s/api/v4/projects/%s/repository/files/%s/raw?ref=HEAD",
+			baseURL, url.PathEscape(repoPath), url.PathEscape(filePath)), true
 	case config.SourceGitea:
-		return fetchGiteaRepoConfig(ctx, client, cfg)
+		baseURL, repoPath := config.GetGiteaRepo(cfg.Repository)
+		parts := strings.Split(repoPath, "/")
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return "", false
+		}
+		return fmt.Sprintf("%s/api/v1/repos/%s/%s/raw/%s", baseURL, parts[0], parts[1], escaped), true
 	default:
-		return nil, errRepoConfigUnavailable
+		return "", false
 	}
 }
 
-func fetchGitHubRepoConfig(ctx context.Context, client *http.Client, cfg *config.Config) ([]byte, error) {
-	repoPath := config.GetGitHubRepo(cfg.Repository)
-	if repoPath == "" {
-		return nil, errRepoConfigUnavailable
+func escapeRepoPath(filePath string) string {
+	segments := strings.Split(filePath, "/")
+	for index, segment := range segments {
+		segments[index] = url.PathEscape(segment)
 	}
-	// Use raw.githubusercontent.com (not the Contents API) so this optional
-	// check does not consume GitHub API rate limit — indexers hit this for
-	// every app, and unauthenticated API 403s were aborting publishes.
-	requestURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/HEAD/%s", repoPath, repoConfigPath)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("creating GitHub repo config request: %w", err)
-	}
-	if token := config.GetEnv("GITHUB_TOKEN"); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	return doRepoConfigRequest(client, req)
+	return strings.Join(segments, "/")
 }
 
-func fetchGitLabRepoConfig(ctx context.Context, client *http.Client, cfg *config.Config) ([]byte, error) {
-	baseURL, repoPath := config.GetGitLabRepoWithBase(cfg.Repository)
-	if repoPath == "" {
+func fetchRepoConfig(ctx context.Context, client *http.Client, cfg *config.Config) ([]byte, error) {
+	requestURL, ok := repoFileURL(cfg, repoConfigPath)
+	if !ok {
 		return nil, errRepoConfigUnavailable
 	}
-	requestURL := fmt.Sprintf("%s/api/v4/projects/%s/repository/files/%s/raw?ref=HEAD",
-		baseURL, url.PathEscape(repoPath), url.PathEscape(repoConfigPath))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("creating GitLab repo config request: %w", err)
+		return nil, fmt.Errorf("creating repo config request: %w", err)
 	}
-	return doRepoConfigRequest(client, req)
-}
-
-func fetchGiteaRepoConfig(ctx context.Context, client *http.Client, cfg *config.Config) ([]byte, error) {
-	baseURL, repoPath := config.GetGiteaRepo(cfg.Repository)
-	if repoPath == "" {
-		return nil, errRepoConfigUnavailable
-	}
-	parts := strings.Split(repoPath, "/")
-	if len(parts) != 2 {
-		return nil, fmt.Errorf("%w: invalid Gitea repo path: %s", errRepoConfigUnavailable, repoPath)
-	}
-	requestURL := fmt.Sprintf("%s/api/v1/repos/%s/%s/raw/%s", baseURL, parts[0], parts[1], repoConfigPath)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("creating Gitea repo config request: %w", err)
-	}
-	if token := config.GetEnv("GITEA_TOKEN"); token != "" {
-		req.Header.Set("Authorization", "token "+token)
+	switch repositoryMetadataHost(cfg) {
+	case config.SourceGitHub:
+		if token := config.GetEnv("GITHUB_TOKEN"); token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+	case config.SourceGitea:
+		if token := config.GetEnv("GITEA_TOKEN"); token != "" {
+			req.Header.Set("Authorization", "token "+token)
+		}
 	}
 	return doRepoConfigRequest(client, req)
 }

@@ -237,6 +237,27 @@ match: ".*-arm64.*\\.apk$"
 	}
 }
 
+func TestRepoFileURL(t *testing.T) {
+	tests := []struct {
+		repository, path, want string
+	}{
+		{"https://github.com/owner/app", "./assets/icon one.png", "https://raw.githubusercontent.com/owner/app/HEAD/assets/icon%20one.png"},
+		{"https://gitlab.com/group/app", "docs/CHANGELOG.md", "https://gitlab.com/api/v4/projects/group%2Fapp/repository/files/docs%2FCHANGELOG.md/raw?ref=HEAD"},
+		{"https://codeberg.org/owner/app", "../../etc/icon.png", "https://codeberg.org/api/v1/repos/owner/app/raw/etc/icon.png"},
+	}
+	for _, tt := range tests {
+		got, ok := RepoFileURL(tt.repository, tt.path)
+		if !ok || got != tt.want {
+			t.Errorf("RepoFileURL(%q, %q) = (%q, %v), want %q", tt.repository, tt.path, got, ok, tt.want)
+		}
+	}
+	for _, unsupported := range [][2]string{{"https://example.com/app", "icon.png"}, {"https://github.com/owner/app", "."}} {
+		if got, ok := RepoFileURL(unsupported[0], unsupported[1]); ok {
+			t.Errorf("RepoFileURL(%q, %q) = %q, want unsupported", unsupported[0], unsupported[1], got)
+		}
+	}
+}
+
 func TestResolveIndexerConfigNil(t *testing.T) {
 	_, err := resolveIndexerConfig(context.Background(), nil, &http.Client{})
 	if err == nil {
