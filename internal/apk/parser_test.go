@@ -10,6 +10,8 @@ import (
 	"image"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -375,4 +377,175 @@ func TestHashFile(t *testing.T) {
 	if hash != expected {
 		t.Errorf("hashFile() = %q, want %q", hash, expected)
 	}
+}
+
+func TestExtractArchitectures(t *testing.T) {
+	arm64ELF := elfBytes(elfClass64, emAARCH64, false)
+	x86ELF := elfBytes(elfClass32, em386, false)
+
+	tests := []struct {
+		name  string
+		files map[string][]byte
+		want  []string
+	}{
+		{
+			name:  "lib directory names the abi even when the library is not elf",
+			files: map[string][]byte{"lib/arm64-v8a/libe2e.so": []byte("e2e")},
+			want:  []string{"arm64-v8a"},
+		},
+		{
+			name:  "abi directory is case insensitive",
+			files: map[string][]byte{"lib/ARM64-V8A/libe2e.so": []byte("e2e")},
+			want:  []string{"arm64-v8a"},
+		},
+		{
+			name:  "split config alias",
+			files: map[string][]byte{"lib/arm64_v8a/libe2e.so": []byte("e2e")},
+			want:  []string{"arm64-v8a"},
+		},
+		{
+			name: "several lib directories",
+			files: map[string][]byte{
+				"lib/x86_64/liba.so":      []byte("x"),
+				"lib/armeabi-v7a/libb.so": []byte("a"),
+			},
+			want: []string{"armeabi-v7a", "x86_64"},
+		},
+		{
+			name:  "elf header when the path names no abi",
+			files: map[string][]byte{"lib/libapp.so": arm64ELF},
+			want:  []string{"arm64-v8a"},
+		},
+		{
+			name:  "elf header of a library outside lib",
+			files: map[string][]byte{"assets/plugin.so": x86ELF},
+			want:  []string{"x86"},
+		},
+		{
+			name: "elf fallback collects every machine",
+			files: map[string][]byte{
+				"lib/liba.so":    arm64ELF,
+				"assets/libb.so": x86ELF,
+			},
+			want: []string{"arm64-v8a", "x86"},
+		},
+		{
+			name: "lib abi is the install set and other elf blobs are ignored",
+			files: map[string][]byte{
+				"lib/arm64-v8a/liba.so": []byte("not elf"),
+				"assets/plugin.so":      x86ELF,
+			},
+			want: []string{"arm64-v8a"},
+		},
+		{
+			name:  "unknown directory falls back to the elf machine",
+			files: map[string][]byte{"lib/unknown/libfoo.so": arm64ELF},
+			want:  []string{"arm64-v8a"},
+		},
+		{
+			name:  "big endian elf",
+			files: map[string][]byte{"jni/libapp.so": elfBytes(elfClass64, emAARCH64, true)},
+			want:  []string{"arm64-v8a"},
+		},
+		{
+			name:  "elf class must match the machine",
+			files: map[string][]byte{"lib/libapp.so": elfBytes(elfClass32, emAARCH64, false)},
+		},
+		{
+			name:  "pure java apk",
+			files: map[string][]byte{"classes.dex": []byte("dex")},
+		},
+		{
+			name:  "empty abi directory is not an abi",
+			files: map[string][]byte{"lib/arm64-v8a/": nil},
+		},
+		{
+			name:  "non library file under lib is not an abi",
+			files: map[string][]byte{"lib/kotlin/readme.txt": []byte("hi")},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractArchitectures(writeABIZip(t, tt.files))
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("extractArchitectures() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractArchitecturesBackslashPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "abi.apk")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	w, err := zw.CreateHeader(&zip.FileHeader{Name: `lib\arm64-v8a\libe2e.so`, Method: zip.Store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("e2e")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := extractArchitectures(path)
+	want := []string{"arm64-v8a"}
+	if !slices.Equal(got, want) {
+		t.Errorf("extractArchitectures() = %v, want %v", got, want)
+	}
+}
+
+func writeABIZip(t *testing.T, files map[string][]byte) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "abi.apk")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(files[name]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func elfBytes(class byte, machine uint16, big bool) []byte {
+	hdr := make([]byte, 20)
+	hdr[0], hdr[1], hdr[2], hdr[3] = 0x7f, 'E', 'L', 'F'
+	hdr[4] = class
+	if big {
+		hdr[5] = elfData2MSB
+		hdr[18] = byte(machine >> 8)
+		hdr[19] = byte(machine)
+		return hdr
+	}
+	hdr[5] = elfData2LSB
+	hdr[18] = byte(machine)
+	hdr[19] = byte(machine >> 8)
+	return hdr
 }

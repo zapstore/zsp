@@ -113,10 +113,7 @@ func BuildAppMetadataEvent(meta *AppMetadata, pubkey string) *nostr.Event {
 			tags = append(tags, nostr.Tag{"a", meta.NIP34Repo})
 		}
 	}
-	// Platform identifiers (f tags) - REQUIRED per NIP-82
-	for _, platform := range canonicalStrings(meta.Platforms) {
-		tags = append(tags, nostr.Tag{"f", platform})
-	}
+	tags = append(tags, platformTags(meta.Platforms)...)
 	if meta.License != "" {
 		tags = append(tags, nostr.Tag{"license", meta.License})
 	}
@@ -205,10 +202,7 @@ func BuildReleaseEvent(meta *ReleaseMetadata, pubkey string) *nostr.Event {
 		nostr.Tag{"c", channel},
 	)
 
-	// Platform identifiers (f tags) - same as kind 32267
-	for _, platform := range canonicalStrings(meta.Platforms) {
-		tags = append(tags, nostr.Tag{"f", platform})
-	}
+	tags = append(tags, platformTags(meta.Platforms)...)
 
 	// Asset event references (e tags)
 	for _, eventID := range canonicalStrings(meta.AssetEventIDs) {
@@ -251,10 +245,7 @@ func BuildSoftwareAssetEvent(meta *AssetMetadata, pubkey string) *nostr.Event {
 		tags = append(tags, nostr.Tag{"size", strconv.FormatInt(meta.Size, 10)})
 	}
 
-	// Platform identifiers (f tags) - REQUIRED per NIP-82
-	for _, platform := range canonicalStrings(meta.Platforms) {
-		tags = append(tags, nostr.Tag{"f", platform})
-	}
+	tags = append(tags, platformTags(meta.Platforms)...)
 
 	// Platform version info
 	if meta.MinSDK > 0 {
@@ -325,6 +316,11 @@ func BuildBlossomAuthEvent(fileHash string, pubkey string, expiration time.Time,
 	}
 }
 
+// defaultPlatform is the f tag used when an APK's ABIs cannot be detected.
+// A pure Java/Kotlin APK has no native code and still runs on arm64-v8a.
+// The relay rejects an app, release, or asset that omits this tag.
+const defaultPlatform = "android-arm64-v8a"
+
 // archToPlatform converts Android architecture names to NIP-82 platform identifiers.
 func archToPlatform(arch string) string {
 	switch arch {
@@ -342,19 +338,47 @@ func archToPlatform(arch string) string {
 }
 
 // platformsFromAPKInfo returns the NIP-82 platform identifiers for an APK.
-// APKs without native libraries are architecture-independent (pure Java/Kotlin)
-// and run on any ABI; consistent with APKInfo.IsArm64, they are reported as
-// arm64. The result is sorted, de-duplicated, and never empty.
+// Detected ABIs are sorted and de-duplicated. When none were detected the
+// only identifier is defaultPlatform, so the result is never empty.
 func platformsFromAPKInfo(apkInfo *apk.APKInfo) []string {
+	if apkInfo == nil {
+		return []string{defaultPlatform}
+	}
 	platforms := make([]string, 0, len(apkInfo.Architectures))
 	for _, arch := range apkInfo.Architectures {
+		arch = strings.TrimSpace(arch)
+		if arch == "" {
+			continue
+		}
 		platforms = append(platforms, archToPlatform(arch))
 	}
-	if len(platforms) == 0 {
-		platforms = append(platforms, "android-arm64-v8a")
+	return normalizePlatforms(platforms)
+}
+
+// normalizePlatforms returns sorted, de-duplicated platform identifiers.
+// An empty input becomes defaultPlatform.
+func normalizePlatforms(platforms []string) []string {
+	values := make([]string, 0, len(platforms))
+	for _, platform := range platforms {
+		if platform = strings.TrimSpace(platform); platform != "" {
+			values = append(values, platform)
+		}
 	}
-	sort.Strings(platforms)
-	return compactStrings(platforms)
+	values = canonicalStrings(values)
+	if len(values) == 0 {
+		return []string{defaultPlatform}
+	}
+	return values
+}
+
+// platformTags returns f tags for platforms. The tags are never empty.
+func platformTags(platforms []string) nostr.Tags {
+	values := normalizePlatforms(platforms)
+	tags := make(nostr.Tags, len(values))
+	for i, platform := range values {
+		tags[i] = nostr.Tag{"f", platform}
+	}
+	return tags
 }
 
 func canonicalStrings(values []string) []string {
@@ -581,12 +605,14 @@ func (es *EventSet) SetApplicationPubkey(pubkey string) {
 // but before the Release event is signed. This is useful when publishing multiple APK assets
 // in a single release, where each asset may support different architectures.
 func (es *EventSet) UpdateReleasePlatforms() {
-	// Collect unique platforms from all assets
+	// Collect unique platforms from all assets. Blank f values are not ABIs.
 	platformSet := make(map[string]bool)
 	for _, asset := range es.SoftwareAssets {
-		// Extract f tags from asset
+		if asset == nil {
+			continue
+		}
 		for _, tag := range asset.Tags {
-			if len(tag) > 1 && tag[0] == "f" {
+			if len(tag) > 1 && tag[0] == "f" && tag[1] != "" {
 				platformSet[tag[1]] = true
 			}
 		}
@@ -609,12 +635,13 @@ func (es *EventSet) UpdateReleasePlatforms() {
 		}
 	}
 
-	// Insert f tags at the correct position
+	// Release f tags are the sorted union of the assets' f tags.
+	// An empty union still emits defaultPlatform.
 	platforms := make([]string, 0, len(platformSet))
 	for platform := range platformSet {
 		platforms = append(platforms, platform)
 	}
-	sort.Strings(platforms)
+	platforms = normalizePlatforms(platforms)
 	for _, platform := range platforms {
 		fTag := nostr.Tag{"f", platform}
 		newTags = append(newTags[:insertPos], append(nostr.Tags{fTag}, newTags[insertPos:]...)...)

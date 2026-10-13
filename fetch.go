@@ -166,7 +166,6 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 			CertificateHash: parsed.CertFingerprint,
 			LineageHashes:   append([]string(nil), parsed.SigningAncestors...),
 			Architectures:   append([]string(nil), parsed.Architectures...),
-			Permissions:     append([]string(nil), parsed.Permissions...),
 			ownership:       ownership,
 			fetchConfig:     cloneFetchConfig(config),
 			verified: verifiedAPK{

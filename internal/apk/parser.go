@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
@@ -49,11 +50,9 @@ type APKInfo struct {
 	// App metadata
 	Label string // App name
 
-	// Native architectures (e.g., ["arm64-v8a", "armeabi-v7a"])
+	// Native architectures (e.g., ["arm64-v8a", "armeabi-v7a"]).
+	// Empty when no ABI can be detected. Publication still emits an f tag.
 	Architectures []string
-
-	// Android permissions (e.g., ["android.permission.INTERNET", "android.permission.CAMERA"])
-	Permissions []string
 
 	// Required device features declared by the manifest.
 	Features []string
@@ -106,14 +105,12 @@ func Parse(path string) (*APKInfo, error) {
 		MinSDK:      manifest.MinSDK,
 		TargetSDK:   manifest.TargetSDK,
 		Label:       manifest.Label,
-		Permissions: manifest.Permissions,
 		Features:    manifest.Features,
 		FilePath:    path,
 		FileSize:    fi.Size(),
 		SHA256:      sha256Hash,
 	}
 
-	// Extract native architectures from lib/ directory
 	info.Architectures = extractArchitectures(path)
 
 	// Verify v1/v2/v3 signatures, reject malformed signatures and multiple
@@ -143,7 +140,6 @@ type manifestInfo struct {
 	TargetSDK   int32
 	Label       string
 	Icon        string
-	Permissions []string
 	Features    []string
 }
 
@@ -171,10 +167,6 @@ func (c *manifestCollector) EncodeToken(token xml.Token) error {
 	case "application":
 		c.info.Label = attribute(start, "label")
 		c.info.Icon = attribute(start, "icon")
-	case "uses-permission", "uses-permission-sdk-23", "uses-permission-sdk-m":
-		if permission := attribute(start, "name"); permission != "" {
-			c.info.Permissions = append(c.info.Permissions, permission)
-		}
 	case "uses-feature":
 		if feature := attribute(start, "name"); feature != "" {
 			c.info.Features = append(c.info.Features, feature)
@@ -320,7 +312,26 @@ func hashFile(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// extractArchitectures scans the APK's lib/ directory for native libraries.
+// ELF identification and e_machine values used to name an Android ABI when
+// a .so is not stored under lib/<abi>/.
+const (
+	elfClass32  = 1
+	elfClass64  = 2
+	elfData2LSB = 1
+	elfData2MSB = 2
+
+	em386     = 3
+	emMIPS    = 8
+	emARM     = 40
+	emX86_64  = 62
+	emAARCH64 = 183
+	emRISCV   = 243
+)
+
+// extractArchitectures returns the ABIs of native code in an APK.
+// Android installs libraries from lib/<abi>/. A .so stored elsewhere is
+// classified from its ELF header. Nil means no ABI could be detected,
+// including a pure Java/Kotlin APK or an unreadable archive.
 func extractArchitectures(path string) []string {
 	r, err := zip.OpenReader(path)
 	if err != nil {
@@ -329,20 +340,33 @@ func extractArchitectures(path string) []string {
 	defer r.Close()
 
 	archSet := make(map[string]struct{})
+	var elfCandidates []*zip.File
 	for _, f := range r.File {
-		// Security: Validate zip entry path to prevent zip slip attacks.
-		// Malicious APKs could contain paths like "../../../etc/passwd".
-		// We only read metadata here (not extracting files), but validate anyway
-		// to prevent any future misuse of this code pattern.
-		if !isValidZipEntryPath(f.Name) {
+		// Zip names must use slashes. Reject the normalized name so a
+		// backslash traversal cannot be treated as a library path.
+		name := strings.ReplaceAll(f.Name, "\\", "/")
+		if !isValidZipEntryPath(name) {
 			continue
 		}
-		if strings.HasPrefix(f.Name, "lib/") {
-			parts := strings.Split(f.Name, "/")
-			if len(parts) >= 2 && parts[1] != "" {
-				archSet[parts[1]] = struct{}{}
+		if abi, ok := abiFromLibPath(name); ok {
+			archSet[abi] = struct{}{}
+			continue
+		}
+		if hasSharedObjectSuffix(name) {
+			elfCandidates = append(elfCandidates, f)
+		}
+	}
+	// lib/<abi>/ is the install ABI. Consult ELF only when that path
+	// named nothing, so an unrelated .so in assets does not add an ABI.
+	if len(archSet) == 0 {
+		for _, f := range elfCandidates {
+			if abi, ok := abiFromELF(f); ok {
+				archSet[abi] = struct{}{}
 			}
 		}
+	}
+	if len(archSet) == 0 {
+		return nil
 	}
 
 	archs := make([]string, 0, len(archSet))
@@ -351,6 +375,104 @@ func extractArchitectures(path string) []string {
 	}
 	sort.Strings(archs)
 	return archs
+}
+
+// abiFromLibPath reports the Android ABI of a file stored at lib/<abi>/….
+func abiFromLibPath(name string) (string, bool) {
+	rest, ok := strings.CutPrefix(strings.ToLower(name), "lib/")
+	if !ok {
+		return "", false
+	}
+	abi, file, found := strings.Cut(rest, "/")
+	if !found || file == "" {
+		return "", false
+	}
+	return canonicalABI(abi)
+}
+
+func canonicalABI(name string) (string, bool) {
+	switch name {
+	case "arm64-v8a", "arm64_v8a", "arm64", "aarch64":
+		return "arm64-v8a", true
+	case "armeabi-v7a", "armeabi_v7a":
+		return "armeabi-v7a", true
+	case "armeabi":
+		return "armeabi", true
+	case "x86":
+		return "x86", true
+	case "x86_64", "x86-64", "amd64":
+		return "x86_64", true
+	case "mips":
+		return "mips", true
+	case "mips64":
+		return "mips64", true
+	case "riscv64":
+		return "riscv64", true
+	default:
+		return "", false
+	}
+}
+
+func hasSharedObjectSuffix(name string) bool {
+	return len(name) >= 3 && strings.EqualFold(name[len(name)-3:], ".so")
+}
+
+// abiFromELF reads the ELF class and e_machine. It does not read past the
+// header, so a large stored library is not loaded.
+func abiFromELF(f *zip.File) (string, bool) {
+	rc, err := f.Open()
+	if err != nil {
+		return "", false
+	}
+	defer rc.Close()
+
+	var hdr [20]byte
+	if _, err := io.ReadFull(rc, hdr[:]); err != nil {
+		return "", false
+	}
+	if hdr[0] != 0x7f || hdr[1] != 'E' || hdr[2] != 'L' || hdr[3] != 'F' {
+		return "", false
+	}
+	class := hdr[4]
+	var machine uint16
+	switch hdr[5] {
+	case elfData2LSB:
+		machine = binary.LittleEndian.Uint16(hdr[18:20])
+	case elfData2MSB:
+		machine = binary.BigEndian.Uint16(hdr[18:20])
+	default:
+		return "", false
+	}
+	switch machine {
+	case emAARCH64:
+		if class == elfClass64 {
+			return "arm64-v8a", true
+		}
+	case emARM:
+		if class == elfClass32 {
+			return "armeabi-v7a", true
+		}
+	case em386:
+		if class == elfClass32 {
+			return "x86", true
+		}
+	case emX86_64:
+		if class == elfClass64 {
+			return "x86_64", true
+		}
+	case emMIPS:
+		switch class {
+		case elfClass64:
+			return "mips64", true
+		case elfClass32:
+			return "mips", true
+		}
+	case emRISCV:
+		if class == elfClass64 {
+			return "riscv64", true
+		}
+	}
+	return "", false
 }
 
 // isValidZipEntryPath validates a zip entry path to prevent zip slip attacks.

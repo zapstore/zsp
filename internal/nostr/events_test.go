@@ -889,6 +889,7 @@ func TestPlatformsFromAPKInfo(t *testing.T) {
 			[]string{"android-arm64-v8a"},
 		},
 		{"empty slice falls back to arm64", []string{}, []string{"android-arm64-v8a"}},
+		{"blank architectures fall back to arm64", []string{"", "  "}, []string{"android-arm64-v8a"}},
 		{"unknown arch keeps android- prefix", []string{"mips"}, []string{"android-mips"}},
 	}
 
@@ -899,5 +900,39 @@ func TestPlatformsFromAPKInfo(t *testing.T) {
 				t.Errorf("platformsFromAPKInfo(%v) = %v, want %v", tt.archs, got, tt.want)
 			}
 		})
+	}
+	if got := platformsFromAPKInfo(nil); !reflect.DeepEqual(got, []string{defaultPlatform}) {
+		t.Errorf("platformsFromAPKInfo(nil) = %v, want [%s]", got, defaultPlatform)
+	}
+}
+
+func TestEventsAlwaysHavePlatformTag(t *testing.T) {
+	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	want := nostr.Tags{{"f", defaultPlatform}}
+
+	app := BuildAppMetadataEvent(&AppMetadata{PackageID: "com.example.app", Name: "App"}, pubkey)
+	if got := filterExactTag(app.Tags, "f"); !reflect.DeepEqual(got, want) {
+		t.Errorf("app f tags = %v, want %v", got, want)
+	}
+	release := BuildReleaseEvent(&ReleaseMetadata{PackageID: "com.example.app", Version: "1"}, pubkey)
+	if got := filterExactTag(release.Tags, "f"); !reflect.DeepEqual(got, want) {
+		t.Errorf("release f tags = %v, want %v", got, want)
+	}
+	asset := BuildSoftwareAssetEvent(&AssetMetadata{Identifier: "com.example.app", Version: "1", SHA256: "abc"}, pubkey)
+	if got := filterExactTag(asset.Tags, "f"); !reflect.DeepEqual(got, want) {
+		t.Errorf("asset f tags = %v, want %v", got, want)
+	}
+
+	// A release's f tags are the assets' union. Assets that name no ABI
+	// still leave the release with the default, replacing a stale f tag.
+	set := &EventSet{
+		Release: &nostr.Event{Tags: nostr.Tags{{"c", "main"}, {"f", "android-x86"}}},
+		SoftwareAssets: []*nostr.Event{
+			{Tags: nostr.Tags{{"i", "com.example.app"}, {"f", ""}}},
+		},
+	}
+	set.UpdateReleasePlatforms()
+	if got := filterExactTag(set.Release.Tags, "f"); !reflect.DeepEqual(got, want) {
+		t.Errorf("updated release f tags = %v, want %v", got, want)
 	}
 }
