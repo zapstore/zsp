@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"math/big"
@@ -91,8 +90,35 @@ func TestBuildC1ProofCreatesActiveProof(t *testing.T) {
 	if event.Tags.GetFirst([]string{"delegation"}) != nil {
 		t.Fatal("new proof has a delegation")
 	}
-	if tag := event.Tags.GetFirst([]string{"cert"}); tag == nil || (*tag)[1] != base64.StdEncoding.EncodeToString(certificate.Raw) {
-		t.Fatal("proof does not embed the certificate")
+	if event.Tags.GetFirst([]string{"cert"}) != nil {
+		t.Fatal("proof embeds the certificate")
+	}
+}
+
+func TestPendingC1PublishersKeepsOwnDelegate(t *testing.T) {
+	signer, other, delegate := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("d", 64)
+	tags := gonostr.Tags{{"delegation", delegate}}
+	tests := []struct {
+		name     string
+		previous *gonostr.Event
+		want     []string
+	}{
+		{"new proof", nil, []string{signer}},
+		{"own renewal", &gonostr.Event{PubKey: signer, Tags: tags}, []string{signer, delegate}},
+		{"other owner", &gonostr.Event{PubKey: other, Tags: tags}, []string{signer}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pendingC1Publishers(signer, tc.previous)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for _, key := range tc.want {
+				if _, ok := got[key]; !ok {
+					t.Fatalf("got %v, want %v", got, tc.want)
+				}
+			}
+		})
 	}
 }
 

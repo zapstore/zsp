@@ -98,6 +98,9 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 	var existingReleaseTimestamp time.Time
 	c1Status := "not checked"
 	authorizedPublishers := map[string]struct{}{signer.PublicKey(): {}}
+	var pendingProof bool
+	var previousProof *gonostr.Event
+	var proofCertificate *x509.Certificate
 	if !options.SkipProofCheck {
 		reportPublish(options, "publish", "proof", "C1 ownership proof", 0, 0)
 		proofs, proofWarnings, proofErr := publisher.FetchIdentityProofsByCertificate(ctx, parsed.CertFingerprint)
@@ -115,19 +118,15 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 		}
 		active := activeC1Proof(proofs, parsed.CertFingerprint, certificate, time.Now())
 		c1Status = "active"
+		authorizedPublishers = c1Publishers(active)
 		if options.ProofSigner != nil && c1ProofNeedsRenewal(active, signer.PublicKey(), time.Now()) {
 			c1Status = "created"
 			if active != nil {
 				c1Status = "renewed"
 			}
-			reportPublish(options, "publish", "proof", "creating C1 proof", 0, 0)
-			created, createErr := createC1Proof(ctx, options.ProofSigner, signer, certificate, active, publisher)
-			if createErr != nil {
-				return nil, createErr
-			}
-			active = created
+			pendingProof, previousProof, proofCertificate = true, active, certificate
+			authorizedPublishers = pendingC1Publishers(signer.PublicKey(), active)
 		}
-		authorizedPublishers = c1Publishers(active)
 		if len(authorizedPublishers) == 0 {
 			return nil, operationErr(ErrProofRequired, false, "no active proof found for certificate %s", parsed.CertFingerprint)
 		}
@@ -264,6 +263,14 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 		}
 		return nil, wrapOperationError(ErrTemporaryFailure, err, true, "sign events"+causeDetail(err))
 	}
+	var proofEvent *gonostr.Event
+	if pendingProof {
+		reportPublish(options, "publish", "proof", "signing C1 proof", 0, 0)
+		proofEvent, err = buildC1Proof(ctx, options.ProofSigner, signer, proofCertificate, previousProof, time.Now())
+		if err != nil {
+			return nil, err
+		}
+	}
 	if events.AppMetadata != nil {
 		result.Events.Application = events.AppMetadata.ID
 	}
@@ -357,6 +364,16 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 		return result, publishErr
 	}
 	result.Warnings = append(result.Warnings, relayWarnings(relayResults)...)
+	if proofEvent != nil {
+		reportPublish(options, "publish", "relay", "C1 proof", 0, 0)
+		relayResults, accepted, publishErr := publishEvent(ctx, publisher, proofEvent)
+		result.Relays = append(result.Relays, relayResults...)
+		if !accepted {
+			result.Status = "partial"
+			return result, publishErr
+		}
+		result.Warnings = append(result.Warnings, relayWarnings(relayResults)...)
+	}
 	result.ID = events.Release.ID
 	result.Status = "published"
 	published = true
@@ -578,21 +595,16 @@ func c1ProofNeedsRenewal(active *gonostr.Event, pubkey string, now time.Time) bo
 	return err == nil && time.Unix(proof.Expiry, 0).Sub(now) < c1RenewBefore
 }
 
-// createC1Proof builds a proof and publishes it. One relay must accept it.
-func createC1Proof(ctx context.Context, proofSigner ProofSigner, signer internalnostr.Signer, certificate *x509.Certificate, previous *gonostr.Event, publisher *internalnostr.Publisher) (*gonostr.Event, error) {
-	event, err := buildC1Proof(ctx, proofSigner, signer, certificate, previous, time.Now())
-	if err != nil {
-		return nil, err
-	}
-	for _, relayResult := range publisher.Publish(ctx, event) {
-		if relayResult.Success {
-			return event, nil
+// pendingC1Publishers is the authorized set once the signer's new or renewed
+// proof is published. A renewal keeps the delegate of the signer's own proof.
+func pendingC1Publishers(signer string, previous *gonostr.Event) map[string]struct{} {
+	authorized := map[string]struct{}{signer: {}}
+	if previous != nil && previous.PubKey == signer {
+		if delegation := previous.Tags.GetFirst([]string{"delegation"}); delegation != nil && len(*delegation) == 2 {
+			authorized[(*delegation)[1]] = struct{}{}
 		}
 	}
-	if contextErr := contextOperationError(ctx.Err(), "publish C1 proof"); contextErr != nil {
-		return nil, contextErr
-	}
-	return nil, operationErr(ErrPublishRejected, true, "no relay accepted the C1 proof")
+	return authorized
 }
 
 // buildC1Proof asks proofSigner for the certificate signature and signs the
@@ -622,7 +634,6 @@ func buildC1Proof(ctx context.Context, proofSigner ProofSigner, signer internaln
 		Expiry:    expiry,
 	}
 	event := internalnostr.BuildIdentityProofEvent(proof.ToEventTags(), signer.PublicKey(), createdAt)
-	event.Tags = append(event.Tags, gonostr.Tag{"cert", base64.StdEncoding.EncodeToString(certificate.Raw)})
 	if previous != nil && previous.PubKey == signer.PublicKey() {
 		if delegation := previous.Tags.GetFirst([]string{"delegation"}); delegation != nil {
 			event.Tags = append(event.Tags, gonostr.Tag{"delegation", (*delegation)[1]})

@@ -81,22 +81,9 @@ func GenerateIdentityProof(privateKey crypto.PrivateKey, cert *x509.Certificate,
 	createdAt := time.Now().Unix()
 	expiry := createdAt + int64(opts.Expiry.Seconds())
 
-	message := fmt.Sprintf("Verifying at %d until %d that I control the following Nostr public key: %s", createdAt, expiry, pubkeyHex)
-
-	var signature []byte
-	var err error
-	switch key := privateKey.(type) {
-	case *ecdsa.PrivateKey:
-		messageHash := sha256.Sum256([]byte(message))
-		signature, err = ecdsa.SignASN1(rand.Reader, key, messageHash[:])
-	case *rsa.PrivateKey:
-		messageHash := sha256.Sum256([]byte(message))
-		signature, err = rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, messageHash[:])
-	default:
-		return nil, fmt.Errorf("unsupported key type: %T", privateKey)
-	}
+	signature, err := SignProofMessage(privateKey, pubkeyHex, createdAt, expiry)
 	if err != nil {
-		return nil, fmt.Errorf("failed to sign: %w", err)
+		return nil, err
 	}
 
 	proof := &IdentityProof{
@@ -116,6 +103,28 @@ func GenerateIdentityProof(privateKey crypto.PrivateKey, cert *x509.Certificate,
 	}
 
 	return proof, nil
+}
+
+// SignProofMessage signs the NIP-C1 message for pubkeyHex and the window
+// createdAt..expiry with the certificate key: ASN.1 DER ECDSA or PKCS#1 v1.5,
+// both over SHA-256.
+func SignProofMessage(privateKey crypto.PrivateKey, pubkeyHex string, createdAt, expiry int64) ([]byte, error) {
+	message := fmt.Sprintf("Verifying at %d until %d that I control the following Nostr public key: %s", createdAt, expiry, pubkeyHex)
+	messageHash := sha256.Sum256([]byte(message))
+	var signature []byte
+	var err error
+	switch key := privateKey.(type) {
+	case *ecdsa.PrivateKey:
+		signature, err = ecdsa.SignASN1(rand.Reader, key, messageHash[:])
+	case *rsa.PrivateKey:
+		signature, err = rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, messageHash[:])
+	default:
+		return nil, fmt.Errorf("unsupported key type: %T", privateKey)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign: %w", err)
+	}
+	return signature, nil
 }
 
 // ValidateKeyCertPair checks that privateKey is the private half of cert's public key.
