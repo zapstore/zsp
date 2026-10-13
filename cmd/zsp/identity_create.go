@@ -94,23 +94,6 @@ type publishedC1Proof struct {
 	Event *gonostr.Event
 }
 
-// publishC1Proof creates, signs, and sends a C1 event for the wizard proof flow.
-func publishC1Proof(ctx context.Context, privateKey crypto.PrivateKey, certificate *x509.Certificate, signer nostrpkg.Signer, expiry time.Duration, delegateValue string) (*publishedC1Proof, error) {
-	published, err := createSignedC1Proof(ctx, privateKey, certificate, signer, expiry, delegateValue)
-	if err != nil {
-		return nil, err
-	}
-	results := nostrpkg.NewPublisher(relaysFromEnv()).Publish(ctx, published.Event)
-	if !anyRelayAccepted(results) {
-		return nil, &c1RelayPublishError{
-			CertificateHash: published.Proof.CertHash,
-			EventID:         published.Event.ID,
-			Results:         results,
-		}
-	}
-	return published, nil
-}
-
 // createSignedC1Proof builds the proof event and signs it in place.
 func createSignedC1Proof(ctx context.Context, privateKey crypto.PrivateKey, certificate *x509.Certificate, signer nostrpkg.Signer, expiry time.Duration, delegateValue string) (*publishedC1Proof, error) {
 	proof, err := identity.GenerateIdentityProof(privateKey, certificate, signer.PublicKey(), &identity.IdentityProofOptions{Expiry: expiry})

@@ -1,13 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/x509"
-	"encoding/json"
+	"encoding/base64"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -21,11 +21,22 @@ import (
 	"github.com/zapstore/zsp/internal/config"
 	"github.com/zapstore/zsp/internal/identity"
 	nostrpkg "github.com/zapstore/zsp/internal/nostr"
+	"github.com/zapstore/zsp/internal/source"
 	"github.com/zapstore/zsp/internal/ui"
-	"gopkg.in/yaml.v3"
 )
 
-const c1RenewalWindow = 90 * 24 * time.Hour
+const c1RenewalWindow = 30 * 24 * time.Hour
+
+// errNsecSetup ends the wizard so the developer can put an nsec in .env; the
+// wizard never takes a pasted nsec.
+var errNsecSetup = errors.New("nsec setup required")
+
+// wizardRun is the configuration the wizard resolved for one run. configLabel
+// names the zapstore.yaml in use, empty when the run has none.
+type wizardRun struct {
+	config      zsp.Config
+	configLabel string
+}
 
 // runWizard is the interactive entry point for `zsp`.
 func runWizard(ctx context.Context) int {
@@ -33,7 +44,7 @@ func runWizard(ctx context.Context) int {
 		ui.WritePanel(os.Stderr, "error", "Interactive terminal required", nil, []string{"Run zsp publish from a directory that has zapstore.yaml"})
 		return 1
 	}
-	fmt.Println(ui.InfoStyle.Italic(true).Render("This wizard will help you configure zapstore.yaml for publishing your app to catalog relays and prove ownership."))
+	fmt.Println(ui.InfoStyle.Italic(true).Render("Publish your Android app on Zapstore and prove it's yours."))
 	relayURLs := relaysFromEnv()
 	publisher := nostrpkg.NewPublisher(relayURLs)
 	unreachableRelays, err := publisher.EnsureReachable(ctx)
@@ -42,68 +53,39 @@ func runWizard(ctx context.Context) int {
 		return 1
 	}
 	if len(unreachableRelays) > 0 {
-		ui.WritePanel(os.Stderr, "warning", "Some configured relays couldn't be reached", wizardRelayTargets(unreachableRelays), []string{"Continuing with reachable relays"})
+		ui.WritePanel(os.Stderr, "warning", "Some configured relays couldn't be reached", wizardRelayTargets(unreachableRelays), wizardContinuingNotes(relayURLs, unreachableRelays))
 	}
-	root, err := wizardProjectRoot()
+	local, localPath, err := loadWizardConfig("zapstore.yaml")
 	if err != nil {
 		return wizardError("Configuration setup stopped", err)
 	}
-	path := filepath.Join(root, "zapstore.yaml")
-	existing, err := loadWizardConfig(path)
-	if err != nil {
-		return wizardError("Configuration setup stopped", err)
-	}
-	steps := ui.NewStepTracker(4)
-	steps.StartStep("📱 Add your app")
-	source, err := ui.PromptFieldDefault("Where is the source code published?", "For example: github.com/zapstore/zapstore. If app is closed-source, leave it blank.", existing.Fetch.Repository, false, false)
+
+	steps := ui.NewStepTracker(3)
+	steps.StartStep("📦 Add your app")
+	defaultSource := wizardSourceDefault(local)
+	answer, err := ui.PromptPathDefault("Where is your APK?", "Paste a releases page (GitHub, GitLab, Codeberg, F-Droid…) or the path to an APK file.", defaultSource, true)
 	if err != nil {
 		return wizardError("App discovery stopped", err)
 	}
-	publish, err := wizardConfigFromSourceCode(source)
+	run, err := wizardResolveRun(ctx, strings.TrimSpace(answer), defaultSource, local, localPath)
 	if err != nil {
 		return wizardError("App discovery stopped", err)
 	}
-	if source == "" {
-		publish.config = existing
-	} else {
-		publish.config.Fetch.ReleaseSource = existing.Fetch.ReleaseSource
-		publish.config.Fetch.ReleaseFilter = existing.Fetch.ReleaseFilter
-		publish.config.Fetch.Match = existing.Fetch.Match
-		publish.config.Fetch.PrereleaseChannel = existing.Fetch.PrereleaseChannel
-	}
 
-	var candidates []*zsp.APK
-	if isRepositorySuggestion(publish.config.Fetch.Repository) {
-		spinner := ui.NewSpinner("Finding and inspecting APK releases...")
-		spinner.Start()
-		candidates, err = zsp.Fetch(ctx, publish.config.Fetch, zsp.FetchOptions{SkipHTTPCache: true})
-		spinner.Stop()
-		if err != nil {
-			if err == ui.ErrInterrupted || errors.Is(err, context.Canceled) || errors.Is(err, huh.ErrUserAborted) {
-				return wizardError("No verified APK release found", err)
-			}
-			ui.PrintInfo("No verified APK release was found at " + source)
-		}
-	}
-
-	if candidates == nil {
-		releaseSource, err := ui.PromptPathDefault("Where are releases of this app published?", "For example: github.com/zapstore/zapstore. For a local build, choose the directory containing APKs.", wizardReleaseSourceDefault(publish.config), true)
-		if err != nil {
-			return wizardError("App discovery stopped", err)
-		}
-		publish, err = wizardConfigFromReleaseSource(source, releaseSource)
-		if err != nil {
-			return wizardError("App discovery stopped", err)
-		}
-		spinner := ui.NewSpinner("Finding and inspecting APK releases...")
-		spinner.Start()
-		candidates, err = zsp.Fetch(ctx, publish.config.Fetch, zsp.FetchOptions{SkipHTTPCache: true})
-		spinner.Stop()
-		if err != nil {
+	spinner := ui.NewSpinner("Finding and inspecting APK releases...")
+	spinner.Start()
+	candidates, err := zsp.Fetch(ctx, run.config.Fetch, zsp.FetchOptions{SkipHTTPCache: true})
+	spinner.Stop()
+	if err != nil {
+		if isWizardCancel(err) {
 			return wizardError("No verified APK release found", err)
 		}
+		ui.PrintInfo("No verified APK release was found at " + wizardReleaseLocation(run.config))
+		if reason := wizardFailureReason(err); reason != "" {
+			ui.PrintInfo("Reason: " + reason)
+		}
+		return 1
 	}
-
 	defer closeCandidates(candidates)
 	selected, err := selectAPKForAppSetup(candidates)
 	if err != nil {
@@ -113,85 +95,229 @@ func runWizard(ctx context.Context) int {
 	if appName == "" {
 		appName = selected.AppID
 	}
-	version := selected.VersionName
-	if version == "" {
-		version = fmt.Sprintf("version code %d", selected.VersionCode)
-	} else {
-		version = "v" + version
-	}
-	ui.PrintSuccess(fmt.Sprintf("Found %s (%s) at %s", appName, version, wizardReleaseLocation(publish.config)))
-	alreadyPublished := false
-	spinner := ui.NewSpinner("Checking whether this app ID is already listed...")
+	version := wizardVersionLabel(selected)
+	location := wizardReleaseLocation(run.config)
+	ui.PrintSuccess(fmt.Sprintf("Found %s (%s) at %s", appName, version, location))
+
+	spinner = ui.NewSpinner("Checking whether " + appName + " is on Zapstore...")
 	spinner.Start()
-	locations, _, lookupErr := publisher.FindAppEvents(ctx, selected.AppID)
+	locations, _, err := publisher.FindAppEvents(ctx, selected.AppID)
 	spinner.Stop()
-	if lookupErr == nil {
-		alreadyPublished = len(locations.ApplicationRelays) > 0
-		wizardRelayStatus(appName, locations, publisher.RelayClassifications(ctx))
-	} else {
-		return wizardError("Relay reachability check stopped", lookupErr)
+	if err != nil {
+		return wizardError("Relay reachability check stopped", err)
 	}
+	listed := len(locations.ApplicationRelays) > 0
+	wizardRelayStatus(appName, locations)
 
-	suggestedTo := wizardDiscover(ctx, publish.config, selected, alreadyPublished)
-
-	steps.StartStep("🔑 Claim your app")
-	spinner = ui.NewSpinner("Checking app ownership proof...")
+	steps.StartStep("🔐 Prove it's yours")
+	spinner = ui.NewSpinner("Checking who has claimed " + appName + "...")
 	spinner.Start()
 	proofs, _, err := publisher.FetchIdentityProofsByCertificate(ctx, selected.CertificateHash)
 	spinner.Stop()
 	if err != nil {
 		return wizardError("Identity setup stopped", fmt.Errorf("look up C1 proof: %w", err))
 	}
-	state := wizardExistingIdentity(proofs, selected.CertificateHash)
-	if state == nil {
-		owns, err := ui.Confirm(fmt.Sprintf("Are you the author of %s?", appName), false)
-		if err != nil {
-			return wizardError("Ownership confirmation stopped", err)
-		}
-		if !owns {
-			if lookupErr == nil && !alreadyPublished && suggestedTo != "" {
-				ui.PrintInfo(appName + " was suggested for listing on " + suggestedTo + ". Ask its author to claim it.")
-			} else {
-				ui.PrintInfo("Nothing to do")
-			}
-			return 0
-		}
-		state, err = wizardIdentity(ctx, selected.CertificateHash, appName, proofs)
+	state := wizardExistingIdentity(proofs, selected.CertificateHash, appName)
+	if state != nil {
+		ui.WritePanel(os.Stdout, "success", state.summary, state.details, nil)
+	} else {
+		state, err = wizardClaim(ctx, selected.CertificateHash, appName, proofs, listed)
 		if err != nil {
 			return wizardError("Identity setup stopped", err)
 		}
+		if listed {
+			ui.WritePanel(os.Stdout, "success", "You're the verified developer of "+appName, nil, []string{
+				"That's all Zapstore needs. New releases from " + location + " keep appearing, now linked to your Nostr profile.",
+			})
+		} else {
+			ui.PrintInfo("Your proof goes out with the first release")
+		}
 	}
 	defer state.close()
-	if state.certificateHash != selected.CertificateHash {
-		return wizardError("Identity setup stopped", errCertificateHashMismatch(selected.CertificateHash, state.certificateHash))
-	}
-	ui.WritePanel(os.Stdout, "success", state.summary, state.details, nil)
 
-	steps.StartStep("🏷️  Configure app metadata")
-	return wizardControlMetadata(ctx, publish, selected, state, root, path, steps)
+	steps.StartStep("🚀 Publish")
+	if listed {
+		ui.PrintInfo("Nothing to publish: Zapstore keeps " + appName + " up to date from " + location + ".")
+	} else if code := wizardFirstRelease(ctx, run, selected, state, appName, version); code != 0 || !state.published {
+		return code
+	}
+	return wizardNextReleases(ctx, state, appName, run.configLabel != "")
 }
 
-func loadWizardConfig(path string) (zsp.Config, error) {
+func isWizardCancel(err error) bool {
+	return err == ui.ErrInterrupted || errors.Is(err, context.Canceled) || errors.Is(err, huh.ErrUserAborted)
+}
+
+// wizardContinuingNotes names the relays the wizard keeps using.
+func wizardContinuingNotes(relays, unreachable []string) []string {
+	skip := make(map[string]struct{}, len(unreachable))
+	for _, relay := range unreachable {
+		skip[relay] = struct{}{}
+	}
+	var reachable []string
+	for _, relay := range relays {
+		if _, ok := skip[relay]; !ok {
+			reachable = append(reachable, relay)
+		}
+	}
+	names := make([]string, 0, len(reachable))
+	for _, target := range wizardRelayTargets(reachable) {
+		names = append(names, target.Value)
+	}
+	return []string{"Continuing with " + strings.Join(names, ", ")}
+}
+
+// loadWizardConfig loads zapstore.yaml from the working directory. It returns
+// the absolute path when the file exists, and an empty one when it does not.
+func loadWizardConfig(path string) (zsp.Config, string, error) {
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		return zsp.Config{}, nil
+		return zsp.Config{}, "", nil
 	} else if err != nil {
-		return zsp.Config{}, err
+		return zsp.Config{}, "", err
 	}
-	config, err := zsp.LoadConfig(path)
+	loaded, err := zsp.LoadConfig(path)
 	if err != nil {
-		return zsp.Config{}, err
+		return zsp.Config{}, "", err
 	}
-	return config, nil
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		return zsp.Config{}, "", err
+	}
+	return loaded, absolutePath, nil
 }
 
-func wizardReleaseSourceDefault(config zsp.Config) string {
-	if config.Fetch.ReleaseSource == nil {
-		return ""
+func wizardSourceDefault(cfg zsp.Config) string {
+	if source := cfg.Fetch.ReleaseSource; source != nil {
+		if source.LocalPath != "" {
+			return source.LocalPath
+		}
+		if source.URL != "" {
+			return source.URL
+		}
 	}
-	if config.Fetch.ReleaseSource.LocalPath != "" {
-		return config.Fetch.ReleaseSource.LocalPath
+	return cfg.Fetch.Repository
+}
+
+// wizardResolveRun builds the run configuration from the answer. A local
+// zapstore.yaml wins; changing its source keeps its filters. Without one, a
+// forge repository's committed zapstore.yaml is used when it is valid.
+func wizardResolveRun(ctx context.Context, answer, defaultSource string, local zsp.Config, localPath string) (wizardRun, error) {
+	if localPath != "" {
+		run := wizardRun{config: local, configLabel: localPath}
+		if answer != defaultSource {
+			fetch, err := wizardConfigFromSource(answer)
+			if err != nil {
+				return wizardRun{}, err
+			}
+			fetch.ReleaseFilter = local.Fetch.ReleaseFilter
+			fetch.Match = local.Fetch.Match
+			fetch.PrereleaseChannel = local.Fetch.PrereleaseChannel
+			run.config.Fetch = fetch
+		}
+		ui.PrintInfo("Using the local zapstore.yaml (" + localPath + ")")
+		return run, nil
 	}
-	return config.Fetch.ReleaseSource.URL
+	fetch, err := wizardConfigFromSource(answer)
+	if err != nil {
+		return wizardRun{}, err
+	}
+	run := wizardRun{config: zsp.Config{Fetch: fetch}}
+	if fetch.Repository == "" || fetch.ReleaseSource != nil {
+		return run, nil
+	}
+	spinner := ui.NewSpinner("Looking for zapstore.yaml in " + fetch.Repository + "...")
+	spinner.Start()
+	remote, ok := wizardRepoConfig(ctx, fetch.Repository)
+	spinner.Stop()
+	if !ok {
+		ui.PrintInfo("No zapstore.yaml committed in " + fetch.Repository + " yet")
+		return run, nil
+	}
+	ui.PrintInfo("Using the committed zapstore.yaml in " + fetch.Repository + " (default branch)")
+	return wizardRun{config: remote, configLabel: fetch.Repository}, nil
+}
+
+// wizardRepoConfig fetches the repository-root zapstore.yaml on the default
+// branch. Relative media and release-note paths resolve from that root. A
+// missing or invalid file, including one with a local release source, is
+// reported as absent.
+func wizardRepoConfig(ctx context.Context, repository string) (zsp.Config, bool) {
+	data, err := source.FetchRepoConfig(ctx, repository)
+	if err != nil {
+		return zsp.Config{}, false
+	}
+	return parseWizardRepoConfig(data, repository)
+}
+
+func parseWizardRepoConfig(data []byte, repository string) (zsp.Config, bool) {
+	cfg, err := zsp.ParseConfig(bytes.NewReader(data))
+	if err != nil {
+		return zsp.Config{}, false
+	}
+	if releaseSource := cfg.Fetch.ReleaseSource; releaseSource != nil && (releaseSource.LocalPath != "" || releaseSource.Type == "local") {
+		return zsp.Config{}, false
+	}
+	resolve := func(value string) (string, bool) {
+		if value == "" || strings.Contains(value, "://") {
+			return value, true
+		}
+		return source.RepoFileURL(repository, value)
+	}
+	var ok bool
+	if cfg.Publish.Icon, ok = resolve(cfg.Publish.Icon); !ok {
+		return zsp.Config{}, false
+	}
+	if cfg.Publish.ReleaseNotes, ok = resolve(cfg.Publish.ReleaseNotes); !ok {
+		return zsp.Config{}, false
+	}
+	for index, image := range cfg.Publish.Images {
+		if cfg.Publish.Images[index], ok = resolve(image); !ok {
+			return zsp.Config{}, false
+		}
+	}
+	if cfg.Fetch.Repository == "" {
+		cfg.Fetch.Repository = repository
+	}
+	return cfg, true
+}
+
+// wizardConfigFromSource turns the answer into a source: a local APK file or
+// directory, a forge repository, or any other release source URL.
+func wizardConfigFromSource(answer string) (zsp.FetchConfig, error) {
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		return zsp.FetchConfig{}, fmt.Errorf("an APK source is required")
+	}
+	if !strings.Contains(answer, "://") {
+		if info, err := os.Stat(answer); err == nil {
+			absolutePath, err := filepath.Abs(answer)
+			if err != nil {
+				return zsp.FetchConfig{}, err
+			}
+			if !info.IsDir() && !strings.EqualFold(filepath.Ext(absolutePath), ".apk") {
+				return zsp.FetchConfig{}, fmt.Errorf("%s is not an APK file", answer)
+			}
+			return zsp.FetchConfig{ReleaseSource: &zsp.ReleaseSource{LocalPath: absolutePath}}, nil
+		}
+		if strings.HasPrefix(answer, ".") || strings.HasPrefix(answer, "/") || strings.HasPrefix(answer, "~") {
+			return zsp.FetchConfig{}, fmt.Errorf("no file at %s", answer)
+		}
+	}
+	value, err := validateSuggestionSource(answer)
+	if err != nil {
+		return zsp.FetchConfig{}, err
+	}
+	if repository, ok := config.CanonicalForgeRepositoryURL(value, ""); ok {
+		return zsp.FetchConfig{Repository: repository}, nil
+	}
+	return zsp.FetchConfig{ReleaseSource: &zsp.ReleaseSource{URL: value}}, nil
+}
+
+func wizardVersionLabel(apk *zsp.APK) string {
+	if apk.VersionName == "" {
+		return fmt.Sprintf("version code %d", apk.VersionCode)
+	}
+	return "v" + apk.VersionName
 }
 
 func wizardRelayTargets(relays []string) []ui.KeyValue {
@@ -211,12 +337,15 @@ func wizardRelayTargets(relays []string) []ui.KeyValue {
 }
 
 func wizardError(title string, err error) int {
-	if err == ui.ErrInterrupted || errors.Is(err, context.Canceled) {
-		ui.PrintInfo(wizardCancellationSummary(title))
-		return 130
+	if errors.Is(err, errNsecSetup) {
+		ui.WritePanel(os.Stdout, "info", "Use your nsec from .env", nil, wizardNsecNotes())
+		return 0
 	}
-	if errors.Is(err, huh.ErrUserAborted) {
-		ui.PrintInfo("No changes were made")
+	if err == ui.ErrInterrupted || errors.Is(err, context.Canceled) || errors.Is(err, huh.ErrUserAborted) {
+		ui.PrintInfo(wizardCancellationSummary(title))
+		if err == ui.ErrInterrupted || errors.Is(err, context.Canceled) {
+			return 130
+		}
 		return 0
 	}
 	kind, summary, details := wizardFailurePresentation(title, err)
@@ -229,6 +358,16 @@ func wizardError(title string, err error) int {
 		ui.PrintInfo("Reason: " + reason)
 	}
 	return 1
+}
+
+func wizardNsecNotes() []string {
+	return []string{
+		"1. Add SIGN_WITH=nsec1… to .env in this directory.",
+		"2. Run: chmod 600 .env",
+		"3. Keep .env out of Git: add it to .gitignore.",
+		"4. Run zsp again.",
+		"A bunker is safer: your key never touches this machine.",
+	}
 }
 
 // wizardFailureReason renders the sanitized cause of a failed wizard step so a
@@ -244,7 +383,7 @@ func wizardFailureReason(err error) string {
 
 func wizardFailurePresentation(title string, err error) (kind, summary string, details []ui.KeyValue) {
 	if details = wizardFailureDetails(err); len(details) > 0 {
-		return "error", "Selected certificate does not match this APK", details
+		return "error", "This keystore does not match the APK. No proof was changed", details
 	}
 	return "info", wizardFailureSummary(title), nil
 }
@@ -277,10 +416,12 @@ func wizardCancellationSummary(title string) string {
 	switch title {
 	case "App discovery stopped", "No verified APK release found", "APK selection stopped":
 		return "App discovery was cancelled. No changes were made"
-	case "Configuration update stopped":
-		return "Configuration update was cancelled. The previous zapstore.yaml was left unchanged"
-	case "Publishing choice stopped", "Signing setup stopped", "Publication stopped", "CI/CD setup stopped":
-		return "Publishing setup was cancelled. Your saved configuration was left unchanged"
+	case "Identity setup stopped":
+		return "No proof was changed"
+	case "Publishing choice stopped", "Signing setup stopped", "Publication stopped":
+		return "Publishing was cancelled. Nothing was published"
+	case "CI/CD setup stopped":
+		return "CI/CD setup was cancelled. No proof was changed"
 	default:
 		return "This step was cancelled. No changes were made"
 	}
@@ -296,119 +437,44 @@ func wizardFailureSummary(title string) string {
 		return "No APK was selected. No changes were made"
 	case "Relay reachability check stopped":
 		return "Couldn't reach any configured relay. No changes were made"
-	case "Ownership confirmation stopped", "Identity setup stopped":
-		return "Ownership was not changed"
+	case "Identity setup stopped":
+		return "No proof was changed"
 	case "Configuration setup stopped":
-		return "Couldn't use zapstore.yaml. Fix its configuration and try again; it was left unchanged"
-	case "Configuration update stopped":
-		return "Couldn't save zapstore.yaml. The previous file was left unchanged"
-	case "Publishing choice stopped":
-		return "No publishing method was selected. Your configuration was saved"
-	case "Signing setup stopped":
-		return "Signing was not set up. Your configuration was saved"
+		return "Couldn't use zapstore.yaml. Fix it and try again"
+	case "Publishing choice stopped", "Signing setup stopped":
+		return "Nothing was published"
 	case "Publication stopped":
-		return "This release was not published. Your configuration was saved"
+		return "This release was not published"
 	case "CI/CD setup stopped":
-		return "CI/CD publishing was not enabled. Your configuration was saved"
+		return "CI/CD publishing was not enabled. No proof was changed"
 	default:
 		return "That step could not be completed. You can try again"
 	}
 }
 
-func wizardRelayStatus(appName string, locations nostrpkg.AppEventLocations, classifications []nostrpkg.RelayClassification) {
+func wizardRelayStatus(appName string, locations nostrpkg.AppEventLocations) {
 	if len(locations.ApplicationRelays) > 0 {
-		ui.PrintInfo(fmt.Sprintf("%s found on %s", appName, strings.Join(locations.ApplicationRelays, ", ")))
+		ui.PrintInfo(fmt.Sprintf("%s is already on %s.", appName, strings.Join(locations.ApplicationRelays, ", ")))
+		return
 	}
-	if len(locations.ApplicationRelays) == 0 {
-		ui.PrintInfo(appName + " is not yet listed on " + strings.Join(locations.CheckedRelays, ", "))
-	}
-	for _, classification := range classifications {
-		if classification.IsDefaultIndexer {
-			ui.PrintInfo(classification.RelayURL + " is the default Zapstore indexer.")
-		}
-	}
-}
-
-func wizardDiscover(ctx context.Context, cfg zsp.Config, candidate *zsp.APK, appIDExists bool) string {
-	source := wizardSuggestionSource(cfg)
-	if source == "" || candidate == nil || appIDExists {
-		return ""
-	}
-	relayHTTPURL := config.GetRelayHTTPURL()
-	if err := submitPublicSuggestion(ctx, source, candidate.CertificateHash, relayHTTPURL); err != nil {
-		return ""
-	}
-	return relayHTTPURL
-}
-
-func submitPublicSuggestion(ctx context.Context, source, certificateHash, indexerURL string) error {
-	parsed, err := url.Parse(indexerURL)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopback(parsed.Hostname()))) {
-		return fmt.Errorf("indexer must use HTTPS outside loopback")
-	}
-	body := struct {
-		Repository      string `json:"repository,omitempty"`
-		ReleaseSource   string `json:"release_source,omitempty"`
-		CertificateHash string `json:"certificate_hash"`
-	}{CertificateHash: certificateHash}
-	if isRepositorySuggestion(source) {
-		body.Repository = source
-	} else {
-		body.ReleaseSource = source
-	}
-	encoded, err := json.Marshal(body)
-	if err != nil {
-		return err
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(indexerURL, "/")+"/suggest", strings.NewReader(string(encoded)))
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := (&http.Client{Timeout: 15 * time.Second}).Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusCreated {
-		return fmt.Errorf("indexer suggestion was not accepted")
-	}
-	return nil
-}
-
-func wizardControlMetadata(ctx context.Context, publish wizardPublishConfig, selected *zsp.APK, state *wizardIdentityState, root, path string, steps *ui.StepTracker) int {
-	config, document, err := loadWizardYAML(path, selected)
-	if err != nil {
-		return wizardError("Configuration setup stopped", err)
-	}
-	if err := promptWizardMetadata(&config, publish.config, root); err != nil {
-		return wizardError("Configuration setup stopped", err)
-	}
-	if err := saveWizardYAML(path, document, config, publish.config, root); err != nil {
-		return wizardError("Configuration update stopped", err)
-	}
-	// Reload the saved canonical configuration. This retains unedited fields
-	// and resolves new relative media paths exactly as later CLI publication
-	// will, so preview and signed events match zapstore.yaml.
-	canonical, err := zsp.LoadConfig(path)
-	if err != nil {
-		return wizardError("Configuration update stopped", err)
-	}
-	publish.config = canonical
-	ui.PrintInfo("Updated zapstore.yaml")
-	fmt.Println()
-	steps.StartStep("🚀 Publish")
-	return wizardPublishingChoice(ctx, publish, selected, state)
+	ui.PrintInfo(fmt.Sprintf("%s isn't on %s yet.", appName, strings.Join(locations.CheckedRelays, ", ")))
 }
 
 type wizardIdentityState struct {
 	certificateHash string
 	owner           string
 	delegate        string
-	authorized      map[string]struct{}
 	signer          nostrpkg.Signer
-	summary         string
-	details         []ui.KeyValue
+	// hotbox, or privateKey and certificate, hold the certificate key for the
+	// run once it is available, so a later step never asks for it again.
+	hotbox      zsp.ProofSigner
+	privateKey  crypto.PrivateKey
+	certificate *x509.Certificate
+	// proofPending means the proof goes with the first release.
+	proofPending bool
+	published    bool
+	summary      string
+	details      []ui.KeyValue
 }
 
 func (s *wizardIdentityState) close() {
@@ -417,102 +483,148 @@ func (s *wizardIdentityState) close() {
 	}
 }
 
-func wizardIdentity(ctx context.Context, expectedCertificateHash, appName string, proofs []*gonostr.Event) (*wizardIdentityState, error) {
+func (s *wizardIdentityState) hasCertificateKey() bool {
+	return s.hotbox != nil || s.privateKey != nil
+}
 
-	keystore, err := ui.PromptPath("Keystore or certificate", "Select the file used to sign "+appName+".", false)
+// certificateSigner signs the proof message with hotbox or the keystore,
+// for the signer's npub.
+func (s *wizardIdentityState) certificateSigner() zsp.ProofSigner {
+	if s.hotbox != nil {
+		return s.hotbox
+	}
+	return keystoreProofSigner{privateKey: s.privateKey, certificate: s.certificate, publicKey: s.signer.PublicKey()}
+}
+
+// wizardCertificateKey uses hotbox when it is configured, else asks for the
+// keystore. With back, Esc on the keystore prompt returns ui.ErrBack.
+func wizardCertificateKey(state *wizardIdentityState, description string, back bool) error {
+	if hotbox := hotboxProofSigner(); hotbox != nil {
+		state.hotbox = hotbox
+		ui.PrintInfo("Hotbox signs the proof; no keystore needed.")
+		return nil
+	}
+	privateKey, certificate, err := wizardKeystore(state.certificateHash, description, back)
 	if err != nil {
+		return err
+	}
+	state.privateKey, state.certificate = privateKey, certificate
+	return nil
+}
+
+// wizardClaim gets the certificate key and a signer, then creates or renews
+// the proof. A listed app gets the proof now; for an app not yet listed it
+// goes with the first release.
+func wizardClaim(ctx context.Context, certificateHash, appName string, proofs []*gonostr.Event, listed bool) (*wizardIdentityState, error) {
+	state := &wizardIdentityState{certificateHash: certificateHash}
+	description := "Zapstore checks that the key that signed " + appName + " belongs to you.\nNot the developer? Press Ctrl-C to quit. Nothing was changed."
+	if err := wizardCertificateKey(state, description, false); err != nil {
 		return nil, err
-	}
-	var privateKey crypto.PrivateKey
-	certificate, err := loadCertificateMaterial(keystore)
-	if err != nil {
-		// Encrypted keystores need their private-key password to expose their
-		// certificate. PEM certificates take the no-secret lookup path above.
-		privateKey, certificate, err = loadIdentityMaterial(proofOptions{Keystore: keystore, Expiry: "2y"})
-		if err != nil {
-			return nil, err
-		}
-	}
-	certificateHash := identity.ComputeCertHash(certificate)
-	if certificateHash != expectedCertificateHash {
-		return nil, errCertificateHashMismatch(expectedCertificateHash, certificateHash)
-	}
-	if owner, expiry := chooseCurrentProof(proofs, certificate, ""); owner != "" && time.Until(expiry) >= c1RenewalWindow {
-		ok, err := confirmCurrentProof(certificateHash, owner, expiry)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			return nil, fmt.Errorf("choose the certificate you want linked to this Nostr profile, then restart the wizard")
-		}
-		authorized := map[string]struct{}{owner: {}}
-		delegate := currentProofDelegate(proofs, certificate, owner)
-		if delegate != "" {
-			authorized[delegate] = struct{}{}
-		}
-		return &wizardIdentityState{
-			certificateHash: certificateHash,
-			owner:           owner,
-			delegate:        delegate,
-			authorized:      authorized,
-			summary:         "Ownership proof confirmed",
-		}, nil
 	}
 	signer, err := wizardSigner(ctx)
 	if err != nil {
 		return nil, err
 	}
-	delegate := currentProofDelegate(proofs, certificate, chooseProofOwner(proofs, certificate))
-	signingCertificate := certificate
-	if privateKey == nil {
-		privateKey, signingCertificate, err = loadIdentityMaterial(proofOptions{Keystore: keystore, Expiry: "2y"})
-		if err != nil {
-			signer.Close()
-			return nil, err
-		}
+	state.signer, state.owner = signer, signer.PublicKey()
+	if !listed {
+		state.proofPending = true
+		return state, nil
 	}
-	if err := identity.ValidateKeyCertPair(privateKey, signingCertificate); err != nil {
-		signer.Close()
-		return nil, err
-	}
-	if signingHash := identity.ComputeCertHash(signingCertificate); signingHash != certificateHash {
-		signer.Close()
-		return nil, errCertificateHashMismatch(certificateHash, signingHash)
-	}
-	published, err := publishC1Proof(ctx, privateKey, signingCertificate, signer, identity.DefaultExpiry, delegate)
+	event, _ := activeProofForCertificateHash(proofs, certificateHash)
+	delegate := proofDelegate(event)
+	spinner := ui.NewSpinner("Publishing your proof...")
+	spinner.Start()
+	err = publishWizardProof(ctx, state, delegate)
+	spinner.Stop()
 	if err != nil {
 		signer.Close()
 		return nil, err
 	}
-	return &wizardIdentityState{
-		certificateHash: published.Proof.CertHash,
-		owner:           signer.PublicKey(),
-		delegate:        delegate,
-		authorized:      authorizedPublisherSet(signer.PublicKey(), delegate),
-		signer:          signer,
-		summary:         "Certificate ownership proof published",
-	}, nil
+	state.delegate = delegate
+	return state, nil
 }
 
-func wizardExistingIdentity(proofs []*gonostr.Event, certificateHash string) *wizardIdentityState {
+// publishWizardProof signs a proof with the certificate key and publishes it
+// alone. It is used only for a listed app.
+func publishWizardProof(ctx context.Context, state *wizardIdentityState, delegate string) error {
+	now := time.Now()
+	createdAt, expiry := now.Unix(), now.Add(identity.DefaultExpiry).Unix()
+	signed, err := state.certificateSigner().SignProof(ctx, createdAt, expiry)
+	if err != nil {
+		return fmt.Errorf("sign proof: %w", err)
+	}
+	if signed.CertificateHash != state.certificateHash {
+		return errCertificateHashMismatch(state.certificateHash, signed.CertificateHash)
+	}
+	if signed.PublicKey != state.signer.PublicKey() {
+		return fmt.Errorf("the certificate key signed for a different Nostr key than SIGN_WITH")
+	}
+	proof := &identity.IdentityProof{
+		CertHash:  signed.CertificateHash,
+		Signature: base64.StdEncoding.EncodeToString(signed.Signature),
+		CreatedAt: createdAt,
+		Expiry:    expiry,
+	}
+	event := nostrpkg.BuildIdentityProofEvent(proof.ToEventTags(), state.signer.PublicKey(), createdAt)
+	if delegate != "" {
+		event.Tags = append(event.Tags, gonostr.Tag{"delegation", delegate})
+	}
+	if err := state.signer.Sign(ctx, event); err != nil {
+		return fmt.Errorf("sign proof event: %w", err)
+	}
+	if state.certificate != nil {
+		if _, err := identity.ValidateActiveProofEvent(event, state.certificate, now); err != nil {
+			return fmt.Errorf("proof is invalid: %w", err)
+		}
+	}
+	results := nostrpkg.NewPublisher(relaysFromEnv()).Publish(ctx, event)
+	if !anyRelayAccepted(results) {
+		return &c1RelayPublishError{CertificateHash: proof.CertHash, EventID: event.ID, Results: results}
+	}
+	return nil
+}
+
+// wizardKeystore asks for the signing keystore and returns its key and
+// certificate once the pair is valid and matches the APK certificate.
+func wizardKeystore(expectedCertificateHash, description string, back bool) (crypto.PrivateKey, *x509.Certificate, error) {
+	prompt := ui.PromptPath
+	if back {
+		prompt = ui.PromptPathBack
+	}
+	keystore, err := prompt("Signing keystore", description, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	if certificate, err := loadCertificateMaterial(keystore); err == nil {
+		if hash := identity.ComputeCertHash(certificate); hash != expectedCertificateHash {
+			return nil, nil, errCertificateHashMismatch(expectedCertificateHash, hash)
+		}
+	}
+	privateKey, certificate, err := loadIdentityMaterial(proofOptions{Keystore: keystore, Expiry: "2y"})
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := identity.ValidateKeyCertPair(privateKey, certificate); err != nil {
+		return nil, nil, err
+	}
+	if hash := identity.ComputeCertHash(certificate); hash != expectedCertificateHash {
+		return nil, nil, errCertificateHashMismatch(expectedCertificateHash, hash)
+	}
+	return privateKey, certificate, nil
+}
+
+func wizardExistingIdentity(proofs []*gonostr.Event, certificateHash, appName string) *wizardIdentityState {
 	event, proof := activeProofForCertificateHash(proofs, certificateHash)
 	if event == nil || time.Until(proof.ExpiryTime()) < c1RenewalWindow {
 		return nil
 	}
-	delegate := proofDelegate(event)
 	return &wizardIdentityState{
 		certificateHash: certificateHash,
 		owner:           event.PubKey,
-		delegate:        delegate,
-		authorized:      authorizedPublisherSet(event.PubKey, delegate),
-		summary:         "Existing ownership proof found",
-		details:         existingOwnershipProofDetails(certificateHash, proof.ExpiryTime()),
+		delegate:        proofDelegate(event),
+		summary:         appName + " is claimed by " + abbreviateHash(npubFromHex(event.PubKey)),
+		details:         existingOwnershipProofDetails(event.PubKey, proof.ExpiryTime()),
 	}
-}
-
-func chooseProofOwner(events []*gonostr.Event, certificate *x509.Certificate) string {
-	owner, _ := chooseCurrentProof(events, certificate, "")
-	return owner
 }
 
 func authorizedPublisherSet(owner, delegate string) map[string]struct{} {
@@ -523,29 +635,10 @@ func authorizedPublisherSet(owner, delegate string) map[string]struct{} {
 	return authorized
 }
 
-func confirmCurrentProof(certificateHash, owner string, expiry time.Time) (bool, error) {
-	ui.WritePanel(os.Stderr, "info", "Existing certificate ownership proof found", currentProofDetails(certificateHash, owner, expiry), []string{
-		"This proof confirms that this Nostr profile owns the certificate used to sign your APKs.",
-		"Using it lets you publish releases without creating a new proof.",
-	})
-	return ui.Confirm("Is this the certificate you want linked to this Nostr profile?", true)
-}
-
-func currentProofDetails(certificateHash, owner string, expiry time.Time) []ui.KeyValue {
-	details := []ui.KeyValue{
-		{Key: "Nostr npub", Value: npubFromHex(owner)},
-		{Key: "Signing certificate hash", Value: certificateHash},
-	}
-	if !expiry.IsZero() {
-		details = append(details, ui.KeyValue{Key: "Expires", Value: expiry.Local().Format("2006-01-02 15:04")})
-	}
-	return details
-}
-
-func existingOwnershipProofDetails(certificateHash string, expiry time.Time) []ui.KeyValue {
+func existingOwnershipProofDetails(owner string, expiry time.Time) []ui.KeyValue {
 	details := make([]ui.KeyValue, 0, 2)
-	if certificateHash != "" {
-		details = append(details, ui.KeyValue{Key: "Hash", Value: abbreviateHash(certificateHash)})
+	if owner != "" {
+		details = append(details, ui.KeyValue{Key: "Owner", Value: npubFromHex(owner)})
 	}
 	if formatted := formatProofExpiry(expiry); formatted != "" {
 		details = append(details, ui.KeyValue{Key: "Expires", Value: formatted})
@@ -576,30 +669,8 @@ func npubFromHex(owner string) string {
 	return npub
 }
 
-func chooseCurrentProof(events []*gonostr.Event, certificate *x509.Certificate, owner string) (string, time.Time) {
-	for _, event := range events {
-		if owner != "" && event.PubKey != owner {
-			continue
-		}
-		if certificate != nil {
-			proof, err := identity.ValidateActiveProofEvent(event, certificate, time.Now())
-			if err != nil {
-				continue
-			}
-			return event.PubKey, proof.ExpiryTime()
-		}
-		proof, err := identity.ParseIdentityProofFromEvent(event)
-		if err != nil || proof.IsExpired() {
-			continue
-		}
-		return event.PubKey, proof.ExpiryTime()
-	}
-	return "", time.Time{}
-}
-
 // activeProofForCertificateHash finds a current, signed C1 proof whose d tag
-// matches the APK certificate hash. The certificate signature is checked when
-// a certificate is supplied to renew or replace the proof.
+// matches the APK certificate hash.
 func activeProofForCertificateHash(events []*gonostr.Event, certificateHash string) (*gonostr.Event, *identity.IdentityProof) {
 	now := time.Now()
 	for _, event := range events {
@@ -633,530 +704,218 @@ func proofDelegate(event *gonostr.Event) string {
 	return (*delegation)[1]
 }
 
-func currentProofDelegate(events []*gonostr.Event, certificate *x509.Certificate, owner string) string {
-	for _, event := range events {
-		if event.PubKey != owner {
-			continue
-		}
-		if _, err := identity.ValidateActiveProofEvent(event, certificate, time.Now()); err != nil {
-			continue
-		}
-		if delegation := event.Tags.GetFirst([]string{"delegation"}); delegation != nil && len(*delegation) == 2 {
-			return (*delegation)[1]
-		}
-		return ""
-	}
-	return ""
-}
+const (
+	signerBunker = "Paste a bunker:// URL (recommended)"
+	signerNsec   = "Use an nsec from .env"
+)
 
+// wizardSigner returns the SIGN_WITH signer, else asks for a bunker. It never
+// takes a pasted nsec: choosing nsec returns errNsecSetup.
 func wizardSigner(ctx context.Context) (nostrpkg.Signer, error) {
 	signWith := config.GetSignWith()
-	if signWith == "" {
-		kind, err := ui.SelectField("Signing method", "Needed only to create or renew C1. A remote signer keeps the private key outside ZSP.", []string{"bunker:// URL", "Advanced: one-time nsec"})
+	for signWith == "" {
+		kind, err := ui.SelectField("Nostr signer", "Your listing is signed with your Nostr key. A remote signer (bunker) keeps that key off this machine.", []string{signerBunker, signerNsec})
 		if err != nil {
 			return nil, err
 		}
-		switch kind {
-		case "bunker:// URL":
-			// The bunker URL carries a NIP-46 secret; never echo it to the terminal.
-			signWith, err = ui.PromptField("Bunker URL", "Remote signing connection.", true, true)
-		default:
-			signWith, err = ui.PromptSecret("Nostr nsec")
+		if kind == signerNsec {
+			return nil, errNsecSetup
+		}
+		// The bunker URL carries a NIP-46 secret; never echo it to the terminal.
+		value, err := ui.PromptFieldBack("Bunker URL", "Paste the bunker:// connection from your signer app. Esc goes back.", true, true)
+		if errors.Is(err, ui.ErrBack) {
+			continue
 		}
 		if err != nil {
 			return nil, err
 		}
-		if strings.HasPrefix(signWith, "nsec1") {
-			ui.PrintInfo("Set SIGN_WITH in .env yourself to skip this prompt next time.")
-		} else if strings.HasPrefix(signWith, "bunker://") {
-			save, err := ui.Confirm("Save bunker URL to .env?", true)
-			if err != nil {
+		if !strings.HasPrefix(value, "bunker://") {
+			ui.PrintInfo("That isn't a bunker:// URL. Try again.")
+			continue
+		}
+		save, err := ui.ConfirmBack("Save this bunker URL to .env?", "So zsp doesn't ask next time. .env stays owner-readable and out of Git.", true)
+		if errors.Is(err, ui.ErrBack) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if save {
+			if err := ensureEnvIgnored(); err != nil {
 				return nil, err
 			}
-			if save {
-				if err := ensureEnvIgnored(); err != nil {
-					return nil, err
-				}
-				if err := saveSignWith(signWith); err != nil {
-					return nil, err
-				}
+			if err := saveSignWith(value); err != nil {
+				return nil, err
 			}
 		}
+		signWith = value
 		_ = os.Setenv("SIGN_WITH", signWith)
 	}
-	signer, err := nostrpkg.NewSigner(ctx, signWith)
-	if err != nil {
-		return nil, err
-	}
-	return signer, nil
+	return nostrpkg.NewSigner(ctx, signWith)
 }
 
-type wizardPublishConfig struct {
-	config zsp.Config
+// keystoreProofSigner signs the C1 message with the keystore opened in the
+// wizard.
+type keystoreProofSigner struct {
+	privateKey  crypto.PrivateKey
+	certificate *x509.Certificate
+	publicKey   string
 }
 
-func wizardConfigFromSourceCode(source string) (wizardPublishConfig, error) {
-	source = strings.TrimSpace(source)
-	if source == "" {
-		return wizardPublishConfig{}, nil
-	}
-	source, err := validateSuggestionSource(source)
+func (s keystoreProofSigner) SignProof(_ context.Context, createdAt, expiry int64) (zsp.ProofSignature, error) {
+	signature, err := identity.SignProofMessage(s.privateKey, s.publicKey, createdAt, expiry)
 	if err != nil {
-		return wizardPublishConfig{}, err
+		return zsp.ProofSignature{}, err
 	}
-	if err := config.ValidateForgeRepositoryURL(source, ""); err != nil {
-		return wizardPublishConfig{}, err
-	}
-	source, _ = config.CanonicalForgeRepositoryURL(source, "")
-	return wizardPublishConfig{config: zsp.Config{
-		Fetch: zsp.FetchConfig{Repository: source},
-	}}, nil
+	return zsp.ProofSignature{PublicKey: s.publicKey, CertificateHash: identity.ComputeCertHash(s.certificate), Signature: signature}, nil
 }
 
-func wizardConfigFromReleaseSource(sourceCode, source string) (wizardPublishConfig, error) {
-	publish, err := wizardConfigFromSourceCode(sourceCode)
-	if err != nil {
-		return wizardPublishConfig{}, err
+// wizardFirstRelease offers the first release of an unlisted app; its proof
+// goes with it.
+func wizardFirstRelease(ctx context.Context, run wizardRun, selected *zsp.APK, state *wizardIdentityState, appName, version string) int {
+	description := "Zapstore lists " + appName + " once its first release is published."
+	if state.proofPending {
+		description += " Your proof goes with it."
 	}
-	source = strings.TrimSpace(source)
-	if !strings.Contains(source, "://") {
-		absolutePath, err := filepath.Abs(source)
-		if err != nil {
-			return wizardPublishConfig{}, err
-		}
-		if info, err := os.Stat(absolutePath); err == nil && info.IsDir() {
-			return wizardPublishConfig{
-				config: zsp.Config{
-					Fetch: zsp.FetchConfig{
-						Repository:    publish.config.Fetch.Repository,
-						ReleaseSource: &zsp.ReleaseSource{LocalPath: absolutePath},
-					},
-				},
-			}, nil
-		}
-	}
-	source, err = validateSuggestionSource(source)
-	if err != nil {
-		return wizardPublishConfig{}, err
-	}
-	if repository, ok := config.CanonicalForgeRepositoryURL(source, ""); ok {
-		if publish.config.Fetch.Repository == "" {
-			publish.config.Fetch.Repository = repository
-			return publish, nil
-		}
-		source = repository
-	}
-	publish.config.Fetch.ReleaseSource = &zsp.ReleaseSource{URL: source}
-	return publish, nil
-}
-
-type wizardMetadata struct {
-	name        string
-	summary     string
-	description string
-	tags        []string
-	license     string
-	website     string
-	icon        string
-	images      []string
-	sources     []string
-	guidance    bool
-}
-
-func wizardProjectRoot() (string, error) {
-	currentDirectory, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	if isGitRepositoryRoot(currentDirectory) {
-		return filepath.Abs(currentDirectory)
-	}
-	value, err := ui.PromptPathDefault("Project directory", "ZSP writes zapstore.yaml at the repository root so Zapstore can find your app metadata.", currentDirectory, true)
-	if err != nil {
-		return "", err
-	}
-	root, err := filepath.Abs(value)
-	if err != nil {
-		return "", err
-	}
-	info, err := os.Stat(root)
-	if err != nil {
-		return "", err
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("%s is not a directory", root)
-	}
-	if !isGitRepositoryRoot(root) {
-		return "", fmt.Errorf("%s is not a Git repository root", root)
-	}
-	return root, nil
-}
-
-func isGitRepositoryRoot(path string) bool {
-	_, err := os.Stat(filepath.Join(path, ".git"))
-	return err == nil
-}
-
-func loadWizardYAML(path string, apk *zsp.APK) (wizardMetadata, *yaml.Node, error) {
-	document := &yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode, Tag: "!!map"}}}
-	metadata := wizardMetadata{name: apk.Name}
-	if metadata.name == "" {
-		metadata.name = apk.AppID
-	}
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return metadata, document, nil
-	}
-	if err != nil {
-		return metadata, nil, err
-	}
-	if err := yaml.Unmarshal(data, document); err != nil {
-		return metadata, nil, fmt.Errorf("parse existing zapstore.yaml: %w", err)
-	}
-	existing, err := zsp.LoadConfig(path)
-	if err != nil {
-		return metadata, nil, err
-	}
-	metadata = wizardMetadata{
-		name: existing.Publish.Name, summary: existing.Publish.Summary, description: existing.Publish.Description,
-		tags: existing.Publish.Tags, license: existing.Publish.License, website: existing.Publish.Website,
-		icon: existing.Publish.Icon, images: existing.Publish.Images, sources: existing.Publish.MetadataSources,
-	}
-	if metadata.name == "" {
-		metadata.name = apk.Name
-	}
-	if metadata.name == "" {
-		metadata.name = apk.AppID
-	}
-	return metadata, document, nil
-}
-
-func wizardPublishingChoice(ctx context.Context, publish wizardPublishConfig, selected *zsp.APK, state *wizardIdentityState) int {
-	choice, err := ui.SelectField("Choose how to publish", "Let Zapstore discover the committed configuration for convenience, or publish yourself for more control.", []string{
-		"Let Zapstore pick up the committed configuration (convenient)",
-		"Publish manually or through CI/CD (more control)",
-	})
+	choice, err := ui.SelectField(fmt.Sprintf("Publish %s %s now?", appName, version), description, []string{"Publish now", "Quit"})
 	if err != nil {
 		return wizardError("Publishing choice stopped", err)
 	}
-	if choice == "Let Zapstore pick up the committed configuration (convenient)" {
-		ui.PrintInfo("Commit and push zapstore.yaml so catalog indexers can pick it up.")
+	if choice == "Quit" {
+		ui.PrintInfo("Nothing was published.")
 		return 0
 	}
-	return wizardDirectPublishing(ctx, publish, selected, state)
+	return wizardPublishNow(ctx, run, selected, state)
 }
 
-func wizardDirectPublishing(ctx context.Context, publish wizardPublishConfig, selected *zsp.APK, state *wizardIdentityState) int {
-	choice, err := ui.SelectField("Manual or automated publishing?", "Manual publishing gives you a review now. CI/CD can publish future releases automatically.", []string{
-		"Publish this verified release now",
-		"Set up CI/CD publishing",
-	})
-	if err != nil {
-		return wizardError("Publishing choice stopped", err)
-	}
-	if choice == "Set up CI/CD publishing" {
-		return wizardConfigureDelegate(ctx, state)
-	}
+func wizardPublishNow(ctx context.Context, run wizardRun, selected *zsp.APK, state *wizardIdentityState) int {
 	if state.signer == nil {
-		signer, signerErr := wizardSigner(ctx)
-		if signerErr != nil {
-			return wizardError("Signing setup stopped", signerErr)
+		signer, err := wizardSigner(ctx)
+		if err != nil {
+			return wizardError("Signing setup stopped", err)
 		}
 		state.signer = signer
 	}
-	if _, allowed := state.authorized[state.signer.PublicKey()]; !allowed {
-		return wizardError("Signing setup stopped", fmt.Errorf("SIGN_WITH is not the active C1 owner or delegate"))
+	options := zsp.PublishOptions{Preview: true}
+	if state.proofPending {
+		options.ProofSigner = state.certificateSigner()
+	} else if _, allowed := authorizedPublisherSet(state.owner, state.delegate)[state.signer.PublicKey()]; !allowed {
+		return wizardError("Signing setup stopped", fmt.Errorf("SIGN_WITH is not the developer key or its delegate for this app"))
 	}
-	result, err := zsp.Publish(ctx, publish.config.Publish, selected, zsp.PublishOptions{Preview: true})
+	result, err := zsp.Publish(ctx, run.config.Publish, selected, options)
 	if err != nil {
+		if result != nil && result.Status == "partial" {
+			ui.PrintInfo("Publication was incomplete. Some files or events were sent; run zsp again to retry.")
+			if reason := wizardFailureReason(err); reason != "" {
+				ui.PrintInfo("Reason: " + reason)
+			}
+			return 1
+		}
 		return wizardError("Publication stopped", err)
 	}
+	state.published = true
 	ui.WritePanel(os.Stdout, "success", "Release published", []ui.KeyValue{{Key: "Release", Value: result.ID}}, nil)
 	return 0
 }
 
-func wizardConfigureDelegate(ctx context.Context, state *wizardIdentityState) int {
-	delegate, err := ui.PromptField("CI/CD public key", "The npub or lowercase hex public key your automation will use to publish.", false, true)
-	if err != nil {
-		return wizardError("CI/CD setup stopped", err)
-	}
-	delegate, err = parseDelegate(delegate)
-	if err != nil {
-		return wizardError("CI/CD setup stopped", err)
-	}
-	material, err := ui.PromptPath("Keystore or certificate", "Choose the signing material for the verified APK certificate.", true)
-	if err != nil {
-		return wizardError("CI/CD setup stopped", err)
-	}
-	privateKey, certificate, err := loadIdentityMaterial(proofOptions{Keystore: material, Expiry: "2y"})
-	if err != nil {
-		return wizardError("CI/CD setup stopped", err)
-	}
-	if selectedHash := identity.ComputeCertHash(certificate); selectedHash != state.certificateHash {
-		return wizardError("CI/CD setup stopped", errCertificateHashMismatch(state.certificateHash, selectedHash))
-	}
-	if state.signer == nil {
-		signer, signerErr := wizardSigner(ctx)
-		if signerErr != nil {
-			return wizardError("CI/CD setup stopped", signerErr)
+// wizardNextReleases is the last question: Zapstore publishes new releases
+// when RELAYS includes its relay, else the developer does; or the
+// developer's CI does. Esc on a CI/CD prompt returns to it.
+func wizardNextReleases(ctx context.Context, state *wizardIdentityState, appName string, hasConfig bool) int {
+	zapstore := hasZapstoreRelay(relaysFromEnv())
+	for {
+		choice, err := ui.SelectField("How should new releases of "+appName+" reach Zapstore?", "", wizardNextReleaseChoices(zapstore))
+		if err != nil {
+			return wizardError("Setup stopped", err)
 		}
-		state.signer = signer
+		if choice != wizardChoiceCICD {
+			wizardHandoff(appName, hasConfig, zapstore)
+			return 0
+		}
+		code, back := wizardDelegation(ctx, state, appName)
+		if !back {
+			return code
+		}
 	}
-	if state.signer.PublicKey() != state.owner {
-		return wizardError("CI/CD setup stopped", fmt.Errorf("SIGN_WITH is not the active C1 owner"))
-	}
-	if _, err := publishC1Proof(ctx, privateKey, certificate, state.signer, identity.DefaultExpiry, delegate); err != nil {
-		return wizardError("CI/CD setup stopped", err)
-	}
-	ui.WritePanel(os.Stdout, "success", "CI/CD publishing enabled", nil, []string{
-		"The delegated key can now publish releases signed by this certificate.",
-	})
-	return 0
 }
 
-func promptWizardMetadata(metadata *wizardMetadata, source zsp.Config, root string) error {
-	var err error
-	metadata.sources, err = promptWizardMetadataSources(metadata.sources, source, root)
-	if err != nil {
-		return err
+const wizardChoiceCICD = "Set up CI/CD publishing (advanced)"
+
+func wizardNextReleaseChoices(zapstore bool) []string {
+	if zapstore {
+		return []string{"Let Zapstore publish them for you (recommended)", wizardChoiceCICD}
 	}
-	if len(metadata.sources) > 0 {
-		return nil
-	}
-	metadata.guidance, err = ui.Confirm("Add commented guidance for optional metadata fields?", true)
-	if err != nil {
-		return err
-	}
-	return nil
+	return []string{"Publish them yourself with zsp publish", wizardChoiceCICD}
 }
 
-func promptWizardMetadataSources(existing []string, source zsp.Config, root string) ([]string, error) {
-	values, labels := wizardMetadataSourceChoices(source, root)
-	selected := make([]int, 0, len(existing))
-	for index, value := range values {
-		for _, configured := range existing {
-			if value == configured {
-				selected = append(selected, index)
-				break
+// wizardDelegation names the CI's key as the delegate in a new proof. It
+// reports back when the developer pressed Esc on its first prompt.
+func wizardDelegation(ctx context.Context, state *wizardIdentityState, appName string) (int, bool) {
+	for {
+		value, err := ui.PromptFieldBack("CI public key (npub)", "Create a separate Nostr key for your CI and paste its npub here. The nsec never leaves your CI: store it there as the SIGN_WITH secret. Your proof names this key as your delegate, so it can publish releases of "+appName+" but can't change who owns it. To rotate it, run zsp again and name a new key: the new proof replaces the old one. Esc goes back.", false, true)
+		if errors.Is(err, ui.ErrBack) {
+			return 0, true
+		}
+		if err != nil {
+			return wizardError("CI/CD setup stopped", err), false
+		}
+		delegate, err := parseDelegate(value)
+		if err != nil {
+			ui.PrintInfo("That isn't an npub or hex public key. Paste the npub, never the nsec.")
+			continue
+		}
+		if !state.hasCertificateKey() {
+			err := wizardCertificateKey(state, "Choose the keystore that signed "+appName+". Esc goes back.", true)
+			if errors.Is(err, ui.ErrBack) {
+				continue
 			}
-		}
-	}
-	indexes, err := ui.SelectMultipleWithDefaultsDescription(
-		"Metadata sources",
-		"Select every source that applies. Press Space to toggle options, then Enter to continue.",
-		labels,
-		selected,
-	)
-	if err != nil {
-		return nil, err
-	}
-	sources := make([]string, 0, len(indexes))
-	for _, index := range indexes {
-		sources = append(sources, values[index])
-	}
-	return sources, nil
-}
-
-func wizardMetadataSourceChoices(source zsp.Config, root string) ([]string, []string) {
-	if source.Fetch.ReleaseSource != nil && source.Fetch.ReleaseSource.LocalPath != "" {
-		return []string{"fdroid", "playstore"}, []string{"F-Droid", "Google Play Store"}
-	}
-
-	values := make([]string, 0, 5)
-	labels := make([]string, 0, 5)
-	add := func(value, label string) {
-		for _, configured := range values {
-			if configured == value {
-				return
-			}
-		}
-		values = append(values, value)
-		labels = append(labels, label)
-	}
-	if hasLocalFastlaneMetadata(root) {
-		add("fastlane", "Fastlane (local metadata)")
-	}
-	for _, sourceType := range wizardMetadataForgeTypes(source) {
-		switch sourceType {
-		case config.SourceGitHub:
-			add("github", "GitHub")
-		case config.SourceGitLab:
-			add("gitlab", "GitLab")
-		case config.SourceGitea:
-			add("gitea", "Gitea")
-		}
-	}
-	add("fdroid", "F-Droid")
-	add("playstore", "Google Play Store")
-	return values, labels
-}
-
-func wizardMetadataForgeTypes(source zsp.Config) []config.SourceType {
-	types := []config.SourceType{config.DetectSourceType(source.Fetch.Repository)}
-	if source.Fetch.ReleaseSource != nil {
-		releaseType := config.DetectSourceType(source.Fetch.ReleaseSource.URL)
-		if source.Fetch.ReleaseSource.Type != "" {
-			releaseType = config.ParseSourceType(source.Fetch.ReleaseSource.Type)
-		}
-		types = append(types, releaseType)
-	}
-	return types
-}
-
-func hasLocalFastlaneMetadata(root string) bool {
-	info, err := os.Stat(filepath.Join(root, "fastlane", "metadata", "android"))
-	return err == nil && info.IsDir()
-}
-
-func splitWizardList(value string) []string {
-	var values []string
-	for _, item := range strings.Split(value, ",") {
-		if item = strings.TrimSpace(item); item != "" {
-			values = append(values, item)
-		}
-	}
-	return values
-}
-
-func applyWizardMetadata(config *zsp.Config, metadata wizardMetadata) {
-	config.Publish.Name = metadata.name
-	config.Publish.Summary = metadata.summary
-	config.Publish.Description = metadata.description
-	config.Publish.Tags = append([]string(nil), metadata.tags...)
-	config.Publish.License = metadata.license
-	config.Publish.Website = metadata.website
-	config.Publish.Icon = metadata.icon
-	config.Publish.Images = append([]string(nil), metadata.images...)
-}
-
-func saveWizardYAML(path string, document *yaml.Node, metadata wizardMetadata, source zsp.Config, root string) error {
-	if document == nil || len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
-		return fmt.Errorf("existing zapstore.yaml must contain a YAML mapping")
-	}
-	values := map[string][]string{
-		"summary":     {metadata.summary},
-		"description": {metadata.description},
-		"tags":        metadata.tags,
-		"license":     {metadata.license},
-		"website":     {metadata.website},
-		"images":      metadata.images,
-	}
-	for key, value := range values {
-		setWizardYAMLValue(document.Content[0], key, value)
-	}
-	// Name and icon come from the APK or metadata sources, never zapstore.yaml.
-	setWizardYAMLValue(document.Content[0], "name", nil)
-	setWizardYAMLValue(document.Content[0], "icon", nil)
-	setWizardYAMLSequence(document.Content[0], "metadata_sources", metadata.sources)
-	if source.Fetch.Repository != "" {
-		setWizardYAMLValue(document.Content[0], "repository", []string{source.Fetch.Repository})
-	}
-	if source.Fetch.ReleaseSource != nil {
-		value := source.Fetch.ReleaseSource.URL
-		if source.Fetch.ReleaseSource.LocalPath != "" {
-			relative, err := filepath.Rel(root, source.Fetch.ReleaseSource.LocalPath)
 			if err != nil {
-				return err
+				return wizardError("CI/CD setup stopped", err), false
 			}
-			if !strings.HasPrefix(relative, ".") {
-				relative = "./" + relative
+		}
+		if state.signer == nil {
+			signer, err := wizardSigner(ctx)
+			if err != nil {
+				return wizardError("CI/CD setup stopped", err), false
 			}
-			value = relative
+			state.signer = signer
 		}
-		setWizardYAMLValue(document.Content[0], "release_source", []string{value})
+		if state.signer.PublicKey() != state.owner {
+			return wizardError("CI/CD setup stopped", fmt.Errorf("SIGN_WITH is not the developer key for this app")), false
+		}
+		if err := publishWizardProof(ctx, state, delegate); err != nil {
+			return wizardError("CI/CD setup stopped", err), false
+		}
+		ui.WritePanel(os.Stdout, "success", "CI/CD publishing enabled", nil, []string{
+			"In your CI, set the delegate's nsec as the SIGN_WITH secret and run zsp publish after each release.",
+			"To rotate the key, run zsp again and choose CI/CD with a new npub.",
+		})
+		return 0, false
 	}
-	encoded, err := yaml.Marshal(document)
-	if err != nil {
-		return err
-	}
-	if metadata.guidance {
-		encoded = appendWizardMetadataGuidance(encoded)
-	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".zapstore.yaml-*")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if _, err := temporary.Write(encoded); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(temporaryPath, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(temporaryPath, path)
 }
 
-func appendWizardMetadataGuidance(data []byte) []byte {
-	const guidance = `# zsp metadata guidance
-# Add any of these optional fields when they are available:
-# summary: A short description for app listings
-# description: A longer app description
-# tags: [privacy, music]
-# license: GPL-3.0-or-later
-# website: https://example.com
-# images: [https://example.com/screenshot.png]
-`
-	if strings.Contains(string(data), "# zsp metadata guidance") {
-		return data
+// wizardHandoffNotes is the agent hand-off: the wizard never writes
+// zapstore.yaml, the agent skill does.
+func wizardHandoffNotes(appName string, hasConfig, zapstore bool) (string, []string) {
+	ask := `Next: ask your coding agent to "run zsp skill and write a zapstore.yaml"`
+	if hasConfig {
+		ask = `Next: ask your coding agent to "run zsp skill and improve the zapstore.yaml"`
 	}
-	if len(data) > 0 && data[len(data)-1] != '\n' {
-		data = append(data, '\n')
+	if zapstore {
+		return "Zapstore will keep " + appName + " up to date", []string{
+			"Your proof lets Zapstore publish each new release, shown as developed by you.",
+			ask + ", then push it.",
+		}
 	}
-	return append(data, guidance...)
+	return "You'll publish new releases of " + appName, []string{
+		"Your proof lets you publish each release with zsp publish, shown as developed by you.",
+		ask + ", then run zsp publish after each release.",
+	}
 }
 
-func setWizardYAMLValue(mapping *yaml.Node, key string, values []string) {
-	for index := 0; index+1 < len(mapping.Content); index += 2 {
-		if mapping.Content[index].Value != key {
-			continue
-		}
-		if len(values) == 0 || values[0] == "" {
-			mapping.Content = append(mapping.Content[:index], mapping.Content[index+2:]...)
-			return
-		}
-		mapping.Content[index+1] = wizardYAMLValue(values)
-		return
-	}
-	if len(values) == 0 || values[0] == "" {
-		return
-	}
-	mapping.Content = append(mapping.Content,
-		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
-		wizardYAMLValue(values),
-	)
-}
-
-func setWizardYAMLSequence(mapping *yaml.Node, key string, values []string) {
-	for index := 0; index+1 < len(mapping.Content); index += 2 {
-		if mapping.Content[index].Value != key {
-			continue
-		}
-		mapping.Content[index+1] = wizardYAMLValue(values)
-		return
-	}
-	mapping.Content = append(mapping.Content,
-		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
-		wizardYAMLValue(values),
-	)
-}
-
-func wizardYAMLValue(values []string) *yaml.Node {
-	if len(values) == 0 {
-		return &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
-	}
-	if len(values) == 1 {
-		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: values[0]}
-	}
-	node := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
-	for _, value := range values {
-		node.Content = append(node.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value})
-	}
-	return node
+func wizardHandoff(appName string, hasConfig, zapstore bool) {
+	title, notes := wizardHandoffNotes(appName, hasConfig, zapstore)
+	ui.WritePanel(os.Stdout, "success", title, nil, notes)
 }
 
 func saveSignWith(value string) error {
@@ -1193,16 +952,6 @@ func ensureEnvIgnored() error {
 		data = append(data, '\n')
 	}
 	return os.WriteFile(".gitignore", append(data, []byte(".env\n")...), 0o644)
-}
-
-func wizardSuggestionSource(cfg zsp.Config) string {
-	if cfg.Fetch.Repository != "" {
-		return cfg.Fetch.Repository
-	}
-	if cfg.Fetch.ReleaseSource != nil {
-		return cfg.Fetch.ReleaseSource.URL
-	}
-	return ""
 }
 
 func wizardReleaseLocation(cfg zsp.Config) string {
