@@ -64,7 +64,7 @@ func TestPrepareMediaSkipsEmptyScreenshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepareMedia() error = %v", err)
 	}
-	if len(plan.imageURLs) != 1 || !strings.Contains(plan.imageURLs[0], ".png") {
+	if len(plan.imageURLs) != 1 || !strings.Contains(plan.imageURLs[0], ".webp") {
 		t.Fatalf("images = %v, want the fallback screenshot", plan.imageURLs)
 	}
 	for _, blob := range plan.blobs {
