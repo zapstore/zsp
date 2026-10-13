@@ -37,7 +37,12 @@ type cliErrorDocument struct {
 	OK        bool               `json:"ok"`
 	Operation string             `json:"operation"`
 	Error     cliErrorBody       `json:"error"`
-	Result    *zsp.PublishResult `json:"result,omitempty"`
+	Result    *publishResultBody `json:"result,omitempty"`
+}
+
+type publishResultBody struct {
+	Status string `json:"status"`
+	ID     string `json:"id,omitempty"`
 }
 
 type cliErrorBody struct {
@@ -46,7 +51,7 @@ type cliErrorBody struct {
 	Detail    string         `json:"detail,omitempty"`
 	Retryable bool           `json:"retryable"`
 	Context   map[string]any `json:"context,omitempty"`
-	NextSteps []cliNextStep  `json:"next_steps"`
+	NextStep  *cliNextStep   `json:"next_step"`
 }
 
 type cliNextStep struct {
@@ -87,16 +92,13 @@ func publishCommand(ctx context.Context, opts *cli.Options) int {
 	}
 	candidates, err := zsp.Fetch(ctx, config.Fetch, zsp.FetchOptions{
 		OnProgress:    progress,
-		SkipHTTPCache: opts.Publish.OverwriteRelease || opts.Publish.Check,
+		SkipHTTPCache: opts.Publish.OverwriteRelease,
 	})
 	if err != nil {
 		return writePublishError(opts, err, nil)
 	}
 	defer closeCandidates(candidates)
 
-	if opts.Publish.Check {
-		return writeCheckSuccess(opts, candidates, fetchWarnings)
-	}
 	selected, err := selectPublicAPK(opts, candidates)
 	if err != nil {
 		return writePublishError(opts, err, candidates)
@@ -129,24 +131,36 @@ func loadPublicConfig(opts *cli.Options) (zsp.Config, error) {
 	if len(opts.Args) > 1 {
 		return config, &cliOperationError{
 			code:    "invalid_arguments",
-			message: "publish accepts at most one zapstore.yaml path",
+			message: string(opts.Command) + " accepts at most one path",
 			cause:   zsp.ErrInvalidConfig,
 		}
 	}
 	if len(opts.Args) == 1 && strings.HasSuffix(strings.ToLower(opts.Args[0]), ".apk") {
-		return config, &cliOperationError{
-			code:    "invalid_arguments",
-			message: "publish reads zapstore.yaml; set release_source to the APK path",
-			cause:   zsp.ErrInvalidConfig,
+		if opts.Command != cli.CommandCheck {
+			return config, &cliOperationError{
+				code:    "invalid_arguments",
+				message: "publish reads zapstore.yaml; set release_source to the APK path",
+				cause:   zsp.ErrInvalidConfig,
+			}
 		}
-	}
-	path := "zapstore.yaml"
-	if len(opts.Args) == 1 {
-		path = opts.Args[0]
-	}
-	config, err := zsp.LoadConfig(path)
-	if err != nil {
-		return config, err
+		absolute, err := filepath.Abs(opts.Args[0])
+		if err != nil {
+			return config, &cliOperationError{code: "invalid_arguments", message: "invalid APK path", cause: zsp.ErrInvalidConfig}
+		}
+		if _, err := os.Stat(absolute); err != nil {
+			return config, &cliOperationError{code: "invalid_arguments", message: "APK file not found", cause: zsp.ErrInvalidConfig}
+		}
+		config.Fetch.ReleaseSource = &zsp.ReleaseSource{LocalPath: absolute}
+	} else {
+		path := "zapstore.yaml"
+		if len(opts.Args) == 1 {
+			path = opts.Args[0]
+		}
+		loaded, err := zsp.LoadConfig(path)
+		if err != nil {
+			return config, err
+		}
+		config = loaded
 	}
 	if opts.Publish.RepoURL != "" {
 		config.Fetch.Repository = normalizeRepoURL(opts.Publish.RepoURL)
@@ -271,73 +285,48 @@ func closeCandidates(candidates []*zsp.APK) {
 	}
 }
 
-func writeCheckSuccess(opts *cli.Options, candidates []*zsp.APK, warnings []string) int {
-	if opts.Global.JSON {
-		if warnings == nil {
-			warnings = []string{}
-		}
-		_ = json.NewEncoder(os.Stdout).Encode(struct {
-			OK        bool       `json:"ok"`
-			Operation string     `json:"operation"`
-			APKs      []*zsp.APK `json:"apks"`
-			Warnings  []string   `json:"warnings"`
-		}{true, "check", candidates, warnings})
-		return 0
-	}
-	for _, candidate := range candidates {
-		ui.WritePanel(os.Stdout, "success", "APK verified", []ui.KeyValue{
-			{Key: "File", Value: candidate.Filename},
-			{Key: "Package", Value: candidate.AppID},
-			{Key: "SHA-256", Value: candidate.Hash},
-		}, nil)
-	}
-	for _, warning := range warnings {
-		ui.WritePanel(os.Stderr, "warning", "Verification warning", nil, []string{warning})
-	}
-	return 0
-}
-
 func writePublishSuccess(opts *cli.Options, result *zsp.PublishResult, selected *zsp.APK) int {
 	if opts.Global.JSON {
 		if result.Warnings == nil {
 			result.Warnings = []string{}
 		}
-		var application *string
-		if result.Events.Application != "" {
-			application = &result.Events.Application
-		}
 		_ = json.NewEncoder(os.Stdout).Encode(struct {
-			OK          bool                  `json:"ok"`
-			Operation   string                `json:"operation"`
-			ID          string                `json:"id"`
-			Status      string                `json:"status"`
-			SelectedAPK *zsp.APK              `json:"selected_apk"`
-			Events      publishEventsDocument `json:"events"`
-			Uploads     []zsp.BlobResult      `json:"uploads"`
-			Relays      []zsp.RelayResult     `json:"relays"`
-			Warnings    []string              `json:"warnings"`
-		}{
-			true, "publish", result.ID, result.Status, selected,
-			publishEventsDocument{Application: application, Release: result.Events.Release, Assets: result.Events.Assets},
-			result.Uploads, result.Relays, result.Warnings,
-		})
+			OK          bool     `json:"ok"`
+			Operation   string   `json:"operation"`
+			ID          string   `json:"id"`
+			Status      string   `json:"status"`
+			AppID       string   `json:"app_id"`
+			VersionName string   `json:"version_name"`
+			VersionCode int64    `json:"version_code"`
+			Warnings    []string `json:"warnings"`
+		}{true, "publish", result.ID, result.Status, selected.AppID, selected.VersionName, selected.VersionCode, result.Warnings})
 		return 0
 	}
 	ui.WritePanel(os.Stdout, "success", "Release published", []ui.KeyValue{
-		{Key: "Application", Value: result.AppID},
-		{Key: "Event", Value: result.ID},
-		{Key: "Release", Value: result.Events.Release},
-	}, []string{ui.RenderCommand("zsp publish --check")})
+		{Key: "App", Value: selected.AppID},
+		{Key: "Version", Value: fmt.Sprintf("%s (%d)", selected.VersionName, selected.VersionCode)},
+		{Key: "Release", Value: result.ID},
+	}, nil)
 	for _, warning := range result.Warnings {
 		ui.WritePanel(os.Stderr, "warning", "Publish warning", nil, []string{warning})
 	}
 	return 0
 }
 
-type publishEventsDocument struct {
-	Application *string  `json:"application"`
-	Release     string   `json:"release"`
-	Assets      []string `json:"assets"`
+// apkCandidate is how JSON names an APK a caller must choose between.
+type apkCandidate struct {
+	Filename        string `json:"filename"`
+	Hash            string `json:"hash"`
+	VersionCode     int64  `json:"version_code"`
+	CertificateHash string `json:"certificate_hash"`
+}
+
+func apkCandidates(candidates []*zsp.APK) []apkCandidate {
+	result := make([]apkCandidate, len(candidates))
+	for index, candidate := range candidates {
+		result[index] = apkCandidate{candidate.Filename, candidate.Hash, candidate.VersionCode, candidate.CertificateHash}
+	}
+	return result
 }
 
 func writePublishError(opts *cli.Options, err error, candidates []*zsp.APK, partial ...*zsp.PublishResult) int {
@@ -347,40 +336,28 @@ func writePublishError(opts *cli.Options, err error, candidates []*zsp.APK, part
 	if errors.As(err, &operationError) {
 		retryable = operationError.Retryable()
 	}
-	body := cliErrorBody{Code: code, Summary: safeSummary(code), Detail: ui.SanitizeErrorMessage(err), Retryable: retryable, NextSteps: []cliNextStep{}}
-	if code == "proof_required" {
+	body := cliErrorBody{Code: code, Summary: safeSummary(code), Detail: ui.SanitizeErrorMessage(err), Retryable: retryable}
+	command := "zsp " + string(opts.Command)
+	switch code {
+	case "proof_required":
 		if len(candidates) == 1 {
 			body.Context = map[string]any{"certificate_hash": candidates[0].CertificateHash}
 		}
-		body.NextSteps = []cliNextStep{{
-			Command:       "zsp",
-			Reason:        "Create the required certificate ownership proof.",
-			RequiresHuman: true,
-		}}
+		body.NextStep = &cliNextStep{Command: "zsp", Reason: "Prove the app is yours.", RequiresHuman: true}
+	case "proof_unauthorized":
+		body.NextStep = &cliNextStep{Command: "zsp", Reason: "SIGN_WITH isn't the proof's owner or delegate. The owner can name it as delegate under CI/CD publishing.", RequiresHuman: true}
+	case "apk_selection_required":
+		body.Context = map[string]any{"candidates": apkCandidates(candidates)}
+		body.NextStep = &cliNextStep{Command: command + " --apk-hash <hash>", Reason: "Select one verified APK by its hash."}
+	case "no_new_apk":
+		body.NextStep = &cliNextStep{Command: "zsp publish --overwrite-release", Reason: "Download the source again even though it looks unchanged."}
 	}
-	if code == "apk_selection_required" {
-		body.Context = map[string]any{"candidates": candidates}
-		body.NextSteps = []cliNextStep{{
-			Command: "zsp publish --quiet --skip-preview --apk-hash <sha256>",
-			Reason:  "Select one verified APK by its exact hash.",
-		}}
-	}
-	if code == "no_new_apk" {
-		body.NextSteps = []cliNextStep{{
-			Command: "zsp publish --overwrite-release",
-			Reason:  "Fetch and publish even if the source ETag is unchanged.",
-		}}
-	}
-	var result *zsp.PublishResult
-	if len(partial) > 0 {
-		result = partial[0]
+	var result *publishResultBody
+	if len(partial) > 0 && partial[0] != nil {
+		result = &publishResultBody{Status: partial[0].Status, ID: partial[0].ID}
 	}
 	if opts.Global.JSON {
-		operation := "publish"
-		if opts.Publish.Check {
-			operation = "check"
-		}
-		_ = json.NewEncoder(os.Stderr).Encode(cliErrorDocument{OK: false, Operation: operation, Error: body, Result: result})
+		_ = json.NewEncoder(os.Stderr).Encode(cliErrorDocument{OK: false, Operation: string(opts.Command), Error: body, Result: result})
 	} else {
 		ui.WritePanel(os.Stderr, "error", safeSummary(code), nil, []string{ui.SanitizeErrorMessage(err)})
 		if code == "proof_required" {
@@ -390,7 +367,7 @@ func writePublishError(opts *cli.Options, err error, candidates []*zsp.APK, part
 			for _, candidate := range candidates {
 				fmt.Fprintln(os.Stderr, ui.StatusLine("info", candidate.Filename+" "+candidate.Hash))
 			}
-			fmt.Fprintln(os.Stderr, ui.StatusLine("info", ui.RenderCommand("zsp publish --apk-hash <sha256>")))
+			fmt.Fprintln(os.Stderr, ui.StatusLine("info", ui.RenderCommand(command+" --apk-hash <hash>")))
 		} else if code == "no_new_apk" {
 			fmt.Fprintln(os.Stderr, ui.StatusLine("info", ui.RenderCommand("zsp publish --overwrite-release")))
 		}

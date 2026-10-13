@@ -52,15 +52,27 @@ func TestCLI(t *testing.T) {
 		}
 	})
 
-	t.Run("extract invalid APK envelope", func(t *testing.T) {
-		result := runZSP(t, context.Background(), "utils", "extract-apk", filepath.Join(t.TempDir(), "missing.apk"))
-		requireErrorEnvelope(t, result, 1, "extract_apk", "invalid_apk")
+	t.Run("check missing APK envelope", func(t *testing.T) {
+		result := runZSP(t, context.Background(), "check", filepath.Join(t.TempDir(), "missing.apk"))
+		requireErrorEnvelope(t, result, 1, "check", "invalid_arguments")
+	})
+
+	t.Run("removed utils command", func(t *testing.T) {
+		result := runZSP(t, context.Background(), "utils", "extract-apk", "app.apk")
+		requireErrorEnvelope(t, result, 1, "utils", "invalid_arguments")
+	})
+
+	t.Run("skill prints the agent skill", func(t *testing.T) {
+		result := runZSP(t, context.Background(), "skill")
+		if result.exitCode != 0 || !strings.HasPrefix(result.stdout, "---\nname: zapstore-publish") {
+			t.Fatalf("skill exit=%d stdout=%.80q stderr=%q", result.exitCode, result.stdout, result.stderr)
+		}
 	})
 
 	t.Run("check no result envelope", func(t *testing.T) {
 		dir := t.TempDir()
 		writeZapstoreYAML(t, dir)
-		result := runZSPDir(t, context.Background(), dir, "publish", "--check", "--skip-metadata", "-s", t.TempDir())
+		result := runZSPDir(t, context.Background(), dir, "check", "-s", t.TempDir())
 		requireErrorEnvelope(t, result, 1, "check", "source_failed")
 	})
 
@@ -86,7 +98,7 @@ func TestCLI(t *testing.T) {
 
 		dir := t.TempDir()
 		writeZapstoreYAML(t, dir)
-		command := exec.Command(zspBinary, "publish", "--check", "--skip-metadata", "-s", serverURL+"/release.apk")
+		command := exec.Command(zspBinary, "check", "-s", serverURL+"/release.apk")
 		command.Dir = dir
 		var stdout, stderr bytes.Buffer
 		command.Stdout = &stdout

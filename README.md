@@ -19,9 +19,24 @@ keystore, password, private key, `nsec`, or `.env`:
 zsp
 ```
 
-ZSP discovers the app, verifies its signing certificate, and guides proof
-creation and publication. The proof is published to `RELAYS`. Add a
-`zapstore.yaml` to the repository for finer metadata control.
+ZSP finds your APK, checks that your keystore signed it, and publishes the
+proof that the app is yours: alone when the app is already listed,
+otherwise with the first release.
+
+The wizard does not write `zapstore.yaml`. Ask your coding agent to run
+`zsp skill` and write one, then commit and push it so Zapstore keeps your
+listing up to date.
+
+## Check
+
+`zsp check` finds and verifies your APK, then reports whether the app is
+listed, which proof is active, whether `SIGN_WITH` can publish, and what to
+do next. It signs and publishes nothing.
+
+```sh
+zsp check                    # from zapstore.yaml
+zsp check app-release.apk    # one local APK
+```
 
 ## Publish
 
@@ -36,29 +51,15 @@ release_source: ./app-release.apk
 zsp publish
 ```
 
-Running `zsp` without arguments starts the interactive identity and publish
-wizard. Commands with arguments produce one JSON document for automation.
-
-Check source resolution and every matching APK without publishing:
-
-```sh
-zsp publish --check zapstore.yaml
-```
+On a terminal, `check` and `publish` print readable text. Piped, or with
+`--json`, they print one JSON document: data on stdout, errors on stderr.
+Callers branch on `error.code`. `-q` turns off progress and the preview.
 
 When several APKs verify, interactive use presents a selection. Automation
 must select an exact hash:
 
 ```sh
-zsp publish --quiet --skip-preview \
-  --apk-hash <sha256> zapstore.yaml
-```
-
-Data goes to stdout, errors to stderr, and callers branch on `error.code`.
-
-## APK metadata
-
-```sh
-zsp utils extract-apk app-release.apk
+zsp publish -q --apk-hash <hash>
 ```
 
 ## Configuration
@@ -117,7 +118,7 @@ a private key.
 | Variable | Purpose |
 | --- | --- |
 | `SIGN_WITH` | Nostr signer |
-| `RELAYS` | Comma-separated relays; defaults to `wss://relay.zapstore.dev`. Source suggestions use the first host. |
+| `RELAYS` | Comma-separated relays; defaults to `wss://relay.zapstore.dev`. |
 | `BLOSSOM_URL` | Blossom server; defaults to `https://cdn.zapstore.dev` |
 | `KEYSTORE_PASSWORD` | JKS/PKCS#12 store password |
 | `KEYSTORE_KEY_PASSWORD` | Optional JKS private-key password |
@@ -129,15 +130,18 @@ working directory. A `.env` that holds `SIGN_WITH` or `HOTBOX_PIN` must be
 mode 0600 (`chmod 600 .env`); zsp refuses one that other users can read.
 
 With [hotbox](../hotbox), paste the block it prints into `.env`. `zsp publish`
-then creates the certificate proof (kind 30509) when none is active, or renews
-your own proof within 30 days of expiry, and publishes the release in the same
-run. A proof owned by another key is never replaced.
+then publishes the release and, after it, the certificate proof (kind 30509)
+when none is active, or a renewal of your own proof within 30 days of expiry.
+The relay checks the proof against the uploaded APK. A proof owned by another
+key is never replaced.
 
 ## Command surface
 
 ```text
+zsp                                         # interactive wizard
+zsp check [options] [zapstore.yaml | app.apk]
 zsp publish [options] [zapstore.yaml]
-zsp utils extract-apk <app.apk>
+zsp skill                                   # agent skill
 ```
 
 Run `zsp <command> --help` for flags. Offline output, indexer mode, local
@@ -150,6 +154,7 @@ The non-interactive public package is `github.com/zapstore/zsp`:
 ```go
 cfg, err := zsp.LoadConfig("zapstore.yaml")
 apks, err := zsp.Fetch(ctx, cfg.Fetch, zsp.FetchOptions{})
+status, err := zsp.Check(ctx, cfg.Publish, apks[0], zsp.CheckOptions{})
 result, err := zsp.Publish(ctx, cfg.Publish, apks[0], zsp.PublishOptions{})
 ```
 

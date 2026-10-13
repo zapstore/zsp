@@ -7,7 +7,7 @@ import (
 	"os"
 	"runtime/debug"
 
-	"github.com/zapstore/zsp/internal/apk"
+	"github.com/zapstore/zsp"
 	"github.com/zapstore/zsp/internal/cli"
 	"github.com/zapstore/zsp/internal/config"
 	"github.com/zapstore/zsp/internal/help"
@@ -31,7 +31,7 @@ func run(handler *cli.SignalHandler) int {
 		if options.Global.JSON {
 			_ = json.NewEncoder(os.Stderr).Encode(cliErrorDocument{
 				OK: false, Operation: string(options.Command),
-				Error: cliErrorBody{Code: "invalid_arguments", Summary: "The command arguments are invalid.", Detail: ui.SanitizeErrorMessage(options.FlagParseError), Retryable: false, NextSteps: []cliNextStep{}},
+				Error: cliErrorBody{Code: "invalid_arguments", Summary: "The command arguments are invalid.", Detail: ui.SanitizeErrorMessage(options.FlagParseError), Retryable: false},
 			})
 		} else {
 			ui.WritePanel(os.Stderr, "error", "Invalid command arguments", nil, []string{options.FlagParseError.Error(), "Run zsp --help to see available commands."})
@@ -42,7 +42,7 @@ func run(handler *cli.SignalHandler) int {
 		if options.Global.JSON {
 			if err := json.NewEncoder(os.Stderr).Encode(cliErrorDocument{
 				OK: false, Operation: sanitize.Text(options.UnknownSubcommand),
-				Error: cliErrorBody{Code: "invalid_arguments", Summary: "The command is not supported.", Retryable: false, NextSteps: []cliNextStep{}},
+				Error: cliErrorBody{Code: "invalid_arguments", Summary: "The command is not supported.", Retryable: false},
 			}); err != nil {
 				return 1
 			}
@@ -93,8 +93,8 @@ func run(handler *cli.SignalHandler) int {
 			switch command {
 			case cli.CommandPublish:
 				text = help.PublishHelp()
-			case cli.CommandUtils:
-				text = help.UtilsHelp()
+			case cli.CommandCheck:
+				text = help.CheckHelp()
 			}
 			_ = json.NewEncoder(os.Stdout).Encode(struct {
 				OK        bool   `json:"ok"`
@@ -109,11 +109,15 @@ func run(handler *cli.SignalHandler) int {
 		}
 		return 0
 	}
+	if options.Command == cli.CommandSkill {
+		fmt.Print(zsp.Skill)
+		return 0
+	}
 	if err := config.CheckDotEnvPermissions(); err != nil {
 		if options.Global.JSON {
 			_ = json.NewEncoder(os.Stderr).Encode(cliErrorDocument{
 				OK: false, Operation: string(options.Command),
-				Error: cliErrorBody{Code: "insecure_env", Summary: ".env is readable by other users.", Detail: err.Error(), Retryable: false, NextSteps: []cliNextStep{}},
+				Error: cliErrorBody{Code: "insecure_env", Summary: ".env is readable by other users.", Detail: err.Error(), Retryable: false},
 			})
 		} else {
 			ui.WritePanel(os.Stderr, "error", ".env is readable by other users", nil, []string{err.Error()})
@@ -123,8 +127,8 @@ func run(handler *cli.SignalHandler) int {
 	switch options.Command {
 	case cli.CommandPublish:
 		return publishCommand(ctx, options)
-	case cli.CommandUtils:
-		return utilsCommand(options)
+	case cli.CommandCheck:
+		return checkCommand(ctx, options)
 	case cli.CommandWizard:
 		return runWizard(ctx)
 	default:
@@ -141,65 +145,4 @@ func buildVersion() string {
 		return info.Main.Version
 	}
 	return version
-}
-
-func utilsCommand(options *cli.Options) int {
-	if options.Utils.Operation != "extract-apk" || len(options.Args) != 1 {
-		if options.Global.JSON {
-			_ = json.NewEncoder(os.Stderr).Encode(cliErrorDocument{
-				OK: false, Operation: "extract_apk",
-				Error: cliErrorBody{Code: "invalid_arguments", Summary: "Provide exactly one APK path.", Retryable: false, NextSteps: []cliNextStep{}},
-			})
-			return 1
-		}
-		ui.WritePanel(os.Stderr, "error", "APK path required", nil, []string{ui.RenderCommand("zsp utils extract-apk <app.apk>")})
-		return 1
-	}
-	if err := extractAPKMetadata(options.Args[0], options.Global.JSON); err != nil {
-		if options.Global.JSON {
-			_ = json.NewEncoder(os.Stderr).Encode(cliErrorDocument{
-				OK: false, Operation: "extract_apk",
-				Error: cliErrorBody{Code: "invalid_apk", Summary: "The APK could not be verified.", Retryable: false, NextSteps: []cliNextStep{}},
-			})
-			return 1
-		}
-		ui.WriteError(os.Stderr, ui.SanitizeErrorMessage(err))
-		return 1
-	}
-	return 0
-}
-
-type apkMetadataDocument struct {
-	PackageID       string   `json:"package_id"`
-	VersionName     string   `json:"version_name"`
-	VersionCode     int64    `json:"version_code"`
-	MinSDK          int32    `json:"min_sdk"`
-	TargetSDK       int32    `json:"target_sdk"`
-	Label           string   `json:"label"`
-	Architectures   []string `json:"architectures"`
-	Permissions     []string `json:"permissions,omitempty"`
-	CertificateHash string   `json:"certificate_hash"`
-	Hash            string   `json:"hash"`
-	Size            int64    `json:"size"`
-}
-
-func extractAPKMetadata(path string, envelope bool) error {
-	info, err := apk.Parse(path)
-	if err != nil {
-		return fmt.Errorf("parse APK: %w", err)
-	}
-	output := apkMetadataDocument{
-		PackageID: info.PackageID, VersionName: info.VersionName, VersionCode: info.VersionCode,
-		MinSDK: info.MinSDK, TargetSDK: info.TargetSDK, Label: info.Label,
-		Architectures: info.Architectures, Permissions: info.Permissions, CertificateHash: info.CertFingerprint,
-		Hash: info.SHA256, Size: info.FileSize,
-	}
-	if envelope {
-		return json.NewEncoder(os.Stdout).Encode(struct {
-			OK        bool                `json:"ok"`
-			Operation string              `json:"operation"`
-			APK       apkMetadataDocument `json:"apk"`
-		}{true, "extract_apk", output})
-	}
-	return json.NewEncoder(os.Stdout).Encode(output)
 }

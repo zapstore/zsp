@@ -38,17 +38,20 @@ func renderURL(s string) string {
 func RootHelp() string {
 	var b strings.Builder
 
-	b.WriteString(renderBold("zsp") + " " + renderWhite("— Publish Android apps to Nostr relays used by Zapstore") + "\n")
+	b.WriteString(renderBold("zsp") + " " + renderWhite("— Zapstore Android app publishing tool") + "\n")
 
 	b.WriteString(renderBold("USAGE") + "\n")
 	b.WriteString("  " + renderAccent("zsp") + " <command> [options]\n\n")
 
 	b.WriteString(renderBold("COMMANDS") + "\n")
+	b.WriteString("  " + renderAccent("check") + "       " + renderWhite("Verify the APK and show listing, proof, and next step (read-only)") + "\n")
 	b.WriteString("  " + renderAccent("publish") + "     " + renderWhite("Publish APK releases to Nostr relays") + "\n")
-	b.WriteString("  " + renderAccent("utils") + "       " + renderWhite("Operational utilities (extract-apk)") + "\n\n")
+	b.WriteString("  " + renderAccent("skill") + "       " + renderWhite("Print the agent skill for writing zapstore.yaml") + "\n\n")
 
 	b.WriteString(renderBold("EXAMPLES") + "\n")
 	writeExample(&b, "zsp", "Start the interactive app setup wizard")
+	writeExample(&b, "zsp check", "Check zapstore.yaml: listing, proof, next step")
+	writeExample(&b, "zsp check app-release.apk", "Check one local APK")
 	writeExample(&b, "zsp publish", "Publish from zapstore.yaml")
 	writeExample(&b, "zsp publish -r github.com/org/repo", "Override repository in zapstore.yaml")
 	writeExample(&b, "zsp publish -s ./app-release.apk", "Override release_source in zapstore.yaml")
@@ -65,7 +68,8 @@ func RootHelp() string {
 	b.WriteString("  " + renderAccent("-h, --help") + "      " + renderWhite("Show help") + "\n")
 	b.WriteString("  " + renderAccent("-v, --version") + "   " + renderWhite("Show version") + "\n")
 	b.WriteString("  " + renderAccent("--verbose") + "       " + renderWhite("Debug output") + "\n")
-	b.WriteString("  " + renderAccent("--no-color") + "      " + renderWhite("Disable colored output") + "\n\n")
+	b.WriteString("  " + renderAccent("--no-color") + "      " + renderWhite("Disable colored output") + "\n")
+	b.WriteString("  " + renderAccent("--json") + "          " + renderWhite("JSON output (default when stdout is not a terminal)") + "\n\n")
 
 	b.WriteString(renderBold("EXIT CODES") + "\n")
 	b.WriteString("  " + renderAccent("0") + "   Success\n")
@@ -104,7 +108,7 @@ func PublishHelp() string {
 	b.WriteString("                            " + renderGreyDark("Fastlane is tried automatically for GitHub/GitLab/Codeberg repositories") + "\n")
 	writeFlag(&b, "--match <pattern>", "Regex pattern to filter APK assets (rarely needed)")
 	writeFlag(&b, "--release-filter <pattern>", "Regex pattern to filter source releases")
-	writeFlag(&b, "--apk-hash <sha256>", "Select one verified APK when several candidates match")
+	writeFlag(&b, "--apk-hash <hash>", "Select one verified APK when several candidates match")
 	b.WriteString("\n")
 
 	// Release-specific flags (CLI only)
@@ -115,8 +119,8 @@ func PublishHelp() string {
 
 	// Behavior flags
 	b.WriteString(renderBold("BEHAVIOR FLAGS") + "\n")
-	writeFlag(&b, "--quiet", "Suppress prompts and progress output")
-	writeFlag(&b, "--skip-preview", "Skip the browser preview prompt")
+	writeFlag(&b, "-q, --quiet", "No progress output and no preview")
+	writeFlag(&b, "--skip-preview", "Skip the browser preview")
 	writeFlag(&b, "--port <port>", "Custom port for browser preview")
 	writeFlag(&b, "--no-compress", "Preserve original icon and screenshot bytes")
 	writeFlag(&b, "--skip-app-event", "Publish only release events, skip kind 32267 app metadata")
@@ -136,7 +140,7 @@ func PublishHelp() string {
 
 	// Other flags
 	b.WriteString(renderBold("OTHER FLAGS") + "\n")
-	writeFlag(&b, "--check", "Resolve the source and verify every matching APK without publishing")
+	writeFlag(&b, "--json", "JSON output (default when stdout is not a terminal)")
 	writeFlag(&b, "--verbose", "Debug output")
 	writeFlag(&b, "--no-color", "Disable colored output")
 	writeFlag(&b, "-h, --help", "Show this help")
@@ -144,9 +148,6 @@ func PublishHelp() string {
 
 	// Examples section - comprehensive
 	b.WriteString(renderBold("EXAMPLES") + "\n\n")
-
-	b.WriteString(renderGreyDark("  # Validate every matching APK without publishing") + "\n")
-	b.WriteString("  " + renderAccent("zsp publish --check zapstore.yaml") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Publish from config file") + "\n")
 	b.WriteString("  " + renderAccent("zsp publish zapstore.yaml") + "\n\n")
@@ -164,13 +165,13 @@ func PublishHelp() string {
 	b.WriteString("  " + renderAccent("zsp publish -r github.com/user/app -s f-droid.org/packages/com.example") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Select one APK when several candidates verify") + "\n")
-	b.WriteString("  " + renderAccent("zsp publish zapstore.yaml --apk-hash <sha256>") + "\n\n")
+	b.WriteString("  " + renderAccent("zsp publish zapstore.yaml --apk-hash <hash>") + "\n\n")
 
 	b.WriteString(renderGreyDark("  # Replace an existing release with the same Android version code") + "\n")
 	b.WriteString("  " + renderAccent("zsp publish zapstore.yaml --overwrite-release") + "\n\n")
 
-	b.WriteString(renderGreyDark("  # Validate config fetches correct APK (CI/CD)") + "\n")
-	b.WriteString("  " + renderAccent("zsp publish --check zapstore.yaml") + "\n\n")
+	b.WriteString(renderGreyDark("  # Publish from CI/CD") + "\n")
+	b.WriteString("  " + renderAccent("zsp publish -q") + "\n\n")
 
 	// Config section
 	b.WriteString(renderBold("CONFIGURATION") + "\n")
@@ -198,45 +199,60 @@ func PublishHelp() string {
 	return b.String()
 }
 
-// UtilsHelp returns help for the utils subcommand.
-func UtilsHelp() string {
+// CheckHelp returns help for the check subcommand.
+func CheckHelp() string {
 	var b strings.Builder
 
-	b.WriteString(renderBold("zsp utils") + " " + renderWhite("— Operational utilities") + "\n\n")
+	b.WriteString(renderBold("zsp check") + " " + renderWhite("— Verify an APK and show what Zapstore knows about it") + "\n\n")
 
 	b.WriteString(renderBold("USAGE") + "\n")
-	b.WriteString("  " + renderAccent("zsp utils") + " <operation> [args]\n\n")
+	b.WriteString("  " + renderAccent("zsp check") + " [options] [zapstore.yaml | app.apk]\n\n")
 
-	b.WriteString(renderBold("OPERATIONS") + "\n")
-	writeFlag(&b, "extract-apk <file.apk>", "Extract APK metadata as JSON (stdout)")
+	b.WriteString(renderGreyDark("  Finds and verifies the APK, then reports whether the app is listed, which") + "\n")
+	b.WriteString(renderGreyDark("  proof is active, the published version code, whether SIGN_WITH may publish,") + "\n")
+	b.WriteString(renderGreyDark("  and the next step. Signs, uploads, and publishes nothing.") + "\n\n")
+
+	b.WriteString(renderBold("SOURCE FLAGS") + "\n")
+	writeFlag(&b, "-r <url>", "Source code repository URL")
+	writeFlag(&b, "-s <url>", "Release/download source URL")
+	writeFlag(&b, "--match <pattern>", "Regex pattern to filter APK assets")
+	writeFlag(&b, "--release-filter <pattern>", "Regex pattern to filter source releases")
+	writeFlag(&b, "--prerelease-channel <channel>", "Fetch releases from a prerelease channel")
+	writeFlag(&b, "--channel <channel>", "Release channel to compare against (default: main)")
+	writeFlag(&b, "--apk-hash <hash>", "Select one verified APK when several candidates match")
 	b.WriteString("\n")
 
-	b.WriteString(renderBold("EXAMPLES") + "\n\n")
-
-	b.WriteString(renderGreyDark("  # Extract metadata from an APK") + "\n")
-	b.WriteString("  " + renderAccent("zsp utils extract-apk myapp.apk") + "\n\n")
-
-	b.WriteString(renderBold("FLAGS") + "\n")
+	b.WriteString(renderBold("OTHER FLAGS") + "\n")
+	writeFlag(&b, "--json", "JSON output (default when stdout is not a terminal)")
 	writeFlag(&b, "--verbose", "Debug output")
 	writeFlag(&b, "--no-color", "Disable colored output")
 	writeFlag(&b, "-h, --help", "Show this help")
 	b.WriteString("\n")
 
+	b.WriteString(renderBold("EXAMPLES") + "\n\n")
+	b.WriteString(renderGreyDark("  # Check the app in zapstore.yaml") + "\n")
+	b.WriteString("  " + renderAccent("zsp check") + "\n\n")
+	b.WriteString(renderGreyDark("  # Check a local build") + "\n")
+	b.WriteString("  " + renderAccent("zsp check app-release.apk") + "\n\n")
+
 	b.WriteString(renderBold("EXIT CODES") + "\n")
-	b.WriteString("  " + renderAccent("0") + "   Success\n")
-	b.WriteString("  " + renderAccent("1") + "   Error (source unreachable, no releases, invalid config)\n")
+	b.WriteString("  " + renderAccent("0") + "   Checked (see next_step)\n")
+	b.WriteString("  " + renderAccent("1") + "   Error (invalid APK, source unreachable, relays unreachable)\n")
+	b.WriteString("  " + renderAccent("130") + " Cancelled (Ctrl+C)\n")
 
 	return b.String()
 }
 
 // HandleHelp processes help for a command.
 func HandleHelp(cmd cli.Command, args []string) {
-	// Show command-specific help
+	if cmd == cli.CommandNone && len(args) > 0 {
+		cmd = cli.Command(args[0])
+	}
 	switch cmd {
 	case cli.CommandPublish:
 		fmt.Fprint(os.Stdout, PublishHelp())
-	case cli.CommandUtils:
-		fmt.Fprint(os.Stdout, UtilsHelp())
+	case cli.CommandCheck:
+		fmt.Fprint(os.Stdout, CheckHelp())
 	default:
 		fmt.Fprint(os.Stdout, RootHelp())
 	}

@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 // Command represents the active subcommand.
@@ -15,8 +17,9 @@ type Command string
 const (
 	CommandNone    Command = ""
 	CommandWizard  Command = "wizard"
+	CommandCheck   Command = "check"
 	CommandPublish Command = "publish"
-	CommandUtils   Command = "utils"
+	CommandSkill   Command = "skill"
 )
 
 // GlobalOptions holds flags available at root level and shared across subcommands.
@@ -25,10 +28,11 @@ type GlobalOptions struct {
 	NoColor bool
 	Version bool
 	Help    bool
-	JSON    bool // Machine-readable output for operational invocations.
+	JSON    bool // Machine-readable output: --json, or stdout is not a terminal.
 }
 
-// PublishOptions holds flags specific to the publish subcommand.
+// PublishOptions holds flags for check and publish. Check reads only the
+// source flags.
 type PublishOptions struct {
 	// Source options
 	RepoURL           string
@@ -44,7 +48,7 @@ type PublishOptions struct {
 	Commit string // Git commit hash for reproducible builds
 
 	// Behavior flags
-	Quiet               bool // No prompts or progress output
+	Quiet               bool // No progress output and no preview
 	SkipPreview         bool
 	OverwriteRelease    bool
 	OverwriteAppEvent   bool
@@ -52,15 +56,9 @@ type PublishOptions struct {
 	SkipMetadata        bool
 	SkipAppEvent        bool // Publish only release events (kind 30063/3063), skip kind 32267
 	NoCompress          bool // Preserve original icon and screenshot bytes
-	Check               bool // Run the complete validation pipeline without publishing
 
 	// Server options
 	Port int
-}
-
-// UtilsOptions holds flags specific to the utils subcommand.
-type UtilsOptions struct {
-	Operation string // "extract-apk"
 }
 
 // Options holds all CLI configuration options.
@@ -72,13 +70,12 @@ type Options struct {
 	// Distinct from Global.Help: callers must exit 1 without treating this as a help request.
 	FlagParseError error
 
-	// UnknownSubcommand is the token the user passed when it is not a known command (publish, identity, utils).
+	// UnknownSubcommand is the token the user passed when it is not a known command.
 	// When non-empty, Global.Help is also set; callers should show help and exit 1.
 	UnknownSubcommand string
 
 	Global  GlobalOptions
 	Publish PublishOptions
-	Utils   UtilsOptions
 }
 
 // stringSliceFlag implements flag.Value to accumulate multiple flag values.
@@ -95,24 +92,27 @@ func (s *stringSliceFlag) Set(value string) error {
 
 // ParseCommand parses command-line arguments and returns Options.
 func ParseCommand() *Options {
-	opts := &Options{}
+	opts := parseArgs(os.Args[1:])
+	if opts.Command != CommandWizard && !opts.Global.Help && !opts.Global.Version && !term.IsTerminal(int(os.Stdout.Fd())) {
+		opts.Global.JSON = true
+	}
+	return opts
+}
 
-	args := os.Args[1:]
+func parseArgs(args []string) *Options {
+	opts := &Options{}
 	if len(args) == 0 {
 		opts.Command = CommandWizard
 		return opts
 	}
-	opts.Global.JSON = true
 
 	for len(args) > 0 {
 		switch args[0] {
 		case "-h", "--help", "-help":
-			opts.Global.JSON = false
 			opts.Global.Help = true
 			opts.Args = args[1:]
 			return opts
 		case "-v", "--version", "-version":
-			opts.Global.JSON = false
 			opts.Global.Version = true
 			return opts
 		case "--verbose":
@@ -120,6 +120,9 @@ func ParseCommand() *Options {
 			args = args[1:]
 		case "--no-color":
 			opts.Global.NoColor = true
+			args = args[1:]
+		case "--json":
+			opts.Global.JSON = true
 			args = args[1:]
 		default:
 			goto dispatch
@@ -131,15 +134,18 @@ func ParseCommand() *Options {
 	}
 
 dispatch:
-	first := args[0]
-	// Dispatch to subcommand
-	switch first {
+	switch first := args[0]; first {
+	case "check":
+		opts.Command = CommandCheck
+		parseCommandFlags(opts, args[1:], false)
 	case "publish":
 		opts.Command = CommandPublish
-		parsePublishFlags(opts, args[1:])
-	case "utils":
-		opts.Command = CommandUtils
-		parseUtilsArgs(opts, args[1:])
+		parseCommandFlags(opts, args[1:], true)
+	case "skill":
+		opts.Command = CommandSkill
+		if len(args) > 1 {
+			opts.FlagParseError = fmt.Errorf("skill takes no arguments")
+		}
 	default:
 		opts.UnknownSubcommand = first
 		opts.Args = args
@@ -150,93 +156,55 @@ dispatch:
 	return opts
 }
 
-// parsePublishFlags parses flags for the publish subcommand.
-func parsePublishFlags(opts *Options, args []string) {
-	fs := flag.NewFlagSet("publish", flag.ContinueOnError)
+// parseCommandFlags parses flags for check, or for publish when publish is
+// true.
+func parseCommandFlags(opts *Options, args []string, publish bool) {
+	fs := flag.NewFlagSet(string(opts.Command), flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-
-	var metadataFlags stringSliceFlag
 
 	fs.StringVar(&opts.Publish.RepoURL, "r", "", "Repository URL (GitHub/GitLab/F-Droid)")
 	fs.StringVar(&opts.Publish.ReleaseSource, "s", "", "Release source URL (defaults to -r)")
-	fs.Var(&metadataFlags, "m", "Fetch metadata from source (repeatable: -m github -m fdroid)")
 	fs.StringVar(&opts.Publish.Match, "match", "", "Regex pattern to filter APK assets")
 	fs.StringVar(&opts.Publish.ReleaseFilter, "release-filter", "", "Regex pattern to filter releases")
-	fs.StringVar(&opts.Publish.APKHash, "apk-hash", "", "Select a verified APK by SHA-256")
+	fs.StringVar(&opts.Publish.APKHash, "apk-hash", "", "Select a verified APK by hash")
 	fs.StringVar(&opts.Publish.Channel, "channel", "", "Release channel")
 	fs.StringVar(&opts.Publish.PrereleaseChannel, "prerelease-channel", "", "Prerelease source channel")
-	fs.StringVar(&opts.Publish.Commit, "commit", "", "Git commit hash for reproducible builds")
-	fs.BoolVar(&opts.Publish.Quiet, "quiet", false, "No prompts, no spinners, auto-yes to all confirmations")
 	fs.BoolVar(&opts.Global.Verbose, "verbose", opts.Global.Verbose, "Debug output")
 	fs.BoolVar(&opts.Global.NoColor, "no-color", opts.Global.NoColor, "Disable colored output")
-	fs.BoolVar(&opts.Publish.SkipPreview, "skip-preview", false, "Skip the browser preview prompt")
-	fs.IntVar(&opts.Publish.Port, "port", 0, "Custom port for browser preview")
-	fs.BoolVar(&opts.Publish.OverwriteRelease, "overwrite-release", false, "Bypass cache and re-publish even if release unchanged")
-	fs.BoolVar(&opts.Publish.OverwriteAppEvent, "overwrite-app-event", false, "Publish kind 32267 even if the application event is unchanged")
-	fs.BoolVar(&opts.Publish.AppCreatedAtRelease, "app-created-at-release", false, "Use release date for kind 32267 created_at (indexer compatibility)")
-	fs.BoolVar(&opts.Publish.SkipMetadata, "skip-metadata", false, "Skip fetching metadata from external sources")
-	fs.BoolVar(&opts.Publish.SkipAppEvent, "skip-app-event", false, "Publish only release events, skip app metadata (kind 32267)")
-	fs.BoolVar(&opts.Publish.NoCompress, "no-compress", false, "Preserve original icon and screenshot bytes")
-	fs.BoolVar(&opts.Publish.Check, "check", false, "Verify config fetches arm64-v8a APK (exit 0=success)")
-	// Help flag
+	fs.BoolVar(&opts.Global.JSON, "json", opts.Global.JSON, "JSON output")
+	valued := map[string]bool{
+		"-r": true, "-s": true, "--match": true, "--release-filter": true, "--apk-hash": true, "--channel": true, "--prerelease-channel": true,
+	}
+
+	var metadataFlags stringSliceFlag
+	if publish {
+		fs.Var(&metadataFlags, "m", "Fetch metadata from source (repeatable: -m github -m fdroid)")
+		fs.StringVar(&opts.Publish.Commit, "commit", "", "Git commit hash for reproducible builds")
+		fs.BoolVar(&opts.Publish.Quiet, "quiet", false, "No progress output and no preview")
+		fs.BoolVar(&opts.Publish.Quiet, "q", false, "No progress output and no preview")
+		fs.BoolVar(&opts.Publish.SkipPreview, "skip-preview", false, "Skip the browser preview")
+		fs.IntVar(&opts.Publish.Port, "port", 0, "Custom port for browser preview")
+		fs.BoolVar(&opts.Publish.OverwriteRelease, "overwrite-release", false, "Allow an equal version code")
+		fs.BoolVar(&opts.Publish.OverwriteAppEvent, "overwrite-app-event", false, "Publish kind 32267 even if the application event is unchanged")
+		fs.BoolVar(&opts.Publish.AppCreatedAtRelease, "app-created-at-release", false, "Use release date for kind 32267 created_at")
+		fs.BoolVar(&opts.Publish.SkipMetadata, "skip-metadata", false, "Skip fetching metadata from external sources")
+		fs.BoolVar(&opts.Publish.SkipAppEvent, "skip-app-event", false, "Publish only release events, skip app metadata (kind 32267)")
+		fs.BoolVar(&opts.Publish.NoCompress, "no-compress", false, "Preserve original icon and screenshot bytes")
+		valued["-m"], valued["--commit"], valued["--port"] = true, true, true
+	}
 	var showHelp bool
 	fs.BoolVar(&showHelp, "h", false, "Show help")
 	fs.BoolVar(&showHelp, "help", false, "Show help")
 
-	// Reorder args to put flags before positional arguments
-	reorderedArgs := reorderArgsForFlagSet(args, map[string]bool{
-		"-r": true, "-s": true, "-m": true, "--match": true, "--release-filter": true, "--apk-hash": true, "--channel": true, "--prerelease-channel": true, "--commit": true, "--port": true,
-	})
-
-	if err := fs.Parse(reorderedArgs); err != nil {
+	if err := fs.Parse(reorderArgsForFlagSet(args, valued)); err != nil {
 		opts.FlagParseError = err
 		return
 	}
-
 	if showHelp {
 		opts.Global.Help = true
 		return
 	}
-
 	opts.Publish.Metadata = metadataFlags
-	opts.Args = fs.Args()
-}
-
-// parseUtilsArgs parses positional args for the utils subcommand.
-// The first positional arg is the operation: "extract-apk".
-func parseUtilsArgs(opts *Options, args []string) {
-	// Check for help
-	for _, a := range args {
-		if a == "-h" || a == "--help" || a == "-help" {
-			opts.Global.Help = true
-			return
-		}
-	}
-
-	if len(args) == 0 {
-		opts.FlagParseError = fmt.Errorf("utils operation is required")
-		return
-	}
-
-	opts.Utils.Operation = args[0]
-	if opts.Utils.Operation != "extract-apk" {
-		opts.FlagParseError = fmt.Errorf("unknown utils operation %q", opts.Utils.Operation)
-		return
-	}
-	remaining := args[1:]
-
-	// Parse flags for the operation
-	fs := flag.NewFlagSet("utils "+opts.Utils.Operation, flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	fs.BoolVar(&opts.Global.Verbose, "verbose", opts.Global.Verbose, "Debug output")
-	fs.BoolVar(&opts.Global.NoColor, "no-color", opts.Global.NoColor, "Disable colored output")
-	// Reorder so flags come before positional args
-	reorderedArgs := reorderArgsForFlagSet(remaining, map[string]bool{})
-	if err := fs.Parse(reorderedArgs); err != nil {
-		opts.FlagParseError = err
-		return
-	}
-
 	opts.Args = fs.Args()
 }
 
@@ -262,7 +230,7 @@ func reorderArgsForFlagSet(args []string, valuedFlags map[string]bool) []string 
 }
 
 // ShouldShowSpinners returns true if spinners/progress should be shown.
-// False when --quiet or --json is active (both require clean stderr).
+// False when --quiet or JSON output is active (both require clean stderr).
 func (o *Options) ShouldShowSpinners() bool {
 	return !o.Publish.Quiet && !o.Global.JSON
 }

@@ -50,14 +50,53 @@ func TestParseCommand_OperationalCallsUseJSONOnInvalidArguments(t *testing.T) {
 func TestParseCommand_AcceptsRootFlags(t *testing.T) {
 	oldArgs := os.Args
 	t.Cleanup(func() { os.Args = oldArgs })
-	os.Args = []string{"zsp", "--no-color", "--verbose", "publish", "--check", "app.apk"}
+	os.Args = []string{"zsp", "--no-color", "--verbose", "check", "app.apk"}
 
 	opts := ParseCommand()
 	if opts.FlagParseError != nil {
 		t.Fatal(opts.FlagParseError)
 	}
-	if opts.Command != CommandPublish || !opts.Global.JSON || !opts.Global.NoColor || !opts.Global.Verbose || !opts.Publish.Check {
+	if opts.Command != CommandCheck || !opts.Global.JSON || !opts.Global.NoColor || !opts.Global.Verbose || len(opts.Args) != 1 || opts.Args[0] != "app.apk" {
 		t.Fatalf("unexpected options: %+v", opts)
+	}
+}
+
+func TestParseArgs_JSONOnlyWhenAskedOnATerminal(t *testing.T) {
+	if opts := parseArgs([]string{"check"}); opts.Global.JSON {
+		t.Fatal("check without --json must not force JSON; ParseCommand adds it when stdout is not a terminal")
+	}
+	for _, args := range [][]string{{"--json", "check"}, {"check", "--json"}, {"publish", "--json", "zapstore.yaml"}} {
+		if opts := parseArgs(args); !opts.Global.JSON || opts.FlagParseError != nil {
+			t.Fatalf("parseArgs(%v) = %+v, want JSON", args, opts)
+		}
+	}
+}
+
+func TestParseArgs_QuietShortFlag(t *testing.T) {
+	opts := parseArgs([]string{"publish", "-q"})
+	if opts.FlagParseError != nil || !opts.Publish.Quiet {
+		t.Fatalf("parseArgs(publish -q) = %+v", opts)
+	}
+}
+
+func TestParseArgs_CheckRejectsPublishOnlyFlags(t *testing.T) {
+	for _, flag := range []string{"-q", "--skip-preview", "--overwrite-release", "-m"} {
+		if opts := parseArgs([]string{"check", flag}); opts.FlagParseError == nil {
+			t.Errorf("check accepted %s", flag)
+		}
+	}
+	opts := parseArgs([]string{"check", "--apk-hash", "abc", "-r", "github.com/example/app", "zapstore.yaml"})
+	if opts.FlagParseError != nil || opts.Publish.APKHash != "abc" || opts.Publish.RepoURL != "github.com/example/app" {
+		t.Fatalf("check source flags = %+v", opts)
+	}
+}
+
+func TestParseArgs_RemovedCommands(t *testing.T) {
+	if opts := parseArgs([]string{"utils", "extract-apk", "app.apk"}); opts.UnknownSubcommand != "utils" {
+		t.Fatalf("utils = %+v, want unknown", opts)
+	}
+	if opts := parseArgs([]string{"publish", "--check"}); opts.FlagParseError == nil {
+		t.Fatal("publish --check must be rejected")
 	}
 }
 

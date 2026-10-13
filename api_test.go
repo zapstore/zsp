@@ -35,6 +35,7 @@ var (
 	_ func(string) (Config, error)                                                       = LoadConfig
 	_ func(context.Context, FetchConfig, FetchOptions) ([]*APK, error)                   = Fetch
 	_ func(context.Context, PublishConfig, *APK, PublishOptions) (*PublishResult, error) = Publish
+	_ func(context.Context, PublishConfig, *APK, CheckOptions) (*CheckResult, error)     = Check
 )
 
 func TestPublicStructFieldsMatchContract(t *testing.T) {
@@ -48,9 +49,12 @@ func TestPublicStructFieldsMatchContract(t *testing.T) {
 		{ReleaseSource{}, []string{"URL", "LocalPath", "Type", "AssetURL", "VersionExtractor", "AssetExtractor"}},
 		{Extractor{}, []string{"URL", "Selector", "Attribute", "Path", "Header", "Match"}},
 		{FetchOptions{}, []string{"OnProgress", "SkipHTTPCache"}},
-		{APK{}, []string{"Hash", "Filename", "SourceURL", "Size", "AppID", "VersionName", "VersionCode", "MinSDK", "TargetSDK", "Name", "CertificateHash", "LineageHashes", "Architectures", "Permissions"}},
+		{APK{}, []string{"Hash", "Filename", "SourceURL", "Size", "AppID", "VersionName", "VersionCode", "MinSDK", "TargetSDK", "Name", "CertificateHash", "LineageHashes", "Architectures"}},
 		{Progress{}, []string{"Operation", "Phase", "Target", "Completed", "Total"}},
 		{PublishOptions{}, []string{"BlossomURL", "Relays", "Channel", "Commit", "SkipAppEvent", "SkipMediaCompression", "SkipProofCheck", "OverwriteRelease", "OverwriteAppEvent", "AppCreatedAtRelease", "Preview", "BrowserPort", "OnProgress", "ProofSigner"}},
+		{CheckOptions{}, []string{"Relays", "Channel"}},
+		{CheckResult{}, []string{"AppID", "CertificateHash", "Listed", "Proof", "PublishedVersionCode", "Signer", "Authorized", "Warnings"}},
+		{ProofStatus{}, []string{"Owner", "Delegate", "ExpiresAt"}},
 		{EventIDs{}, []string{"Application", "Release", "Assets"}},
 		{PublishResult{}, []string{"ID", "Status", "AppID", "CertificateHash", "LineageHashes", "Events", "Uploads", "Relays", "Warnings"}},
 		{BlobResult{}, []string{"URL", "Hash", "Size", "Type", "Uploaded", "Accepted", "Message"}},

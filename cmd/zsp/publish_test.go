@@ -123,16 +123,33 @@ func TestCLIErrorDocumentKeepsPartialResultAtTopLevel(t *testing.T) {
 		OK:        false,
 		Operation: "publish",
 		Error:     cliErrorBody{Code: "temporary_failure"},
-		Result:    &zsp.PublishResult{Status: "partial"},
+		Result:    &publishResultBody{Status: "partial"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	document := string(encoded)
-	if !strings.Contains(document, `"result":{"id":"","status":"partial"`) {
-		t.Fatalf("partial result is not top-level: %s", document)
+	if !strings.Contains(document, `"result":{"status":"partial"}`) {
+		t.Fatalf("partial result is not top-level and minimal: %s", document)
 	}
-	if strings.Contains(document, `"publication"`) {
-		t.Fatalf("partial result retained legacy nesting: %s", document)
+	if strings.Contains(document, `"next_steps"`) || !strings.Contains(document, `"next_step":null`) {
+		t.Fatalf("error must carry one next_step: %s", document)
+	}
+}
+
+func TestLoadPublicConfigCheckAcceptsAPK(t *testing.T) {
+	apk := filepath.Join(t.TempDir(), "app-release.apk")
+	if err := os.WriteFile(apk, []byte("apk"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := loadPublicConfig(&cli.Options{Command: cli.CommandCheck, Args: []string{apk}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Fetch.ReleaseSource == nil || config.Fetch.ReleaseSource.LocalPath != apk {
+		t.Fatalf("ReleaseSource = %#v, want %s", config.Fetch.ReleaseSource, apk)
+	}
+	if _, err := loadPublicConfig(&cli.Options{Command: cli.CommandCheck, Args: []string{apk + ".missing.apk"}}); !errors.Is(err, zsp.ErrInvalidConfig) {
+		t.Fatalf("missing APK error = %v, want ErrInvalidConfig", err)
 	}
 }
