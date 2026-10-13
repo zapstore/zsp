@@ -15,6 +15,10 @@ func PromptField(title, description string, secret, required bool) (string, erro
 // PromptFieldDefault collects a terminal value with a prefilled default.
 // Clearing a prefilled optional value removes it from the caller's config.
 func PromptFieldDefault(title, description, defaultValue string, secret, required bool) (string, error) {
+	return promptField(title, description, defaultValue, secret, required, false)
+}
+
+func promptField(title, description, defaultValue string, secret, required, back bool) (string, error) {
 	value := defaultValue
 	input := huh.NewInput().
 		Title(title).
@@ -31,7 +35,7 @@ func PromptFieldDefault(title, description, defaultValue string, secret, require
 			return nil
 		})
 	}
-	if err := huh.NewForm(huh.NewGroup(input)).Run(); err != nil {
+	if err := runForm(huh.NewForm(huh.NewGroup(input)), back); err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(value), nil
@@ -46,6 +50,10 @@ func PromptPath(title, description string, required bool) (string, error) {
 // PromptPathDefault collects a filesystem path with Tab completion and a
 // prefilled default directory or file.
 func PromptPathDefault(title, description, defaultValue string, required bool) (string, error) {
+	return promptPath(title, description, defaultValue, required, false)
+}
+
+func promptPath(title, description, defaultValue string, required, back bool) (string, error) {
 	value := defaultValue
 	input := huh.NewInput().
 		Title(title).
@@ -62,7 +70,7 @@ func PromptPathDefault(title, description, defaultValue string, required bool) (
 			return nil
 		})
 	}
-	if err := huh.NewForm(huh.NewGroup(input)).WithKeyMap(pathInputKeyMap()).Run(); err != nil {
+	if err := runForm(huh.NewForm(huh.NewGroup(input)).WithKeyMap(pathInputKeyMap()), back); err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(value), nil

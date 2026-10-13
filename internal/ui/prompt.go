@@ -125,20 +125,26 @@ func PromptDefault(message, defaultValue string) (string, error) {
 	return input, nil
 }
 
-// Confirm asks for yes/no confirmation.
+// Confirm asks for yes/no confirmation. Both options are always visible.
 func Confirm(message string, defaultYes bool) (bool, error) {
+	return confirm(message, "", defaultYes, false)
+}
+
+func confirm(title, description string, defaultYes, back bool) (bool, error) {
 	value := defaultYes
 	input := huh.NewSelect[bool]().
-		Title(message).
+		Title(title).
 		Options(
-			huh.NewOption("No", false),
 			huh.NewOption("Yes", true),
+			huh.NewOption("No", false),
 		).
-		Height(3).
 		Value(&value)
+	if description != "" {
+		input = input.Description(description)
+	}
 	keymap := huh.NewDefaultKeyMap()
 	keymap.Select.Filter.SetEnabled(false)
-	if err := huh.NewForm(huh.NewGroup(input)).WithKeyMap(keymap).Run(); err != nil {
+	if err := runForm(huh.NewForm(huh.NewGroup(input)).WithKeyMap(keymap), back); err != nil {
 		return false, err
 	}
 	return value, nil
