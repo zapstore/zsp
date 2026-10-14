@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+
+	"github.com/zapstore/zsp/internal/config"
 )
 
 // TestGiteaDownloadSendsTokenHeader confirms Gitea's Download method routes
@@ -36,6 +38,31 @@ func TestGiteaDownloadSendsTokenHeader(t *testing.T) {
 	}
 	if string(got) != string(payload) {
 		t.Fatalf("downloaded %q, want %q", got, payload)
+	}
+}
+
+func TestGiteaFetchUsesMaxReleases(t *testing.T) {
+	var gotLimit string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotLimit = r.URL.Query().Get("limit")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"tag_name":"v1.0.0","name":"1.0.0","draft":false,"prerelease":false,"assets":[{"name":"app.apk","browser_download_url":"https://example.com/app.apk","size":1}]}]`))
+	}))
+	t.Cleanup(srv.Close)
+
+	gitea := &Gitea{
+		cfg:         &config.Config{},
+		baseURL:     srv.URL,
+		owner:       "owner",
+		repo:        "repo",
+		client:      srv.Client(),
+		maxReleases: 25,
+	}
+	if _, err := gitea.FetchLatestRelease(t.Context()); err != nil {
+		t.Fatalf("FetchLatestRelease() = %v", err)
+	}
+	if gotLimit != "25" {
+		t.Fatalf("limit = %q, want 25", gotLimit)
 	}
 }
 

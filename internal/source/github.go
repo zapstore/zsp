@@ -37,6 +37,7 @@ type GitHub struct {
 	apiBase            string
 	SkipHTTPCache      bool // Set to true to bypass ETag checks
 	IncludePreReleases bool // Set to true to include pre-releases (--pre-release)
+	maxReleases        int
 	pendingCache       *githubCache
 }
 
@@ -235,12 +236,13 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	return g.fetchLatestFromList(ctx)
 }
 
-// fetchLatestFromList scans up to maxReleasesToCheck releases and returns the first one
+// fetchLatestFromList scans the newest releases and returns the first one
 // that is not a draft, passes the pre-release filter, and contains valid APKs.
 // Used as a fallback when /releases/latest does not itself contain a valid APK
 // (e.g. repos that publish separate desktop and mobile releases).
 func (g *GitHub) fetchLatestFromList(ctx context.Context) (*Release, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", g.apiURL("/repos/%s/%s/releases?per_page=%d", g.owner, g.repo, maxReleasesToCheck), nil)
+	limit := releaseScanLimit(g.maxReleases)
+	req, err := http.NewRequestWithContext(ctx, "GET", g.apiURL("/repos/%s/%s/releases?per_page=%d", g.owner, g.repo, limit), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -288,7 +290,7 @@ func (g *GitHub) fetchLatestFromList(ctx context.Context) (*Release, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("no releases with valid APKs found in the last %d releases for %s/%s", maxReleasesToCheck, g.owner, g.repo)
+	return nil, fmt.Errorf("no releases with valid APKs found in the last %d releases for %s/%s", limit, g.owner, g.repo)
 }
 
 // releaseFingerprint hashes the release fields zsp consumes, so an ETag that

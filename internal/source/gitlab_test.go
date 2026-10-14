@@ -31,6 +31,33 @@ func TestNewGitLabNestedProjectPath(t *testing.T) {
 	}
 }
 
+func TestGitLabFetchUsesMaxReleases(t *testing.T) {
+	var gotPage string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v4/projects/app/releases", func(w http.ResponseWriter, r *http.Request) {
+		gotPage = r.URL.Query().Get("per_page")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"tag_name":"v1.0.0","assets":{"links":[{"name":"app.apk","url":"https://example.com/app.apk"}]}}]`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	gitlab := &GitLab{
+		cfg:              &config.Config{},
+		baseURL:          srv.URL,
+		projectID:        "app",
+		numericProjectID: 1,
+		client:           srv.Client(),
+		maxReleases:      25,
+	}
+	if _, err := gitlab.FetchLatestRelease(t.Context()); err != nil {
+		t.Fatalf("FetchLatestRelease() = %v", err)
+	}
+	if gotPage != "25" {
+		t.Fatalf("per_page = %q, want 25", gotPage)
+	}
+}
+
 func TestNewWithOptionsPassesPreReleaseSettingToGitLab(t *testing.T) {
 	source, err := NewWithOptions(&config.Config{
 		Repository: "https://gitlab.example.com/group/project",

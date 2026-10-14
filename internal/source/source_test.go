@@ -258,6 +258,85 @@ func TestNewSourceFromConfig(t *testing.T) {
 	}
 }
 
+func TestReleasesToCheck(t *testing.T) {
+	tests := []struct {
+		name    string
+		n       int
+		want    int
+		wantErr bool
+	}{
+		{name: "default", want: defaultMaxReleases},
+		{name: "one", n: 1, want: 1},
+		{name: "page", n: maxReleasesPage, want: maxReleasesPage},
+		{name: "negative", n: -1, wantErr: true},
+		{name: "above page", n: maxReleasesPage + 1, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := releasesToCheck(tt.n)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("releasesToCheck() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("releasesToCheck(%d) = %v", tt.n, err)
+			}
+			if got != tt.want {
+				t.Errorf("releasesToCheck(%d) = %d, want %d", tt.n, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewWithOptionsSetsMaxReleases(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *config.Config
+	}{
+		{name: "github", cfg: &config.Config{Repository: "https://github.com/example/app"}},
+		{name: "gitlab", cfg: &config.Config{Repository: "https://gitlab.com/example/app"}},
+		{name: "gitea", cfg: &config.Config{Repository: "https://codeberg.org/example/app"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			created, err := NewWithOptions(tt.cfg, Options{MaxReleases: 25})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := forgeMaxReleases(t, created); got != 25 {
+				t.Fatalf("maxReleases = %d, want 25", got)
+			}
+			created, err = NewWithOptions(tt.cfg, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := forgeMaxReleases(t, created); got != defaultMaxReleases {
+				t.Fatalf("default maxReleases = %d, want %d", got, defaultMaxReleases)
+			}
+		})
+	}
+	if _, err := NewWithOptions(tests[0].cfg, Options{MaxReleases: 101}); err == nil {
+		t.Fatal("NewWithOptions() error = nil, want max releases rejected")
+	}
+}
+
+func forgeMaxReleases(t *testing.T, created Source) int {
+	t.Helper()
+	switch source := created.(type) {
+	case *GitHub:
+		return source.maxReleases
+	case *GitLab:
+		return source.maxReleases
+	case *Gitea:
+		return source.maxReleases
+	default:
+		t.Fatalf("source = %T, want a forge client", created)
+		return 0
+	}
+}
+
 // TestNewWithOptions tests source creation with options
 func TestNewWithOptions(t *testing.T) {
 	tests := []struct {

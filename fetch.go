@@ -30,6 +30,7 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 	src, err := source.NewWithOptions(internal, source.Options{
 		IncludePreReleases: config.PrereleaseChannel != "",
 		SkipHTTPCache:      options.SkipHTTPCache,
+		MaxReleases:        options.MaxReleases,
 	})
 	if err != nil {
 		return nil, wrapOperationError(ErrInvalidConfig, err, false, "create source"+causeDetail(err))

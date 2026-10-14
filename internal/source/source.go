@@ -275,9 +275,13 @@ const MaxJSONResponseSize int64 = 10 * 1024 * 1024
 // via DownloadHTTP) to avoid excessive bandwidth or disk usage.
 const MaxDownloadSize int64 = 600 * 1024 * 1024 // 600MB
 
-// maxReleasesToCheck is the maximum number of releases to iterate through
-// when looking for one with valid APKs (some repos publish desktop and mobile separately).
-const maxReleasesToCheck = 10
+// defaultMaxReleases is how many recent releases to scan for a usable APK
+// when the caller does not set a limit. Some repos publish desktop and
+// mobile separately.
+const defaultMaxReleases = 10
+
+// maxReleasesPage is one GitHub or GitLab page. Gitea may return fewer.
+const maxReleasesPage = 100
 
 // Asset represents a downloadable APK asset.
 type Asset struct {
@@ -334,6 +338,30 @@ type Options struct {
 	// SkipHTTPCache bypasses ETag/Last-Modified/Content-Length checks and does
 	// not persist a new HTTP cache entry.
 	SkipHTTPCache bool
+
+	// MaxReleases is how many recent releases to scan for a usable APK.
+	// Zero uses defaultMaxReleases. Values outside 1..maxReleasesPage are rejected.
+	MaxReleases int
+}
+
+// releasesToCheck resolves the scan size. Zero means the default.
+func releasesToCheck(n int) (int, error) {
+	if n == 0 {
+		return defaultMaxReleases, nil
+	}
+	if n < 1 || n > maxReleasesPage {
+		return 0, fmt.Errorf("max releases must be from 1 to %d", maxReleasesPage)
+	}
+	return n, nil
+}
+
+// releaseScanLimit is the scan size stored on a forge client. Zero means the
+// default, for clients constructed without NewWithOptions.
+func releaseScanLimit(n int) int {
+	if n <= 0 {
+		return defaultMaxReleases
+	}
+	return n
 }
 
 // ErrNotModified is returned when a cached ETag shows the release is unchanged.
@@ -374,6 +402,10 @@ func New(cfg *config.Config) (Source, error) {
 
 // NewWithOptions creates a new source with options.
 func NewWithOptions(cfg *config.Config, opts Options) (Source, error) {
+	limit, err := releasesToCheck(opts.MaxReleases)
+	if err != nil {
+		return nil, err
+	}
 	sourceType := cfg.GetSourceType()
 
 	switch sourceType {
@@ -390,6 +422,7 @@ func NewWithOptions(cfg *config.Config, opts Options) (Source, error) {
 		}
 		gh.IncludePreReleases = opts.IncludePreReleases
 		gh.SkipHTTPCache = opts.SkipHTTPCache
+		gh.maxReleases = limit
 		return gh, nil
 	case config.SourceGitLab:
 		gl, err := NewGitLab(cfg)
@@ -397,6 +430,7 @@ func NewWithOptions(cfg *config.Config, opts Options) (Source, error) {
 			return nil, err
 		}
 		gl.IncludePreReleases = opts.IncludePreReleases
+		gl.maxReleases = limit
 		return gl, nil
 	case config.SourceGitea:
 		gt, err := NewGitea(cfg)
@@ -404,6 +438,7 @@ func NewWithOptions(cfg *config.Config, opts Options) (Source, error) {
 			return nil, err
 		}
 		gt.IncludePreReleases = opts.IncludePreReleases
+		gt.maxReleases = limit
 		return gt, nil
 	case config.SourceFDroid:
 		fd, err := NewFDroid(cfg)

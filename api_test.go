@@ -48,7 +48,7 @@ func TestPublicStructFieldsMatchContract(t *testing.T) {
 		{PublishConfig{}, []string{"Name", "Summary", "Description", "Tags", "License", "Website", "Icon", "Images", "ReleaseNotes", "SupportedNIPs", "MinAllowedVersion", "MinAllowedVersionCode", "MetadataSources", "Channel"}},
 		{ReleaseSource{}, []string{"URL", "LocalPath", "Type", "AssetURL", "VersionExtractor", "AssetExtractor"}},
 		{Extractor{}, []string{"URL", "Selector", "Attribute", "Path", "Header", "Match"}},
-		{FetchOptions{}, []string{"OnProgress", "SkipHTTPCache"}},
+		{FetchOptions{}, []string{"OnProgress", "SkipHTTPCache", "MaxReleases"}},
 		{APK{}, []string{"Hash", "Filename", "SourceURL", "Size", "AppID", "VersionName", "VersionCode", "MinSDK", "TargetSDK", "Name", "CertificateHash", "LineageHashes", "Architectures"}},
 		{Progress{}, []string{"Operation", "Phase", "Target", "Completed", "Total"}},
 		{PublishOptions{}, []string{"BlossomURL", "Relays", "Channel", "Commit", "SkipAppEvent", "SkipMediaCompression", "SkipProofCheck", "OverwriteRelease", "OverwriteAppEvent", "AppCreatedAtRelease", "Preview", "BrowserPort", "OnProgress", "ProofSigner"}},
@@ -383,6 +383,19 @@ func TestFetchRejectsRelativeDirectLocalSource(t *testing.T) {
 	}, FetchOptions{})
 	if !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("Fetch error = %v, want ErrInvalidConfig", err)
+	}
+}
+
+func TestFetchRejectsMaxReleasesOutOfRange(t *testing.T) {
+	config := FetchConfig{Repository: "https://github.com/example/app"}
+	for _, n := range []int{-1, 101} {
+		_, err := Fetch(t.Context(), config, FetchOptions{MaxReleases: n})
+		if !errors.Is(err, ErrInvalidConfig) {
+			t.Errorf("MaxReleases %d error = %v, want ErrInvalidConfig", n, err)
+		}
+		if err == nil || !strings.Contains(err.Error(), "1 to 100") {
+			t.Errorf("MaxReleases %d error = %v, want the allowed range", n, err)
+		}
 	}
 }
 

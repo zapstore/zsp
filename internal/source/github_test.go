@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/zapstore/zsp/internal/config"
@@ -236,6 +237,63 @@ func TestGitHubFetchLatestReleaseIgnoresETagOnlyChanges(t *testing.T) {
 	}
 	if len(ifNone) != 3 || ifNone[0] != "" || ifNone[1] != `"rel-1"` || ifNone[2] != `"rel-2"` {
 		t.Fatalf("If-None-Match headers = %v, want [\"\" %q %q]", ifNone, `"rel-1"`, `"rel-2"`)
+	}
+}
+
+func TestGitHubListHonorsMaxReleases(t *testing.T) {
+	const apkRelease = `[{"tag_name":"v1.0.0","name":"1.0.0","draft":false,"prerelease":false,"assets":[{"name":"app.apk","browser_download_url":"https://example.com/app.apk","size":1}]}]`
+	const desktopRelease = `[{"tag_name":"v9.0.0","name":"desktop","draft":false,"prerelease":false,"assets":[{"name":"app.dmg","browser_download_url":"https://example.com/app.dmg"}]}]`
+
+	tests := []struct {
+		name      string
+		limit     int
+		body      string
+		wantPage  string
+		wantError string
+	}{
+		{name: "default", wantPage: "10", body: apkRelease},
+		{name: "override", limit: 25, wantPage: "25", body: apkRelease},
+		{name: "error names the scan size", limit: 25, wantPage: "25", body: desktopRelease, wantError: "last 25 releases"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotPage string
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if strings.HasSuffix(request.URL.Path, "/releases/latest") {
+					_, _ = writer.Write([]byte(`{"tag_name":"v9.0.0","draft":false,"assets":[{"name":"app.dmg","browser_download_url":"https://example.com/app.dmg"}]}`))
+					return
+				}
+				gotPage = request.URL.Query().Get("per_page")
+				_, _ = writer.Write([]byte(tt.body))
+			}))
+			t.Cleanup(server.Close)
+
+			github := &GitHub{
+				cfg:         &config.Config{},
+				owner:       "owner",
+				repo:        "repo",
+				client:      server.Client(),
+				cacheDir:    t.TempDir(),
+				apiBase:     server.URL,
+				maxReleases: tt.limit,
+			}
+			release, err := github.FetchLatestRelease(t.Context())
+			if gotPage != tt.wantPage {
+				t.Fatalf("per_page = %q, want %q", gotPage, tt.wantPage)
+			}
+			if tt.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+					t.Fatalf("FetchLatestRelease() = %v, want %q", err, tt.wantError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("FetchLatestRelease() = %v", err)
+			}
+			if release.Version != "1.0.0" {
+				t.Fatalf("version = %q, want 1.0.0", release.Version)
+			}
+		})
 	}
 }
 

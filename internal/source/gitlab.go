@@ -48,6 +48,7 @@ type GitLab struct {
 	numericProjectID   int    // GitLab numeric project id (needed for /-/project/:id/uploads/ URLs)
 	client             *http.Client
 	IncludePreReleases bool
+	maxReleases        int
 }
 
 // NewGitLab creates a new GitLab source.
@@ -105,8 +106,8 @@ type gitlabAssetLink struct {
 }
 
 // FetchLatestRelease fetches the latest release from GitLab that contains valid APKs.
-// Iterates through up to 10 releases to find one with APK assets (for repos that
-// publish desktop and mobile releases separately).
+// Iterates through the newest releases to find one with APK assets (for repos that
+// publish desktop and mobile releases separately). The scan size defaults to 10.
 // Upcoming releases are always skipped. Pre-release tags (v1.2.3-rc.1, v1.2.0-alpha)
 // are skipped unless IncludePreReleases is set. GitLab has no prerelease flag;
 // the tag is the marker.
@@ -118,7 +119,8 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 
 	// GitLab API: GET /projects/:id/releases
 	// Returns releases sorted by released_at descending
-	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/releases?per_page=%d", g.baseURL, g.projectID, maxReleasesToCheck)
+	limit := releaseScanLimit(g.maxReleases)
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/releases?per_page=%d", g.baseURL, g.projectID, limit)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 	if err != nil {
@@ -167,7 +169,7 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("no releases with valid APKs found in the last %d releases", maxReleasesToCheck)
+	return nil, fmt.Errorf("no releases with valid APKs found in the last %d releases", limit)
 }
 
 // ensureNumericProjectID loads the project's numeric id from the GitLab API once.

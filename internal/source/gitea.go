@@ -21,6 +21,7 @@ type Gitea struct {
 	token              string
 	client             *http.Client
 	IncludePreReleases bool // Set to true to include pre-releases (--pre-release)
+	maxReleases        int
 }
 
 // NewGitea creates a new Gitea source.
@@ -76,8 +77,8 @@ type giteaAsset struct {
 }
 
 // FetchLatestRelease fetches the latest release from a Gitea-compatible forge that contains valid APKs.
-// Iterates through up to 10 releases to find one with APK assets (for repos that
-// publish desktop and mobile releases separately).
+// Iterates through the newest releases to find one with APK assets (for repos that
+// publish desktop and mobile releases separately). The scan size defaults to 10.
 func (g *Gitea) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	// Fetch multiple releases to find one with valid APKs
 	return g.fetchLatestFromList(ctx)
@@ -85,7 +86,8 @@ func (g *Gitea) FetchLatestRelease(ctx context.Context) (*Release, error) {
 
 // fetchLatestFromList fetches releases and returns the first one with valid APKs.
 func (g *Gitea) fetchLatestFromList(ctx context.Context) (*Release, error) {
-	apiURL := fmt.Sprintf("%s/api/v1/repos/%s/%s/releases?limit=%d", g.baseURL, g.owner, g.repo, maxReleasesToCheck)
+	limit := releaseScanLimit(g.maxReleases)
+	apiURL := fmt.Sprintf("%s/api/v1/repos/%s/%s/releases?limit=%d", g.baseURL, g.owner, g.repo, limit)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 	if err != nil {
@@ -135,7 +137,7 @@ func (g *Gitea) fetchLatestFromList(ctx context.Context) (*Release, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("no releases with valid APKs found in the last %d releases for %s/%s", maxReleasesToCheck, g.owner, g.repo)
+	return nil, fmt.Errorf("no releases with valid APKs found in the last %d releases for %s/%s", limit, g.owner, g.repo)
 }
 
 // convertRelease converts a Gitea release to our Release type.
