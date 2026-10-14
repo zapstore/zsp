@@ -3,19 +3,24 @@ package source
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 
 	"github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/internal/netpolicy"
 )
 
 func TestDecodeJSONResponseRejectsOversizedBody(t *testing.T) {
@@ -31,82 +36,199 @@ func TestDecodeJSONResponseRejectsOversizedBody(t *testing.T) {
 	}
 }
 
-func TestDoWithTorFallback(t *testing.T) {
+func torTransport(t *testing.T, status int, calls *int, seen *http.Request) *torFallback {
+	t.Helper()
+	return &torFallback{newTransport: func() (http.RoundTripper, error) {
+		return roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			*calls++
+			if seen != nil {
+				*seen = *req
+			}
+			return testResponse(status, "ok"), nil
+		}), nil
+	}}
+}
+
+func TestTorFallbackRetriesForbiddenWithoutCredentials(t *testing.T) {
 	tests := []struct {
 		name         string
 		directStatus int
+		directHeader http.Header
 		torStatus    int
-		torClientErr error
+		torErr       error
+		wantStatus   int
 		wantErr      string
 		wantTorCalls int
-		wantTorAuth  string
+		wantRateLim  bool
 	}{
-		{name: "successful direct request does not use Tor", directStatus: http.StatusOK},
-		{
-			name: "forbidden request retries unauthenticated through Tor", directStatus: http.StatusForbidden,
-			torStatus: http.StatusOK, wantTorCalls: 1,
-		},
-		{name: "non-forbidden response does not use Tor", directStatus: http.StatusInternalServerError},
+		{name: "successful direct request does not use Tor", directStatus: http.StatusOK, wantStatus: http.StatusOK},
+		{name: "forbidden request retries through Tor", directStatus: http.StatusForbidden, torStatus: http.StatusOK, wantStatus: http.StatusOK, wantTorCalls: 1},
+		{name: "non-forbidden response does not use Tor", directStatus: http.StatusInternalServerError, wantStatus: http.StatusInternalServerError},
 		{
 			name: "unavailable Tor reports actionable error", directStatus: http.StatusForbidden,
-			torClientErr: errors.New("connection refused"),
-			wantErr:      "start Tor with SOCKS5 on 127.0.0.1:9050",
+			torErr:  errors.New("connection refused"),
+			wantErr: "start Tor with SOCKS5 on 127.0.0.1:9050",
+		},
+		{
+			name: "rate-limit hints survive unavailable Tor", directStatus: http.StatusForbidden,
+			directHeader: http.Header{"X-Ratelimit-Remaining": {"0"}},
+			torErr:       errors.New("connection refused"),
+			wantStatus:   http.StatusForbidden, wantRateLim: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			torCalls := 0
-			var torAuthorization string
-			restoreTor := SetTorHTTPClientForTest(func() (*http.Client, error) {
-				if tt.torClientErr != nil {
-					return nil, tt.torClientErr
+			var torReq http.Request
+			tor := torTransport(t, tt.torStatus, &torCalls, &torReq)
+			if tt.torErr != nil {
+				tor = &torFallback{newTransport: func() (http.RoundTripper, error) { return nil, tt.torErr }}
+			}
+			direct := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				resp := testResponse(tt.directStatus, "forbidden")
+				for name, values := range tt.directHeader {
+					resp.Header[name] = values
 				}
-				return &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-					torCalls++
-					torAuthorization = req.Header.Get("Authorization")
-					return &http.Response{
-						StatusCode: tt.torStatus,
-						Body:       io.NopCloser(strings.NewReader("ok")),
-						Header:     make(http.Header),
-						Request:    req,
-					}, nil
-				})}, nil
+				return resp, nil
 			})
-			t.Cleanup(restoreTor)
+			client := &http.Client{Transport: withTorFallback(direct, tor)}
 
-			directClient := &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: tt.directStatus,
-					Body:       io.NopCloser(strings.NewReader("forbidden")),
-					Header:     make(http.Header),
-					Request:    req,
-				}, nil
-			})}
-			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://example.com/app.apk", nil)
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://example.com/app.apk", nil)
 			if err != nil {
 				t.Fatalf("create request: %v", err)
 			}
 			req.Header.Set("Authorization", "Bearer secret")
+			req.Header.Set("PRIVATE-TOKEN", "secret")
+			req.Header.Set("Accept", "application/json")
 
-			resp, err := DoWithTorFallback(context.Background(), directClient, req)
+			resp, err := DoWithTorFallback(t.Context(), client, req)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("DoWithTorFallback() error = %v, want substring %q", err, tt.wantErr)
 				}
-			} else {
-				if err != nil {
-					t.Fatalf("DoWithTorFallback() error = %v", err)
-				}
-				resp.Body.Close()
+				return
+			}
+			if err != nil {
+				t.Fatalf("DoWithTorFallback() error = %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tt.wantStatus {
+				t.Errorf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
+			}
+			if statusErr := checkHTTPStatus(resp, "test"); tt.wantRateLim != errors.Is(statusErr, ErrRateLimited) {
+				t.Errorf("checkHTTPStatus() = %v, rate limited want %v", statusErr, tt.wantRateLim)
 			}
 			if torCalls != tt.wantTorCalls {
-				t.Errorf("Tor request count = %d, want %d", torCalls, tt.wantTorCalls)
+				t.Fatalf("Tor request count = %d, want %d", torCalls, tt.wantTorCalls)
 			}
-			if torAuthorization != tt.wantTorAuth {
-				t.Errorf("Tor Authorization = %q, want %q", torAuthorization, tt.wantTorAuth)
+			if tt.wantTorCalls > 0 {
+				if got := torReq.Header.Get("Authorization") + torReq.Header.Get("PRIVATE-TOKEN"); got != "" {
+					t.Errorf("Tor request carried credentials %q", got)
+				}
+				if got := torReq.Header.Get("Accept"); got != "application/json" {
+					t.Errorf("Tor request Accept = %q, want it preserved", got)
+				}
+			}
+			if got := req.Header.Get("Authorization"); got != "Bearer secret" {
+				t.Errorf("caller's request Authorization = %q, want it untouched", got)
 			}
 		})
+	}
+}
+
+func TestTorFallbackSkipsLoopbackTargets(t *testing.T) {
+	torCalls := 0
+	direct := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return testResponse(http.StatusForbidden, "no"), nil
+	})
+	client := &http.Client{Transport: withTorFallback(direct, torTransport(t, http.StatusOK, &torCalls, nil))}
+	resp, err := client.Get("http://127.0.0.1:8080/app.apk")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || torCalls != 0 {
+		t.Errorf("status = %d, Tor calls = %d; want 403 and 0", resp.StatusCode, torCalls)
+	}
+}
+
+func TestTorFallbackBuildsTransportOnce(t *testing.T) {
+	builds, torCalls := 0, 0
+	tor := &torFallback{newTransport: func() (http.RoundTripper, error) {
+		builds++
+		return roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			torCalls++
+			return testResponse(http.StatusOK, "ok"), nil
+		}), nil
+	}}
+	direct := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return testResponse(http.StatusForbidden, "no"), nil
+	})
+	client := &http.Client{Transport: withTorFallback(direct, tor)}
+	for range 3 {
+		resp, err := client.Get("https://example.com/a")
+		if err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+		resp.Body.Close()
+	}
+	if builds != 1 || torCalls != 3 {
+		t.Errorf("Tor transport builds = %d, calls = %d; want 1 and 3", builds, torCalls)
+	}
+}
+
+// TestTorFallbackKeepsRedirectPolicy confirms the client's CheckRedirect still
+// governs hops after a Tor replay.
+func TestTorFallbackKeepsRedirectPolicy(t *testing.T) {
+	direct := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return testResponse(http.StatusForbidden, "no"), nil
+	})
+	tor := &torFallback{newTransport: func() (http.RoundTripper, error) {
+		return roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			resp := testResponse(http.StatusFound, "")
+			resp.Header.Set("Location", "http://evil.example.com/app.apk")
+			resp.Request = req
+			return resp, nil
+		}), nil
+	}}
+	client := &http.Client{Transport: withTorFallback(direct, tor), CheckRedirect: validateRedirect}
+	resp, err := client.Get("https://example.com/app.apk")
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("Get() error = nil, want the insecure redirect refused")
+	}
+	if !errors.Is(err, netpolicy.ErrUnsafeURL) {
+		t.Errorf("Get() error = %v, want ErrUnsafeURL", err)
+	}
+}
+
+func TestValidateRedirectDropsCredentialsOnHostChange(t *testing.T) {
+	newReq := func(raw string) *http.Request {
+		req, err := http.NewRequest(http.MethodGet, raw, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer secret")
+		req.Header.Set("PRIVATE-TOKEN", "secret")
+		return req
+	}
+	via := []*http.Request{newReq("https://gitlab.example.com/a")}
+
+	same := newReq("https://gitlab.example.com/b")
+	if err := validateRedirect(same, via); err != nil {
+		t.Fatalf("validateRedirect(same host) = %v", err)
+	}
+	if same.Header.Get("PRIVATE-TOKEN") == "" || same.Header.Get("Authorization") == "" {
+		t.Error("credentials dropped on a same-host redirect")
+	}
+
+	other := newReq("https://cdn.example.com/b")
+	if err := validateRedirect(other, via); err != nil {
+		t.Fatalf("validateRedirect(other host) = %v", err)
+	}
+	if other.Header.Get("PRIVATE-TOKEN") != "" || other.Header.Get("Authorization") != "" {
+		t.Error("credentials kept on a cross-host redirect")
 	}
 }
 
@@ -230,29 +352,29 @@ func TestNewSourceFromConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			src, err := New(tt.cfg)
+			src, err := NewWithOptions(tt.cfg, Options{})
 
 			if (err != nil) != tt.wantErr {
-				t.Errorf("New() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("NewWithOptions() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
 			if tt.wantErr {
 				if tt.errContain != "" && err != nil {
 					if !strings.Contains(err.Error(), tt.errContain) {
-						t.Errorf("New() error = %v, want error containing %q", err, tt.errContain)
+						t.Errorf("NewWithOptions() error = %v, want error containing %q", err, tt.errContain)
 					}
 				}
 				return
 			}
 
 			if src == nil {
-				t.Error("New() returned nil source")
+				t.Error("NewWithOptions() returned nil source")
 				return
 			}
 
 			if src.Type() != tt.wantType {
-				t.Errorf("New() source type = %v, want %v", src.Type(), tt.wantType)
+				t.Errorf("NewWithOptions() source type = %v, want %v", src.Type(), tt.wantType)
 			}
 		})
 	}
@@ -585,46 +707,8 @@ func TestHasUnsupportedArchitecture(t *testing.T) {
 	}
 }
 
-func TestFilterUnsupportedArchitectures(t *testing.T) {
-	assets := []*Asset{
-		{Name: "app-arm64-v8a.apk"},
-		{Name: "app-x86_64.apk"},
-		{Name: "app-armeabi-v7a.apk"},
-		{Name: "app-x86.apk"},
-		{Name: "app-universal.apk"},
-	}
-
-	filtered := FilterUnsupportedArchitectures(assets)
-
-	// Should keep only arm64-v8a and universal (armeabi-v7a is now filtered)
-	if len(filtered) != 2 {
-		t.Errorf("FilterUnsupportedArchitectures returned %d assets, want 2", len(filtered))
-	}
-
-	// Verify the right ones were kept
-	names := make(map[string]bool)
-	for _, a := range filtered {
-		names[a.Name] = true
-	}
-
-	if !names["app-arm64-v8a.apk"] {
-		t.Error("Expected app-arm64-v8a.apk to be kept")
-	}
-	if !names["app-universal.apk"] {
-		t.Error("Expected app-universal.apk to be kept")
-	}
-	if names["app-armeabi-v7a.apk"] {
-		t.Error("Expected app-armeabi-v7a.apk to be filtered out")
-	}
-	if names["app-x86_64.apk"] {
-		t.Error("Expected app-x86_64.apk to be filtered out")
-	}
-	if names["app-x86.apk"] {
-		t.Error("Expected app-x86.apk to be filtered out")
-	}
-}
-
-func TestIsTransientDownloadError(t *testing.T) {
+func TestIsTransient(t *testing.T) {
+	tlsErr := &url.Error{Op: "Get", URL: "https://example.com", Err: &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}}
 	tests := []struct {
 		name string
 		err  error
@@ -632,16 +716,29 @@ func TestIsTransientDownloadError(t *testing.T) {
 	}{
 		{name: "nil", err: nil, want: false},
 		{name: "unexpected EOF", err: io.ErrUnexpectedEOF, want: true},
-		{name: "wrapped unexpected EOF", err: fmt.Errorf("failed to write file: %w", io.ErrUnexpectedEOF), want: true},
-		{name: "connection reset string", err: errors.New("read: connection reset by peer"), want: true},
-		{name: "download stalled", err: errors.New("download stalled: no data received for 30s"), want: true},
-		{name: "permanent 404", err: errors.New("download failed with status 404: https://example.com/a.apk"), want: false},
-		{name: "net timeout", err: &net.DNSError{Err: "i/o timeout", IsTimeout: true}, want: true},
+		{name: "wrapped unexpected EOF", err: fmt.Errorf("write file: %w", io.ErrUnexpectedEOF), want: true},
+		{name: "connection reset", err: &net.OpError{Op: "read", Err: os.NewSyscallError("read", syscall.ECONNRESET)}, want: true},
+		{name: "connection refused", err: &url.Error{Op: "Get", URL: "https://example.com", Err: syscall.ECONNREFUSED}, want: true},
+		{name: "broken pipe", err: fmt.Errorf("write: %w", syscall.EPIPE), want: true},
+		{name: "download stalled", err: fmt.Errorf("%w: no data received for 30s", errDownloadStalled), want: true},
+		{name: "dial timeout", err: &url.Error{Op: "Get", URL: "https://example.com", Err: &net.DNSError{Err: "i/o timeout", IsTimeout: true}}, want: true},
+		{name: "503", err: &HTTPStatusError{StatusCode: http.StatusServiceUnavailable}, want: true},
+		{name: "500", err: fmt.Errorf("download: %w", &HTTPStatusError{StatusCode: http.StatusInternalServerError}), want: true},
+		{name: "408", err: &HTTPStatusError{StatusCode: http.StatusRequestTimeout}, want: true},
+		{name: "429", err: &HTTPStatusError{StatusCode: http.StatusTooManyRequests}, want: true},
+		{name: "404", err: &HTTPStatusError{StatusCode: http.StatusNotFound}, want: false},
+		{name: "403", err: &HTTPStatusError{StatusCode: http.StatusForbidden}, want: false},
+		{name: "x509 verification failure", err: tlsErr, want: false},
+		{name: "NXDOMAIN", err: &url.Error{Op: "Get", URL: "https://nope.example", Err: &net.DNSError{Err: "no such host", IsNotFound: true}}, want: false},
+		{name: "unsafe URL", err: fmt.Errorf("download: %w", netpolicy.ErrUnsafeURL), want: false},
+		{name: "blocked address", err: &url.Error{Op: "Get", URL: "https://x", Err: netpolicy.ErrBlockedAddress}, want: false},
+		{name: "checksum mismatch", err: ErrChecksumMismatch, want: false},
+		{name: "message text is not matched", err: errors.New("connection reset by peer"), want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isTransientDownloadError(tt.err); got != tt.want {
-				t.Errorf("isTransientDownloadError(%v) = %v, want %v", tt.err, got, tt.want)
+			if got := IsTransient(tt.err); got != tt.want {
+				t.Errorf("IsTransient(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
 	}
@@ -713,7 +810,7 @@ func TestDownloadHTTPRejectsInsecureURL(t *testing.T) {
 	if err == nil {
 		t.Fatal("DownloadHTTP() error = nil, want rejection of insecure URL")
 	}
-	if !strings.Contains(err.Error(), "refusing unsafe download URL") {
+	if !errors.Is(err, netpolicy.ErrUnsafeURL) {
 		t.Fatalf("DownloadHTTP() error = %v, want unsafe URL rejection", err)
 	}
 	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
@@ -727,7 +824,7 @@ func TestDownloadHTTPRejectsInsecureURL(t *testing.T) {
 // HTTPS-outside-loopback rule as an explicit URL, and that redirect depth is
 // bounded.
 func TestDownloadHTTPClientRejectsUnsafeRedirect(t *testing.T) {
-	client := newDownloadHTTPClient()
+	client := newDownloadHTTPClient(nil)
 
 	insecure, err := http.NewRequest(http.MethodGet, "http://evil.example.com/app.apk", nil)
 	if err != nil {

@@ -1,14 +1,14 @@
-package zsp
+package release
 
 import (
 	"io"
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	internalconfig "github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/internal/netpolicy"
 )
 
 // ParseConfig parses canonical zapstore.yaml from r without performing network
@@ -211,52 +211,18 @@ func fetchInternalConfig(config FetchConfig) (*internalconfig.Config, error) {
 		internal.NIP34Repo = pointer
 	}
 	if config.ReleaseSource != nil {
-		sourceURL := config.ReleaseSource.URL
-		localPath := config.ReleaseSource.LocalPath
-		sourceType := strings.ToLower(strings.TrimSpace(config.ReleaseSource.Type))
-		if sourceType == "local" {
-			if localPath != "" && sourceURL != "" {
-				return nil, operationErr(ErrInvalidConfig, false, "local release source must specify one path")
-			}
-			if localPath == "" {
-				localPath = sourceURL
-				sourceURL = ""
-			}
+		releaseSource, err := internalconfig.NormalizeReleaseSource(*toInternalReleaseSource(config.ReleaseSource))
+		if err != nil {
+			return nil, wrapOperationError(ErrInvalidConfig, err, false, "validate release source"+causeDetail(err))
 		}
-		if localPath != "" && sourceType != "" && sourceType != "local" {
-			return nil, operationErr(ErrInvalidConfig, false, "local release source cannot use a remote source type")
-		}
-		if localPath != "" && (sourceURL != "" || config.ReleaseSource.AssetURL != "" ||
-			config.ReleaseSource.VersionExtractor != nil || config.ReleaseSource.AssetExtractor != nil) {
-			return nil, operationErr(ErrInvalidConfig, false, "local release source cannot include remote source settings")
-		}
-		if localPath != "" && !filepath.IsAbs(localPath) {
+		if releaseSource.LocalPath != "" && !filepath.IsAbs(releaseSource.LocalPath) {
 			return nil, operationErr(ErrInvalidConfig, false, "local release source must be absolute")
 		}
-		directAPK := directAPKURL(sourceURL) && config.ReleaseSource.AssetURL == ""
-		internal.ReleaseSource = &internalconfig.ReleaseSource{
-			URL: sourceURL, LocalPath: localPath, Type: sourceType,
-			AssetURL: config.ReleaseSource.AssetURL, IsWebSource: directAPK || config.ReleaseSource.AssetURL != "" ||
-				config.ReleaseSource.VersionExtractor != nil || config.ReleaseSource.AssetExtractor != nil,
-		}
-		if directAPK {
-			internal.ReleaseSource.AssetURL = sourceURL
-		}
-		if config.ReleaseSource.VersionExtractor != nil {
-			internal.ReleaseSource.Version = toInternalExtractor(config.ReleaseSource.VersionExtractor)
-		}
-		if config.ReleaseSource.AssetExtractor != nil {
-			internal.ReleaseSource.Asset = toInternalExtractor(config.ReleaseSource.AssetExtractor)
-		}
+		internal.ReleaseSource = releaseSource
 	}
 	internal.CanonicalizeForgeURLs()
 	if err := internal.Validate(); err != nil {
 		return nil, wrapOperationError(ErrInvalidConfig, err, false, "validate fetch configuration"+causeDetail(err))
-	}
-	if config.Match != "" {
-		if _, err := regexp.Compile(config.Match); err != nil {
-			return nil, wrapOperationError(ErrInvalidConfig, err, false, "validate match"+causeDetail(err))
-		}
 	}
 	switch internal.GetSourceType() {
 	case internalconfig.SourceLocal, internalconfig.SourceGitHub, internalconfig.SourceGitLab,
@@ -266,12 +232,6 @@ func fetchInternalConfig(config FetchConfig) (*internalconfig.Config, error) {
 		return nil, operationErr(ErrInvalidConfig, false, "unsupported release source")
 	}
 	return internal, nil
-}
-
-func directAPKURL(value string) bool {
-	parsed, err := url.Parse(value)
-	return err == nil && (parsed.Scheme == "https" || parsed.Scheme == "http") &&
-		strings.EqualFold(filepath.Ext(parsed.Path), ".apk")
 }
 
 func toInternalExtractor(extractor *Extractor) *internalconfig.VersionExtractor {
@@ -350,5 +310,5 @@ func validateRelayURLs(relayURLs []string) error {
 }
 
 func isLoopbackHost(host string) bool {
-	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+	return netpolicy.IsLoopbackHost(host)
 }

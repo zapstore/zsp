@@ -6,10 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
@@ -44,36 +46,20 @@ type Signer interface {
 	Close() error
 }
 
-// NewSigner creates a signer from a SIGN_WITH value.
+// NewSigner creates a signer from a SIGN_WITH value: an nsec1... private key
+// or a bunker://... URL.
 func NewSigner(ctx context.Context, signWith string) (Signer, error) {
 	signWith = strings.TrimSpace(signWith)
 
-	if strings.HasPrefix(signWith, "nsec1") {
+	switch {
+	case strings.HasPrefix(signWith, "nsec1"):
 		return NewNsecSigner(signWith)
-	}
-
-	if strings.HasPrefix(signWith, "npub1") {
-		return nil, fmt.Errorf("npub cannot sign publication")
-	}
-
-	if strings.HasPrefix(signWith, "bunker://") {
+	case strings.HasPrefix(signWith, "npub1"):
+		return nil, errors.New("npub cannot sign publication")
+	case strings.HasPrefix(signWith, "bunker://"):
 		return NewBunkerSigner(ctx, signWith)
 	}
-
-	// Check if it's a hex private key (pad to 64 hex characters = 32 bytes if shorter)
-	if isValidHex(signWith) && len(signWith) <= 64 {
-		// Pad with leading zeros to 64 characters (32 bytes)
-		hexKey := fmt.Sprintf("%064s", signWith)
-		hexKey = strings.ReplaceAll(hexKey, " ", "0")
-		sanitize.Register(hexKey, signWith)
-		nsec, err := nip19.EncodePrivateKey(hexKey)
-		if err != nil {
-			return nil, fmt.Errorf("invalid hex private key: %s", sanitize.Text(err.Error()))
-		}
-		return NewNsecSigner(nsec)
-	}
-
-	return nil, fmt.Errorf("invalid SIGN_WITH format: must be nsec1..., npub1..., hex private key, or bunker://...")
+	return nil, errors.New("invalid SIGN_WITH format: must be nsec1... or bunker://...")
 }
 
 // isValidHex checks if a string is valid hexadecimal.
@@ -100,7 +86,7 @@ func NewNsecSigner(nsec string) (*NsecSigner, error) {
 	sanitize.Register(nsec)
 	prefix, data, err := nip19.Decode(nsec)
 	if err != nil {
-		return nil, fmt.Errorf("invalid nsec: %s", sanitize.Text(err.Error()))
+		return nil, newOpError("invalid nsec", err)
 	}
 	if prefix != "nsec" {
 		return nil, fmt.Errorf("expected nsec, got %s", prefix)
@@ -110,7 +96,7 @@ func NewNsecSigner(nsec string) (*NsecSigner, error) {
 	sanitize.Register(privateKey)
 	publicKey, err := nostr.GetPublicKey(privateKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to derive public key: %s", sanitize.Text(err.Error()))
+		return nil, newOpError("derive public key", err)
 	}
 
 	return &NsecSigner{
@@ -131,8 +117,8 @@ func (s *NsecSigner) Sign(ctx context.Context, event *nostr.Event) error {
 	event.PubKey = s.publicKey
 	if err := event.Sign(s.privateKey); err != nil {
 		// go-nostr quotes the secret key in this error ("Sign called with
-		// invalid secret key '%s'"); sanitize before it can escape.
-		return errors.New(sanitize.Text(err.Error()))
+		// invalid secret key '%s'"); opError sanitizes it when printed.
+		return newOpError("sign event", err)
 	}
 	return nil
 }
@@ -149,13 +135,25 @@ func (s *NsecSigner) Close() error {
 	return nil
 }
 
-// BunkerSigner signs events via NIP-46 remote signer.
+// bunkerTimeout bounds the NIP-46 connect and get_public_key handshake.
+const bunkerTimeout = 30 * time.Second
+
+// ErrBunkerSecretUsed means the bunker refused the client because its URL
+// secret was already used by another client key.
+var ErrBunkerSecretUsed = errors.New("this bunker URL's secret appears to have been used with a different application; generate a new bunker connection URL from your signer (e.g. nsec.app)")
+
+// BunkerSigner signs events via NIP-46 remote signer. It owns the relay pool
+// and subscription behind the bunker connection; Close releases them.
 type BunkerSigner struct {
 	bunker    *nip46.BunkerClient
+	pool      *nostr.SimplePool
+	cancel    context.CancelFunc
 	publicKey string
 }
 
-// NewBunkerSigner creates a signer from a bunker:// URL.
+// NewBunkerSigner creates a signer from a bunker:// URL. The connection
+// outlives ctx: ctx bounds and cancels the handshake only, and Close ends the
+// connection.
 func NewBunkerSigner(ctx context.Context, bunkerURL string) (*BunkerSigner, error) {
 	// The bunker URL carries a NIP-46 secret; record it and the URL itself so
 	// neither can appear in an error message.
@@ -167,40 +165,75 @@ func NewBunkerSigner(ctx context.Context, bunkerURL string) (*BunkerSigner, erro
 	// the shared local client key.
 	targetPubkey, err := extractBunkerTargetPubkey(bunkerURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid bunker URL: %s", sanitize.Text(err.Error()))
+		return nil, newOpError("invalid bunker URL", err)
 	}
 
 	clientSecretKey, err := bunkerClientKey(bunkerURL, targetPubkey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get client key: %s", sanitize.Text(err.Error()))
+		return nil, newOpError("bunker client key", err)
+	}
+	// nip46.RPC waits until the context ends when every relay dial fails.
+	// The CLI context ends on SIGINT, so a stopped hotbox would hang publish.
+	if err := probeBunkerRelays(ctx, bunkerURL); err != nil {
+		return nil, newOpError("connect to bunker", err)
 	}
 
-	// Connect to bunker
-	bunker, err := nip46.ConnectBunker(ctx, clientSecretKey, bunkerURL, nil, func(string) {})
+	// nip46.NewBunker ties its subscription to the context it is given, so it
+	// gets the signer's own context, not the handshake's.
+	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	pool := nostr.NewSimplePool(runCtx)
+	signer := &BunkerSigner{pool: pool, cancel: cancel}
+	signer.bunker = nip46.NewBunker(runCtx, clientSecretKey, targetPubkey, bunkerRelays(bunkerURL), pool, func(string) {})
+
+	handshakeCtx, cancelHandshake := context.WithTimeout(ctx, bunkerTimeout)
+	defer cancelHandshake()
+
+	_, err = signer.bunker.RPC(handshakeCtx, "connect", []string{targetPubkey, bunkerURLSecret(bunkerURL)})
+	// An "already connected" reply means the secret was already used, which is
+	// fine when this client key made the original connection.
+	if err != nil && !replyContains(err, "already connected") {
+		signer.Close()
+		return nil, newOpError("connect to bunker", preferContextErr(handshakeCtx, err))
+	}
+
+	pubkey, err := signer.bunker.GetPublicKey(handshakeCtx)
 	if err != nil {
-		if !strings.Contains(err.Error(), "already connected") {
-			return nil, fmt.Errorf("failed to connect to bunker: %s", sanitize.Text(err.Error()))
+		signer.Close()
+		err = preferContextErr(handshakeCtx, err)
+		// "no permission" means the URL's secret was used with a different
+		// client key, so the user needs a new bunker URL.
+		if replyContains(err, "no permission") {
+			err = fmt.Errorf("%w: %w", ErrBunkerSecretUsed, err)
 		}
-		// "already connected" means the secret was already used.
-		// This is okay if we're using the same client key that originally connected.
+		return nil, newOpError("get public key from bunker", err)
 	}
+	signer.publicKey = pubkey
+	return signer, nil
+}
 
-	// Get public key
-	pubkey, err := bunker.GetPublicKey(ctx)
+// replyContains reports whether the signer's error reply mentions text.
+// nip46.BunkerClient.RPC flattens the reply into a "response error: ..."
+// string with no typed error, so the reply text is the only thing to match.
+func replyContains(err error, text string) bool {
+	return strings.Contains(err.Error(), text)
+}
+
+// preferContextErr returns the context error when ctx ended the handshake.
+// nip46.BunkerClient.RPC reports cancellation as plain text, which would hide
+// context.Canceled and context.DeadlineExceeded from callers.
+func preferContextErr(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return err
+}
+
+func bunkerRelays(bunkerURL string) []string {
+	parsed, err := url.Parse(bunkerURL)
 	if err != nil {
-		// If we get "no permission", it likely means the bunker URL's secret
-		// was already used with a different client key (e.g., from another app).
-		// The user needs to generate a new bunker URL.
-		if strings.Contains(err.Error(), "no permission") {
-			return nil, fmt.Errorf("failed to get public key from bunker: %s\n\nThis bunker URL's secret appears to have been used with a different application.\nPlease generate a new bunker connection URL from your signer (e.g., nsec.app)", sanitize.Text(err.Error()))
-		}
-		return nil, fmt.Errorf("failed to get public key from bunker: %s", sanitize.Text(err.Error()))
+		return nil
 	}
-
-	return &BunkerSigner{
-		bunker:    bunker,
-		publicKey: pubkey,
-	}, nil
+	return parsed.Query()["relay"]
 }
 
 // bunkerURLSecret extracts the NIP-46 secret query parameter from a bunker
@@ -218,7 +251,7 @@ func bunkerURLSecret(bunkerURL string) string {
 func extractBunkerTargetPubkey(bunkerURL string) (string, error) {
 	parsed, err := url.Parse(bunkerURL)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse URL: %s", sanitize.Text(err.Error()))
+		return "", newOpError("parse URL", err)
 	}
 	if parsed.Scheme != "bunker" {
 		return "", fmt.Errorf("expected bunker:// scheme, got %s://", parsed.Scheme)
@@ -262,6 +295,58 @@ func loopbackBunker(bunkerURL string) bool {
 	return true
 }
 
+// probeBunkerRelays dials each bunker relay. One open TCP port is enough.
+// A closed hotbox bunker returns immediately instead of waiting in NIP-46.
+func probeBunkerRelays(ctx context.Context, bunkerURL string) error {
+	relays := bunkerRelays(bunkerURL)
+	if len(relays) == 0 {
+		return errors.New("bunker URL has no relay")
+	}
+	var last error
+	for _, raw := range relays {
+		address, err := relayDialAddress(raw)
+		if err != nil {
+			last = err
+			continue
+		}
+		dialCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		var dialer net.Dialer
+		conn, err := dialer.DialContext(dialCtx, "tcp", address)
+		cancel()
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		last = err
+	}
+	return last
+}
+
+// relayDialAddress returns the host:port a websocket relay URL connects to,
+// using the scheme's default port when the URL has none.
+func relayDialAddress(raw string) (string, error) {
+	relayURL, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	host := relayURL.Hostname()
+	if host == "" {
+		return "", errors.New("bunker relay has no host")
+	}
+	port := relayURL.Port()
+	if port == "" {
+		switch relayURL.Scheme {
+		case "wss", "https":
+			port = "443"
+		case "ws", "http":
+			port = "80"
+		default:
+			return "", fmt.Errorf("bunker relay scheme %q is not supported", relayURL.Scheme)
+		}
+	}
+	return net.JoinHostPort(host, port), nil
+}
+
 // getOrCreateBunkerClientKey retrieves an existing client key for a bunker,
 // or generates and persists a new truly random one.
 // Keys are stored in the user's config directory under zsp/bunker-keys/.
@@ -288,18 +373,18 @@ func getOrCreateBunkerClientKey(targetPubkey string) (string, error) {
 	// Generate a truly random 32-byte private key
 	var keyBytes [32]byte
 	if _, err := rand.Read(keyBytes[:]); err != nil {
-		return "", fmt.Errorf("failed to generate random key: %w", err)
+		return "", fmt.Errorf("generate random key: %w", err)
 	}
 	clientKey := hex.EncodeToString(keyBytes[:])
 	sanitize.Register(clientKey)
 
 	// Ensure directory exists
 	if err := os.MkdirAll(filepath.Dir(keyPath), 0700); err != nil {
-		return "", fmt.Errorf("failed to create key directory: %w", err)
+		return "", fmt.Errorf("create key directory: %w", err)
 	}
 
 	if err := WriteSecretFile(keyPath, []byte(clientKey+"\n")); err != nil {
-		return "", fmt.Errorf("failed to save client key: %w", err)
+		return "", fmt.Errorf("save client key: %w", err)
 	}
 
 	return clientKey, nil
@@ -336,7 +421,7 @@ func WriteSecretFile(path string, data []byte) error {
 func bunkerKeyPath(targetPubkey string) (string, error) {
 	configDir, err := os.UserConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("failed to get config directory: %w", err)
+		return "", fmt.Errorf("get config directory: %w", err)
 	}
 	return filepath.Join(configDir, "zsp", "bunker-keys", targetPubkey+".key"), nil
 }
@@ -352,19 +437,19 @@ func (s *BunkerSigner) PublicKey() string {
 func (s *BunkerSigner) Sign(ctx context.Context, event *nostr.Event) error {
 	event.PubKey = s.publicKey
 	if err := s.bunker.SignEvent(ctx, event); err != nil {
-		if errors.Is(err, context.Canceled) {
-			return context.Canceled
-		}
-		if errors.Is(err, context.DeadlineExceeded) {
-			return context.DeadlineExceeded
-		}
-		return errors.New(sanitize.Text(err.Error()))
+		return newOpError("sign event", preferContextErr(ctx, err))
 	}
 	return nil
 }
 
+// Close ends the bunker connection and its relay subscription. It is safe to
+// call more than once.
 func (s *BunkerSigner) Close() error {
-	// BunkerClient doesn't have a Close method, connections are managed internally
+	if s == nil {
+		return nil
+	}
+	s.pool.Close("signer closed")
+	s.cancel()
 	return nil
 }
 
@@ -372,23 +457,23 @@ func (s *BunkerSigner) Close() error {
 func SignEventSet(ctx context.Context, signer Signer, events *EventSet) error {
 	for i, asset := range events.SoftwareAssets {
 		if err := signFinalizedEvent(ctx, signer, asset); err != nil {
-			return fmt.Errorf("failed to sign Software Asset event %d: %w", i+1, err)
+			return fmt.Errorf("sign Software Asset event %d: %w", i+1, err)
 		}
 	}
 
 	if err := signFinalizedEvent(ctx, signer, events.Release); err != nil {
-		return fmt.Errorf("failed to sign Software Release event: %w", err)
+		return fmt.Errorf("sign Software Release event: %w", err)
 	}
 
 	if events.AppMetadata != nil {
 		if err := signFinalizedEvent(ctx, signer, events.AppMetadata); err != nil {
-			return fmt.Errorf("failed to sign Software Application event: %w", err)
+			return fmt.Errorf("sign Software Application event: %w", err)
 		}
 	}
 
 	if events.IdentityProof != nil {
 		if err := signFinalizedEvent(ctx, signer, events.IdentityProof); err != nil {
-			return fmt.Errorf("failed to sign IdentityProof event: %w", err)
+			return fmt.Errorf("sign IdentityProof event: %w", err)
 		}
 	}
 
@@ -397,17 +482,17 @@ func SignEventSet(ctx context.Context, signer Signer, events *EventSet) error {
 
 func signFinalizedEvent(ctx context.Context, signer Signer, event *nostr.Event) error {
 	if event == nil || event.ID == "" || event.ID != event.GetID() {
-		return fmt.Errorf("event must be finalized before signing")
+		return errors.New("event must be finalized before signing")
 	}
 	if err := signer.Sign(ctx, event); err != nil {
 		return err
 	}
 	if event.ID != event.GetID() {
-		return fmt.Errorf("signer changed event body")
+		return errors.New("signer changed event body")
 	}
 	valid, err := event.CheckSignature()
 	if err != nil || !valid {
-		return fmt.Errorf("signer produced an invalid event signature")
+		return errors.New("signer produced an invalid event signature")
 	}
 	return nil
 }

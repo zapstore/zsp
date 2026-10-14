@@ -149,7 +149,7 @@ release_source: https://f-droid.org/packages/com.example.app
 			check: func(c *Config) bool {
 				return c.ReleaseSource != nil &&
 					c.GetSourceType() == SourceFDroid &&
-					GetFDroidPackageID(c.ReleaseSource.URL) == "com.example.app"
+					GetFDroidRepoInfo(c.ReleaseSource.URL).PackageID == "com.example.app"
 			},
 		},
 		{
@@ -233,19 +233,21 @@ release_source:
 			},
 		},
 		{
-			name: "release_source string URL from unknown source becomes web source",
+			name: "release_source string URL from unknown source is kept as written",
 			yaml: `
 repository: https://github.com/user/app
 release_source: https://example.com/downloads/app.apk
 `,
 			check: func(c *Config) bool {
-				// Shorthand: release_source: URL is equivalent to { asset_url: URL }
-				// URL is empty so we don't scrape a page, we use asset_url directly
-				return c.ReleaseSource != nil &&
-					c.ReleaseSource.IsWebSource &&
-					c.ReleaseSource.URL == "" &&
-					c.ReleaseSource.AssetURL == "https://example.com/downloads/app.apk" &&
-					c.GetSourceType() == SourceWeb
+				// Parse keeps the URL as written; NormalizeReleaseSource turns it
+				// into a direct-download web source where a source is built.
+				if c.ReleaseSource == nil || c.ReleaseSource.IsWebSource ||
+					c.ReleaseSource.URL != "https://example.com/downloads/app.apk" || c.ReleaseSource.AssetURL != "" {
+					return false
+				}
+				normalized, err := NormalizeReleaseSource(*c.ReleaseSource)
+				return err == nil && normalized.IsWebSource && normalized.URL == "" &&
+					normalized.AssetURL == "https://example.com/downloads/app.apk"
 			},
 		},
 		{
@@ -290,15 +292,23 @@ match: ".*arm64.*\\.apk$"
 			},
 		},
 		{
-			name: "unknown fields ignored",
+			name: "deprecated fields ignored",
 			yaml: `
 repository: https://github.com/user/app
-unknown_field: should be ignored
-another_unknown: 123
+homepage: https://example.com
+fetch_metadata: [github]
 `,
 			check: func(c *Config) bool {
 				return c.Repository == "https://github.com/user/app"
 			},
+		},
+		{
+			name: "unknown field rejected",
+			yaml: `
+repository: https://github.com/user/app
+unknown_field: typo
+`,
+			wantErr: true,
 		},
 	}
 
@@ -485,29 +495,6 @@ func TestDetectSourceType(t *testing.T) {
 		t.Run(tt.url, func(t *testing.T) {
 			if got := DetectSourceType(tt.url); got != tt.want {
 				t.Errorf("DetectSourceType(%q) = %v, want %v", tt.url, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestGetFDroidPackageID(t *testing.T) {
-	tests := []struct {
-		url  string
-		want string
-	}{
-		{"https://f-droid.org/packages/com.example.app", "com.example.app"},
-		{"https://f-droid.org/en/packages/com.example.app", "com.example.app"},
-		{"https://f-droid.org/packages/com.example.app/", "com.example.app"},
-		// IzzyOnDroid
-		{"https://apt.izzysoft.de/fdroid/index/apk/com.example.app", "com.example.app"},
-		{"https://apt.izzysoft.de/fdroid/index/apk/com.example.app/", "com.example.app"},
-		{"https://github.com/user/repo", ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.url, func(t *testing.T) {
-			if got := GetFDroidPackageID(tt.url); got != tt.want {
-				t.Errorf("GetFDroidPackageID(%q) = %q, want %q", tt.url, got, tt.want)
 			}
 		})
 	}
@@ -1410,31 +1397,8 @@ func TestDetectSourceTypeAdditional(t *testing.T) {
 	}
 }
 
-// TestLoadConfigFile tests loading config from file paths
-func TestLoadConfigFile(t *testing.T) {
-	// Test loading a valid config file from testdata
-	cfg, err := Load("../../testdata/configs/github.yaml")
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-
-	if cfg.Repository == "" {
-		t.Error("Load() repository should not be empty")
-	}
-
-	if cfg.BaseDir == "" {
-		t.Error("Load() should set BaseDir")
-	}
-
-	// Test loading non-existent file
-	_, err = Load("/nonexistent/path/config.yaml")
-	if err == nil {
-		t.Error("Load() should error for non-existent file")
-	}
-}
-
-// TestLoadAllFixtures tests that all fixture configs parse successfully
-func TestLoadAllFixtures(t *testing.T) {
+// TestParseAllFixtures tests that all fixture configs parse successfully
+func TestParseAllFixtures(t *testing.T) {
 	// Each fixture tests a unique feature/combination - no duplicates
 	fixtures := []string{
 		// Source types
@@ -1463,21 +1427,17 @@ func TestLoadAllFixtures(t *testing.T) {
 
 	for _, fixture := range fixtures {
 		t.Run(fixture, func(t *testing.T) {
-			cfg, err := Load("../../testdata/configs/" + fixture)
+			file, err := os.Open("../../testdata/configs/" + fixture)
 			if err != nil {
-				t.Errorf("Load(%s) error = %v", fixture, err)
-				return
+				t.Fatal(err)
 			}
-
-			// Basic validation that config loaded
-			if cfg == nil {
-				t.Errorf("Load(%s) returned nil config", fixture)
-				return
+			defer file.Close()
+			cfg, err := Parse(file)
+			if err != nil {
+				t.Fatalf("Parse(%s): %v", fixture, err)
 			}
-
-			// Validate each loaded config
 			if err := cfg.Validate(); err != nil {
-				t.Errorf("Load(%s) Validate() error = %v", fixture, err)
+				t.Errorf("Parse(%s) Validate(): %v", fixture, err)
 			}
 		})
 	}

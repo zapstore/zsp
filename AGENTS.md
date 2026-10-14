@@ -20,7 +20,7 @@ CLI and Go library for publishing Android apps to the Zapstore catalog.
 | Path | Owner | AI May Modify |
 |------|-------|---------------|
 | `SPEC.md` | Human | No (unless asked) |
-| `*.go`, `internal/**`, `cmd/zsp/**` | Shared | Yes |
+| `zsp.go`, `internal/**`, `cmd/zsp/**` | Shared | Yes |
 
 ## Key Commands
 
@@ -34,3 +34,8 @@ go mod tidy               # After dependency changes
 ## Project Rules
 
 - Reference `internal/source/github.go` when adding new sources.
+- `zsp.go` is the only root Go file: it re-exports `internal/release` so the
+  import path stays `github.com/zapstore/zsp`. Put library code in
+  `internal/release`, and add a forwarder in `zsp.go` for any new public name.
+- Outbound HTTP uses `internal/netpolicy`; local media paths use
+  `internal/localpath`.

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -20,6 +21,7 @@ import (
 	"github.com/nbd-wtf/go-nostr/nip19"
 	"github.com/zapstore/zsp"
 	"github.com/zapstore/zsp/internal/identity"
+	nostrpkg "github.com/zapstore/zsp/internal/nostr"
 	"github.com/zapstore/zsp/internal/ui"
 )
 
@@ -48,7 +50,7 @@ func TestWizardStateUsesHotboxBeforeKeystore(t *testing.T) {
 	t.Setenv("HOTBOX_SOCKET", filepath.Join(t.TempDir(), "hotbox.sock"))
 	t.Setenv("HOTBOX_PIN", strings.Repeat("p", 32))
 	state := &wizardIdentityState{certificateHash: strings.Repeat("c", 64)}
-	if err := wizardCertificateKey(state, "unused", false); err != nil {
+	if err := wizardCertificateKey(t.Context(), state, "unused", false); err != nil {
 		t.Fatalf("wizardCertificateKey() error = %v", err)
 	}
 	if state.hotbox == nil || state.privateKey != nil || !state.hasCertificateKey() {
@@ -413,47 +415,134 @@ func TestExistingOwnershipProofDetailsShowsOwnerAndExpiry(t *testing.T) {
 	}
 }
 
-func TestActiveProofForCertificateHash(t *testing.T) {
-	secret := gonostr.GeneratePrivateKey()
-	owner, err := gonostr.GetPublicKey(secret)
+func signedC1Proof(t *testing.T, privateKey crypto.PrivateKey, certificate *x509.Certificate, signer nostrpkg.Signer, expiry time.Duration, delegate string) *gonostr.Event {
+	t.Helper()
+	published, err := createSignedC1Proof(t.Context(), privateKey, certificate, signer, expiry, delegate)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("createSignedC1Proof: %v", err)
 	}
-	const certificateHash = "d3bd3d00681ef7da9d157961477304ff86086ba6002354dbf6a3dc5ea3f7266a"
-	event := &gonostr.Event{
-		Kind:      30509,
-		PubKey:    owner,
-		CreatedAt: gonostr.Now(),
-		Tags: gonostr.Tags{
-			{"d", certificateHash},
-			{"signature", "c2ln"},
-			{"expiry", fmt.Sprintf("%d", time.Now().Add(31*24*time.Hour).Unix())},
-			{"delegation", strings.Repeat("a", 64)},
-		},
-	}
-	if err := event.Sign(secret); err != nil {
-		t.Fatal(err)
-	}
+	return published.Event
+}
 
-	got, proof := activeProofForCertificateHash([]*gonostr.Event{event}, certificateHash)
+func testWizardSigner(t *testing.T) nostrpkg.Signer {
+	t.Helper()
+	signer, err := nostrpkg.NewSigner(t.Context(), testNsec(t))
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+	t.Cleanup(func() { _ = signer.Close() })
+	return signer
+}
+
+func TestActiveProofForCertificate(t *testing.T) {
+	privateKey, certificate := mustGenerateRSAIdentity(t)
+	signer := testWizardSigner(t)
+	delegate := strings.Repeat("a", 64)
+	event := signedC1Proof(t, privateKey, certificate, signer, 31*24*time.Hour, delegate)
+
+	got, proof := activeProofForCertificate([]*gonostr.Event{event}, certificate, time.Now())
 	if got != event || proof == nil {
-		t.Fatalf("activeProofForCertificateHash() = (%#v, %#v), want event and proof", got, proof)
+		t.Fatalf("activeProofForCertificate() = (%#v, %#v), want event and proof", got, proof)
 	}
-	if delegate := proofDelegate(got); delegate != strings.Repeat("a", 64) {
-		t.Fatalf("proofDelegate() = %q", delegate)
+	if got := proofDelegate(event); got != delegate {
+		t.Fatalf("proofDelegate() = %q, want %q", got, delegate)
 	}
-	state := wizardExistingIdentity([]*gonostr.Event{event}, certificateHash, "Notes")
-	if state == nil || state.owner != owner || state.delegate != strings.Repeat("a", 64) || !strings.HasPrefix(state.summary, "Notes is claimed by npub1") {
+	state := wizardExistingIdentity([]*gonostr.Event{event}, certificate, "Notes")
+	if state == nil || state.owner != signer.PublicKey() || state.delegate != delegate || !strings.HasPrefix(state.summary, "Notes is claimed by npub1") {
 		t.Fatalf("wizardExistingIdentity() = %#v, want current proof owner and delegate", state)
 	}
-	event.Tags[2][1] = fmt.Sprintf("%d", time.Now().Add(29*24*time.Hour).Unix())
-	if err := event.Sign(secret); err != nil {
+}
+
+func TestActiveProofForCertificateRejectsInactiveProofs(t *testing.T) {
+	privateKey, certificate := mustGenerateRSAIdentity(t)
+	_, otherCertificate := mustGenerateRSAIdentity(t)
+	signer := testWizardSigner(t)
+	valid := signedC1Proof(t, privateKey, certificate, signer, 31*24*time.Hour, "")
+
+	// The Nostr signature and the d tag are right, but nothing proves the
+	// certificate holder signed for this pubkey.
+	forged := &gonostr.Event{
+		Kind:      30509,
+		PubKey:    signer.PublicKey(),
+		CreatedAt: gonostr.Now(),
+		Tags: gonostr.Tags{
+			{"d", identity.ComputeCertHash(certificate)},
+			{"signature", base64.StdEncoding.EncodeToString([]byte("not a certificate signature"))},
+			{"expiry", fmt.Sprintf("%d", time.Now().Add(31*24*time.Hour).Unix())},
+		},
+	}
+	if err := signer.Sign(t.Context(), forged); err != nil {
 		t.Fatal(err)
 	}
-	if state := wizardExistingIdentity([]*gonostr.Event{event}, certificateHash, "Notes"); state != nil {
-		t.Fatalf("wizardExistingIdentity() = %#v, want nil for proof within renewal window", state)
+	tampered := *valid
+	tampered.Tags = append(gonostr.Tags(nil), valid.Tags...)
+	tampered.Tags = append(tampered.Tags, gonostr.Tag{"delegation", strings.Repeat("b", 64)})
+
+	tests := []struct {
+		name        string
+		event       *gonostr.Event
+		certificate *x509.Certificate
+		now         time.Time
+	}{
+		{"forged certificate signature", forged, certificate, time.Now()},
+		{"other certificate", valid, otherCertificate, time.Now()},
+		{"expired", valid, certificate, time.Now().Add(32 * 24 * time.Hour)},
+		{"tampered event", &tampered, certificate, time.Now()},
+		{"nil event", nil, certificate, time.Now()},
 	}
-	if got, proof := activeProofForCertificateHash([]*gonostr.Event{event}, strings.Repeat("b", 64)); got != nil || proof != nil {
-		t.Fatalf("mismatched certificate hash = (%#v, %#v), want nil", got, proof)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, proof := activeProofForCertificate([]*gonostr.Event{test.event}, test.certificate, test.now)
+			if got != nil || proof != nil {
+				t.Fatalf("activeProofForCertificate(%s) = (%#v, %#v), want nil", test.name, got, proof)
+			}
+			if test.now.After(time.Now().Add(time.Hour)) {
+				return
+			}
+			if state := wizardExistingIdentity([]*gonostr.Event{test.event}, test.certificate, "Notes"); state != nil {
+				t.Fatalf("wizardExistingIdentity(%s) = %#v, want nil", test.name, state)
+			}
+		})
+	}
+}
+
+func TestActiveProofForCertificatePrefersNewestProof(t *testing.T) {
+	privateKey, certificate := mustGenerateRSAIdentity(t)
+	signer := testWizardSigner(t)
+	now := time.Now()
+	signAt := func(createdAt time.Time, delegate string) *gonostr.Event {
+		created, expiry := createdAt.Unix(), createdAt.Add(60*24*time.Hour).Unix()
+		signature, err := identity.SignProofMessage(privateKey, signer.PublicKey(), created, expiry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		proof := &identity.IdentityProof{
+			CertHash: identity.ComputeCertHash(certificate), Signature: base64.StdEncoding.EncodeToString(signature),
+			CreatedAt: created, Expiry: expiry,
+		}
+		event := nostrpkg.BuildIdentityProofEvent(proof.ToEventTags(), signer.PublicKey(), created)
+		event.Tags = append(event.Tags, gonostr.Tag{"delegation", delegate})
+		if err := signer.Sign(t.Context(), event); err != nil {
+			t.Fatal(err)
+		}
+		return event
+	}
+	older := signAt(now.Add(-48*time.Hour), strings.Repeat("a", 64))
+	newer := signAt(now.Add(-24*time.Hour), strings.Repeat("c", 64))
+
+	for _, events := range [][]*gonostr.Event{{older, newer}, {newer, older}} {
+		got, _ := activeProofForCertificate(events, certificate, now)
+		if got != newer {
+			t.Fatalf("activeProofForCertificate() chose delegate %q, want the newest proof's", proofDelegate(got))
+		}
+	}
+}
+
+func TestWizardExistingIdentityRenewsInsideWindow(t *testing.T) {
+	privateKey, certificate := mustGenerateRSAIdentity(t)
+	signer := testWizardSigner(t)
+	event := signedC1Proof(t, privateKey, certificate, signer, 29*24*time.Hour, "")
+	if state := wizardExistingIdentity([]*gonostr.Event{event}, certificate, "Notes"); state != nil {
+		t.Fatalf("wizardExistingIdentity() = %#v, want nil for proof within renewal window", state)
 	}
 }

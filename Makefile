@@ -6,13 +6,15 @@ REF ?=
 GOARCH ?= $(shell go env GOARCH)
 DIST := dist/$(NAME)-$(or $(REF),dev)-$(GOARCH)
 
-.PHONY: release clean test test-unit test-integration
+# The WebP encoder compiles the bundled libwebp, so every build and test needs cgo.
+export CGO_ENABLED = 1
+
+.PHONY: release clean test test-unit test-integration test-release
 
 release:
 	mkdir -p dist
 	rm -rf $(DIST)
-	# The WebP encoder compiles the bundled libwebp.
-	CGO_ENABLED=1 go build -trimpath \
+	go build -trimpath \
 		-ldflags '-s -w $(if $(REF),-X main.version=$(REF))' \
 		-o $(DIST) ./cmd/zsp
 
@@ -23,6 +25,7 @@ test:
 	$(MAKE) test-unit
 	go test -count=1 ./tests
 	$(MAKE) test-integration
+	$(MAKE) test-release
 	go test -tags providers -count=1 -timeout=20m ./tests/integration/providers
 
 test-unit:
@@ -30,3 +33,6 @@ test-unit:
 
 test-integration:
 	go test -tags publish -count=1 -timeout=15m ./tests/integration/publish
+
+test-release:
+	go test -tags release -count=1 -timeout=20m ./tests/integration/release

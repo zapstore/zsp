@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"flag"
 	"os"
+	"slices"
 	"testing"
 )
 
@@ -181,5 +183,72 @@ func TestParseCommand_RejectsRemovedIndexerMode(t *testing.T) {
 	opts := ParseCommand()
 	if opts.FlagParseError == nil {
 		t.Fatal("removed --indexer-mode should be rejected")
+	}
+}
+
+func TestReorderArgsForFlagSet(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{"flags after positional", []string{"app.yaml", "-r", "URL"}, []string{"-r", "URL", "app.yaml"}},
+		{"single dash long flag consumes value", []string{"-match", "foo", "-r", "URL"}, []string{"-match", "foo", "-r", "URL"}},
+		{"double dash short flag consumes value", []string{"--r", "URL", "app.yaml"}, []string{"--r", "URL", "app.yaml"}},
+		{"valued flag consumes a dash-prefixed value", []string{"-match", "-r", "URL"}, []string{"-match", "-r", "URL"}},
+		{"equals form takes no extra argument", []string{"--match=foo", "app.yaml"}, []string{"--match=foo", "app.yaml"}},
+		{"bool flag leaves next argument positional", []string{"-q", "app.yaml"}, []string{"-q", "app.yaml"}},
+		{"bool flag between positionals", []string{"a.yaml", "--skip-preview", "b.yaml"}, []string{"--skip-preview", "a.yaml", "b.yaml"}},
+		{"repeatable valued flag", []string{"-m", "github", "-m", "fdroid"}, []string{"-m", "github", "-m", "fdroid"}},
+		{"double dash ends flags", []string{"-q", "--", "-r", "app.yaml"}, []string{"-q", "--", "-r", "app.yaml"}},
+		{"flag after double dash is positional", []string{"app.yaml", "--", "-q"}, []string{"--", "app.yaml", "-q"}},
+		{"lone dash is positional", []string{"-", "-q"}, []string{"-q", "-"}},
+		{"valued flag at the end", []string{"app.yaml", "-r"}, []string{"-r", "app.yaml"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("publish", flag.ContinueOnError)
+			fs.String("r", "", "")
+			fs.String("match", "", "")
+			fs.Var(new(stringSliceFlag), "m", "")
+			fs.Bool("q", false, "")
+			fs.Bool("skip-preview", false, "")
+			got := reorderArgsForFlagSet(tt.args, fs)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("reorderArgsForFlagSet(%q) = %q, want %q", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseArgs_ValuedFlagsBindDashPrefixedValues(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		wantMatch string
+		wantRepo  string
+		wantArgs  []string
+		wantErr   bool
+	}{
+		{"single dash match before repo", []string{"publish", "-match", "foo", "-r", "https://example.com/a/b"}, "foo", "https://example.com/a/b", nil, false},
+		{"match value starting with dash", []string{"publish", "-match", "-beta", "-r", "https://example.com/a/b"}, "-beta", "https://example.com/a/b", nil, false},
+		{"positional before flags", []string{"publish", "app.yaml", "--match", "foo"}, "foo", "", []string{"app.yaml"}, false},
+		{"double dash keeps dash-prefixed positional", []string{"publish", "--match", "foo", "--", "-weird.yaml"}, "foo", "", []string{"-weird.yaml"}, false},
+		{"unknown flag after positional", []string{"publish", "app.yaml", "--nope"}, "", "", nil, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := parseArgs(tt.args)
+			if (opts.FlagParseError != nil) != tt.wantErr {
+				t.Fatalf("parseArgs(%q) error = %v, wantErr %v", tt.args, opts.FlagParseError, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if opts.Publish.Match != tt.wantMatch || opts.Publish.RepoURL != tt.wantRepo || !slices.Equal(opts.Args, tt.wantArgs) {
+				t.Errorf("parseArgs(%q) = match %q repo %q args %q, want match %q repo %q args %q",
+					tt.args, opts.Publish.Match, opts.Publish.RepoURL, opts.Args, tt.wantMatch, tt.wantRepo, tt.wantArgs)
+			}
+		})
 	}
 }

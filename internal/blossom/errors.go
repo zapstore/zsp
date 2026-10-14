@@ -46,3 +46,28 @@ func (e *StatusError) Error() string {
 }
 
 func (e *StatusError) Unwrap() error { return e.Err }
+
+// DescriptorError is an ErrInvalidDescriptor with the specific disagreement
+// between the returned descriptor and the upload.
+type DescriptorError struct {
+	Reason string
+	Err    error
+}
+
+func invalidDescriptor(err error, format string, args ...any) error {
+	return &DescriptorError{Reason: fmt.Sprintf(format, args...), Err: err}
+}
+
+func (e *DescriptorError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("%s: %s: %v", ErrInvalidDescriptor, e.Reason, e.Err)
+	}
+	return fmt.Sprintf("%s: %s", ErrInvalidDescriptor, e.Reason)
+}
+
+func (e *DescriptorError) Unwrap() []error {
+	if e.Err != nil {
+		return []error{ErrInvalidDescriptor, e.Err}
+	}
+	return []error{ErrInvalidDescriptor}
+}

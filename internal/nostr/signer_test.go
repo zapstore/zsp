@@ -3,8 +3,10 @@ package nostr
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	gonostr "github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
@@ -39,6 +41,26 @@ func TestNewSignerRejectsBrowserSigning(t *testing.T) {
 	}
 }
 
+func TestNewSignerRejectsHex(t *testing.T) {
+	secret := gonostr.GeneratePrivateKey()
+	pubkey, err := gonostr.GetPublicKey(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{
+		"hex private key": secret,
+		"hex public key":  pubkey,
+		"short hex":       "abcd",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := NewSigner(t.Context(), value)
+			if err == nil || !strings.Contains(err.Error(), "invalid SIGN_WITH format") {
+				t.Fatalf("NewSigner(%s) error = %v, want invalid SIGN_WITH format", name, err)
+			}
+		})
+	}
+}
+
 func TestNewSignerRejectsNpub(t *testing.T) {
 	pubkey, err := gonostr.GetPublicKey(gonostr.GeneratePrivateKey())
 	if err != nil {
@@ -51,6 +73,27 @@ func TestNewSignerRejectsNpub(t *testing.T) {
 	_, err = NewSigner(t.Context(), npub)
 	if err == nil || !strings.Contains(err.Error(), "npub cannot sign") {
 		t.Fatalf("NewSigner(npub) error = %v", err)
+	}
+}
+
+func TestNewBunkerSignerReportsDeadLoopback(t *testing.T) {
+	secretKey := gonostr.GeneratePrivateKey()
+	pubkey, err := gonostr.GetPublicKey(secretKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const secret = "sekrit-bunker-value"
+	raw := "bunker://" + pubkey + "?relay=ws%3A%2F%2F127.0.0.1%3A1&secret=" + secret
+	start := time.Now()
+	_, err = NewBunkerSigner(t.Context(), raw)
+	if err == nil {
+		t.Fatal("NewBunkerSigner error = nil")
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatalf("dead bunker took %s", time.Since(start))
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error leaked the bunker secret: %q", err.Error())
 	}
 }
 
@@ -93,8 +136,11 @@ func TestBunkerURLSecretExtraction(t *testing.T) {
 }
 
 func TestSignEventSetPreservesFinalizedEventBodies(t *testing.T) {
-	secret := gonostr.GeneratePrivateKey()
-	signer, err := NewSigner(t.Context(), secret)
+	nsec, err := nip19.EncodePrivateKey(gonostr.GeneratePrivateKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := NewSigner(t.Context(), nsec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,5 +172,72 @@ func TestSignEventSetPreservesFinalizedEventBodies(t *testing.T) {
 		if !bytes.Equal(before[i], after[i]) {
 			t.Fatalf("event %d body changed while signing", i)
 		}
+	}
+}
+
+func TestRelayDialAddress(t *testing.T) {
+	tests := []struct {
+		relay   string
+		want    string
+		wantErr bool
+	}{
+		{relay: "wss://relay.nsec.app", want: "relay.nsec.app:443"},
+		{relay: "wss://relay.nsec.app/path", want: "relay.nsec.app:443"},
+		{relay: "ws://relay.example", want: "relay.example:80"},
+		{relay: "ws://127.0.0.1:3334", want: "127.0.0.1:3334"},
+		{relay: "wss://relay.example:8443", want: "relay.example:8443"},
+		{relay: "ws://[::1]", want: "[::1]:80"},
+		{relay: "ws://[::1]:3334", want: "[::1]:3334"},
+		{relay: "relay.example", wantErr: true},
+		{relay: "tcp://relay.example", wantErr: true},
+		{relay: "wss://", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.relay, func(t *testing.T) {
+			got, err := relayDialAddress(tt.relay)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("relayDialAddress(%q) = %q, want error", tt.relay, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("relayDialAddress(%q): %v", tt.relay, err)
+			}
+			if got != tt.want {
+				t.Errorf("relayDialAddress(%q) = %q, want %q", tt.relay, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBunkerSignerCloseIsIdempotentAndEndsPool(t *testing.T) {
+	runCtx, cancel := context.WithCancel(context.Background())
+	signer := &BunkerSigner{pool: gonostr.NewSimplePool(runCtx), cancel: cancel}
+	if err := signer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if runCtx.Err() == nil {
+		t.Fatal("Close did not cancel the signer context")
+	}
+	if err := signer.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	var missing *BunkerSigner
+	if err := missing.Close(); err != nil {
+		t.Fatalf("nil Close: %v", err)
+	}
+}
+
+func TestPreferContextErr(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := newOpError("sign event", preferContextErr(ctx, errors.New("context canceled")))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	other := errors.New("response error: no permission")
+	if got := preferContextErr(context.Background(), other); got != other {
+		t.Fatalf("preferContextErr(live ctx) = %v, want the original error", got)
 	}
 }

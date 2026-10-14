@@ -33,7 +33,9 @@ var (
 
 // Register records values that must never appear in sanitized text: private
 // keys, signer secrets, API tokens, passwords, and similar material. Values
-// shorter than 8 characters are ignored. Safe for concurrent use.
+// shorter than 8 characters are silently ignored, so a short password or PIN
+// is not redacted by registration and must not be relied on to stay out of
+// text. Safe for concurrent use.
 func Register(values ...string) {
 	secretsMu.Lock()
 	defer secretsMu.Unlock()

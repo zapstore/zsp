@@ -37,7 +37,7 @@ func TestWebDirectURLKeepsOriginalDownloadURL(t *testing.T) {
 				AssetURL:    entryURL,
 			},
 		},
-		client: newSecureHTTPClient(5 * time.Second),
+		client: newSecureHTTPClient(5*time.Second, nil),
 	}
 
 	rel, err := w.FetchLatestRelease(context.Background())
@@ -74,7 +74,7 @@ func TestWebDirectURLFallsBackToGETWhenHEADIsNotAllowed(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	w := &Web{client: newSecureHTTPClient(5 * time.Second)}
+	w := &Web{client: newSecureHTTPClient(5*time.Second, nil)}
 	probed, err := w.resolveRedirects(context.Background(), srv.URL+"/download")
 	if err != nil {
 		t.Fatalf("resolveRedirects() error = %v", err)
@@ -115,7 +115,7 @@ func TestWebDirectURLKeepsAPKWhenPathIsNotAPK(t *testing.T) {
 				AssetURL:    entryURL,
 			},
 		},
-		client:   newSecureHTTPClient(5 * time.Second),
+		client:   newSecureHTTPClient(5*time.Second, nil),
 		cacheDir: t.TempDir(),
 	}
 
@@ -166,7 +166,7 @@ func TestWebDirectURLRenamesBinRedirectTarget(t *testing.T) {
 				AssetURL:    entryURL,
 			},
 		},
-		client:   newSecureHTTPClient(5 * time.Second),
+		client:   newSecureHTTPClient(5*time.Second, nil),
 		cacheDir: t.TempDir(),
 	}
 
@@ -199,7 +199,7 @@ func TestExtractAssetURLRejectsInsecureExtractedURL(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	w := &Web{client: newSecureHTTPClient(5 * time.Second)}
+	w := &Web{client: newSecureHTTPClient(5*time.Second, nil)}
 	repo := &config.ReleaseSource{
 		IsWebSource: true,
 		Asset:       &config.VersionExtractor{URL: srv.URL, Path: "$.url"},
@@ -219,7 +219,7 @@ func TestExtractAssetURLAcceptsSafeExtractedURL(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	w := &Web{client: newSecureHTTPClient(5 * time.Second)}
+	w := &Web{client: newSecureHTTPClient(5*time.Second, nil)}
 	repo := &config.ReleaseSource{
 		IsWebSource: true,
 		Asset:       &config.VersionExtractor{URL: srv.URL, Path: "$.url"},
@@ -253,7 +253,7 @@ func TestWebDirectURLReturnsErrNotModifiedForUnchangedETag(t *testing.T) {
 				AssetURL:    server.URL + "/app.apk",
 			},
 		},
-		client:   newSecureHTTPClient(5 * time.Second),
+		client:   newSecureHTTPClient(5*time.Second, nil),
 		cacheDir: t.TempDir(),
 	}
 
@@ -282,5 +282,97 @@ func TestWebDirectURLReturnsErrNotModifiedForUnchangedETag(t *testing.T) {
 	}
 	if len(release.Assets) != 1 || release.Assets[0].URL != server.URL+"/app.apk" {
 		t.Fatalf("SkipHTTPCache assets = %+v", release.Assets)
+	}
+}
+
+func TestWebCheckHTTPCacheHeaders(t *testing.T) {
+	tests := []struct {
+		name        string
+		cache       *webCache
+		status      int
+		respHeader  map[string]string
+		wantChanged bool
+		wantErr     bool
+		wantStore   *webCache
+	}{
+		{
+			name: "no cache is changed and stores validators", status: 200,
+			respHeader:  map[string]string{"ETag": `"a"`, "Content-Length": "4"},
+			wantChanged: true, wantStore: &webCache{ETag: `"a"`},
+		},
+		{
+			name: "no validators offered stores nothing", status: 200,
+			respHeader: map[string]string{"Content-Length": "4"}, wantChanged: true,
+		},
+		{
+			name: "304 is unchanged", cache: &webCache{ETag: `"a"`}, status: 304,
+			wantChanged: false, wantStore: &webCache{ETag: `"a"`},
+		},
+		{
+			name: "same ETag is unchanged", cache: &webCache{ETag: `"a"`}, status: 200,
+			respHeader: map[string]string{"ETag": `"a"`}, wantChanged: false, wantStore: &webCache{ETag: `"a"`},
+		},
+		{
+			name: "different ETag is changed", cache: &webCache{ETag: `"a"`}, status: 200,
+			respHeader: map[string]string{"ETag": `"b"`}, wantChanged: true, wantStore: &webCache{ETag: `"b"`},
+		},
+		{
+			name: "same Last-Modified is unchanged", cache: &webCache{LastModified: "Mon, 01 Jan 2024 00:00:00 GMT"}, status: 200,
+			respHeader:  map[string]string{"Last-Modified": "Mon, 01 Jan 2024 00:00:00 GMT"},
+			wantChanged: false, wantStore: &webCache{LastModified: "Mon, 01 Jan 2024 00:00:00 GMT"},
+		},
+		{
+			name: "matching Content-Length alone is not a validator", cache: &webCache{}, status: 200,
+			respHeader: map[string]string{"Content-Length": "4"}, wantChanged: true,
+		},
+		{name: "404 is an error", cache: &webCache{ETag: `"a"`}, status: 404, wantChanged: true, wantErr: true},
+		{name: "500 is an error", cache: &webCache{ETag: `"a"`}, status: 500, wantChanged: true, wantErr: true},
+		{name: "206 is an error", status: 206, wantChanged: true, wantErr: true},
+		{name: "304 without a cache is an error", status: 304, wantChanged: true, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				for name, value := range tt.respHeader {
+					w.Header().Set(name, value)
+				}
+				w.WriteHeader(tt.status)
+			}))
+			defer srv.Close()
+			web := &Web{client: newSecureHTTPClient(5*time.Second, nil)}
+
+			changed, store, err := web.checkHTTPCacheHeaders(t.Context(), srv.URL+"/app.apk", tt.cache)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if changed != tt.wantChanged {
+				t.Errorf("changed = %v, want %v", changed, tt.wantChanged)
+			}
+			if (store == nil) != (tt.wantStore == nil) || store != nil && *store != *tt.wantStore {
+				t.Errorf("validators = %+v, want %+v", store, tt.wantStore)
+			}
+		})
+	}
+}
+
+// TestWebCacheCheckErrorsAreNotFatal confirms a failing cache probe falls back
+// to treating the source as changed instead of failing the fetch.
+func TestWebCacheCheckErrorsAreNotFatal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte("data"))
+	}))
+	defer srv.Close()
+
+	web := &Web{
+		cfg:      &config.Config{ReleaseSource: &config.ReleaseSource{IsWebSource: true, AssetURL: srv.URL + "/app.apk"}},
+		client:   newSecureHTTPClient(5*time.Second, nil),
+		cacheDir: t.TempDir(),
+	}
+	if _, err := web.FetchLatestRelease(t.Context()); err != nil {
+		t.Fatalf("FetchLatestRelease() = %v, want the failed cache probe to be non-fatal", err)
 	}
 }

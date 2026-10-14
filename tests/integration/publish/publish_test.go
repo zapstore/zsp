@@ -27,6 +27,7 @@ import (
 	"time"
 
 	gonostr "github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip19"
 	keystore "github.com/pavlo-v-chernykh/keystore-go/v4"
 	"github.com/zapstore/zsp"
 )
@@ -97,7 +98,7 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Setenv("SIGN_WITH", ownerSecret)
+	t.Setenv("SIGN_WITH", nsecKey(t, ownerSecret))
 	first := fetchOneE2EAPK(t, config.Fetch)
 	firstResult := publishE2EAPK(t, config.Publish, first, blossomURL, relayURL, false)
 	assertPublishedBlob(t, firstResult, firstBytes)
@@ -165,7 +166,7 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 	secondSource.LocalPath = secondAPK
 	secondFetchConfig.ReleaseSource = &secondSource
 	second := fetchOneE2EAPK(t, secondFetchConfig)
-	t.Setenv("SIGN_WITH", delegateSecret)
+	t.Setenv("SIGN_WITH", nsecKey(t, delegateSecret))
 	secondResult, err := zsp.Publish(t.Context(), config.Publish, second, zsp.PublishOptions{
 		BlossomURL:   blossomURL,
 		Relays:       []string{relayURL, unreachableRelay},
@@ -189,7 +190,7 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 	thirdSource.LocalPath = thirdAPK
 	thirdFetchConfig.ReleaseSource = &thirdSource
 	third := fetchOneE2EAPK(t, thirdFetchConfig)
-	t.Setenv("SIGN_WITH", indexerSecret)
+	t.Setenv("SIGN_WITH", nsecKey(t, indexerSecret))
 	thirdResult, err := zsp.Publish(t.Context(), config.Publish, third, zsp.PublishOptions{
 		BlossomURL:     blossomURL,
 		Relays:         []string{relayURL},
@@ -210,7 +211,7 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 	retrySource.LocalPath = retryAPK
 	retryFetchConfig.ReleaseSource = &retrySource
 	retryCandidate := fetchOneE2EAPK(t, retryFetchConfig)
-	t.Setenv("SIGN_WITH", ownerSecret)
+	t.Setenv("SIGN_WITH", nsecKey(t, ownerSecret))
 	retryResult, err := zsp.Publish(t.Context(), config.Publish, retryCandidate, zsp.PublishOptions{
 		BlossomURL:     blossomURL,
 		Relays:         []string{relayURL},
@@ -442,6 +443,15 @@ func fetchOneE2EAPK(t *testing.T, config zsp.FetchConfig) *zsp.APK {
 		_ = candidates[0].Close()
 	})
 	return candidates[0]
+}
+
+func nsecKey(t *testing.T, hexKey string) string {
+	t.Helper()
+	encoded, err := nip19.EncodePrivateKey(hexKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }
 
 func publishE2EAPK(

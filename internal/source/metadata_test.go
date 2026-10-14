@@ -14,8 +14,8 @@ import (
 	"github.com/zapstore/zsp/internal/config"
 )
 
-// TestDefaultMetadataSources tests the metadata source detection logic
-func TestDefaultMetadataSources(t *testing.T) {
+// TestPlanMetadata tests the metadata source selection logic
+func TestPlanMetadata(t *testing.T) {
 	tests := []struct {
 		name      string
 		cfg       *config.Config
@@ -126,37 +126,43 @@ func TestDefaultMetadataSources(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sources := DefaultMetadataSources(tt.cfg)
+			plan := PlanMetadata(tt.cfg)
+			sources := plan.Sources
 
 			if tt.wantNil {
-				if sources != nil {
-					t.Errorf("DefaultMetadataSources() = %v, want nil", sources)
+				if sources != nil || plan.Automatic {
+					t.Errorf("PlanMetadata() = %+v, want an empty plan", plan)
 				}
 				return
 			}
 
-			if sources == nil {
-				t.Error("DefaultMetadataSources() returned nil, want non-nil")
-				return
-			}
-
 			if len(sources) != tt.wantLen {
-				t.Errorf("DefaultMetadataSources() len = %d, want %d, got %v", len(sources), tt.wantLen, sources)
+				t.Errorf("PlanMetadata() len = %d, want %d, got %v", len(sources), tt.wantLen, sources)
 			}
 
 			if tt.wantFirst != "" && len(sources) > 0 && sources[0] != tt.wantFirst {
-				t.Errorf("DefaultMetadataSources()[0] = %q, want %q", sources[0], tt.wantFirst)
+				t.Errorf("PlanMetadata()[0] = %q, want %q", sources[0], tt.wantFirst)
+			}
+			if want := tt.cfg.MetadataSources == nil; plan.Automatic != want {
+				t.Errorf("PlanMetadata().Automatic = %v, want %v", plan.Automatic, want)
 			}
 		})
 	}
 }
 
-func TestDefaultMetadataSourcesPreservesExplicitOrder(t *testing.T) {
-	configured := []string{"github", "playstore", "fdroid", "github"}
-	got := DefaultMetadataSources(&config.Config{MetadataSources: configured})
+func TestPlanMetadataPreservesExplicitOrder(t *testing.T) {
+	configured := []string{"github", " PlayStore ", "fdroid", "github"}
+	got := PlanMetadata(&config.Config{Repository: "https://github.com/owner/app", MetadataSources: configured})
 	want := []string{"github", "playstore", "fdroid"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("DefaultMetadataSources() = %v, want %v", got, want)
+	if !slices.Equal(got.Sources, want) || got.Automatic {
+		t.Fatalf("PlanMetadata() = %+v, want explicit %v", got, want)
+	}
+}
+
+func TestPlanMetadataEmptyListDisablesMetadata(t *testing.T) {
+	got := PlanMetadata(&config.Config{Repository: "https://github.com/owner/app", MetadataSources: []string{}})
+	if len(got.Sources) != 0 || got.Automatic {
+		t.Fatalf("PlanMetadata() = %+v, want no sources", got)
 	}
 }
 
@@ -180,17 +186,17 @@ func TestMetadataFetcherCreation(t *testing.T) {
 	}
 }
 
-func TestDefaultMetadataSourcesUsesLocalFastlane(t *testing.T) {
+func TestPlanMetadataUsesLocalFastlane(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, fastlaneMetadataPath, "en-US"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	got := DefaultMetadataSources(&config.Config{BaseDir: root, ReleaseSource: &config.ReleaseSource{LocalPath: "app.apk"}})
-	if len(got) != 1 || got[0] != "fastlane" {
-		t.Fatalf("sources = %v, want local fastlane", got)
+	got := PlanMetadata(&config.Config{BaseDir: root, ReleaseSource: &config.ReleaseSource{LocalPath: "app.apk"}})
+	if len(got.Sources) != 1 || got.Sources[0] != "fastlane" || !got.Automatic {
+		t.Fatalf("plan = %+v, want automatic local fastlane", got)
 	}
-	if got := DefaultMetadataSources(&config.Config{ReleaseSource: &config.ReleaseSource{LocalPath: "app.apk"}}); got != nil {
-		t.Fatalf("sources = %v, want none without a local tree or repository", got)
+	if got := PlanMetadata(&config.Config{ReleaseSource: &config.ReleaseSource{LocalPath: "app.apk"}}); got.Sources != nil {
+		t.Fatalf("plan = %+v, want none without a local tree or repository", got)
 	}
 }
 
@@ -219,47 +225,87 @@ func TestFetchLocalFastlaneMetadata(t *testing.T) {
 	if metadata.Name != "Example" || metadata.Summary != "Short description" || metadata.Description != "Long description" {
 		t.Fatalf("metadata = %#v", metadata)
 	}
-	if metadata.IconURL != filepath.Join(base, "images", "icon.png") {
-		t.Errorf("icon = %q", metadata.IconURL)
+	if metadata.LocalIcon != filepath.Join(base, "images", "icon.png") {
+		t.Errorf("icon = %q", metadata.LocalIcon)
 	}
-	if len(metadata.ImageURLs) != 1 || metadata.ImageURLs[0] != filepath.Join(base, "images", "phoneScreenshots", "01.png") {
-		t.Errorf("screenshots = %v", metadata.ImageURLs)
+	if len(metadata.LocalImages) != 1 || metadata.LocalImages[0] != filepath.Join(base, "images", "phoneScreenshots", "01.png") {
+		t.Errorf("screenshots = %v", metadata.LocalImages)
 	}
-}
-
-func TestMergeMetadataKeepsMediaFallbacks(t *testing.T) {
-	cfg := &config.Config{}
-	fetcher := NewMetadataFetcher(cfg)
-	fetcher.mergeMetadata(&AppMetadata{
-		IconURL:     "https://example.com/fastlane.png",
-		ImageURLs:   []string{"https://example.com/1.png", "https://example.com/2.png"},
-		Description: "from fastlane",
-	})
-	fetcher.mergeMetadata(&AppMetadata{
-		IconURL:   "https://example.com/fdroid.png",
-		ImageURLs: []string{"https://example.com/alt.png"},
-	})
-	if cfg.Icon != "" {
-		t.Fatalf("Icon = %q, want the APK icon to stay unset", cfg.Icon)
-	}
-	icons := fetcher.IconCandidates()
-	if len(icons) != 2 || icons[0] != "https://example.com/fastlane.png" || icons[1] != "https://example.com/fdroid.png" {
-		t.Fatalf("IconCandidates = %v", icons)
-	}
-	if len(cfg.Images) != 2 || cfg.Images[0] != "https://example.com/1.png" {
-		t.Fatalf("Images = %v, want the first source only", cfg.Images)
-	}
-	sets := fetcher.ImageSets()
-	if len(sets) != 2 || len(sets[0]) != 2 || sets[1][0] != "https://example.com/alt.png" {
-		t.Fatalf("ImageSets = %v", sets)
+	if metadata.IconURL != "" || len(metadata.ImageURLs) != 0 {
+		t.Errorf("local files leaked into remote fields: icon %q images %v", metadata.IconURL, metadata.ImageURLs)
 	}
 }
 
-func TestFetchMetadataStopsWhenContextIsCancelled(t *testing.T) {
+func TestFetchLocalFastlaneMetadataSkipsSymlinks(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	base := filepath.Join(root, fastlaneMetadataPath, "en-US")
+	shots := filepath.Join(base, "images", "phoneScreenshots")
+	if err := os.MkdirAll(shots, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for path, contents := range map[string]string{
+		filepath.Join(base, "full_description.txt"): "Long description\n",
+		filepath.Join(shots, "01.png"):              "screenshot",
+		filepath.Join(outside, "secret.txt"):        "secret",
+		filepath.Join(outside, "icon.png"):          "outside icon",
+		filepath.Join(outside, "shot.png"):          "outside shot",
+	} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for link, target := range map[string]string{
+		filepath.Join(base, "title.txt"):          filepath.Join(outside, "secret.txt"),
+		filepath.Join(base, "images", "icon.png"): filepath.Join(outside, "icon.png"),
+		filepath.Join(shots, "02.png"):            filepath.Join(outside, "shot.png"),
+	} {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	metadata, err := NewMetadataFetcher(&config.Config{BaseDir: root}).fetchFastlaneMetadata(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Name != "" || metadata.Description != "Long description" {
+		t.Errorf("name %q description %q, want the symlinked title skipped", metadata.Name, metadata.Description)
+	}
+	if metadata.LocalIcon != "" {
+		t.Errorf("icon = %q, want the symlinked icon skipped", metadata.LocalIcon)
+	}
+	if len(metadata.LocalImages) != 1 || filepath.Base(metadata.LocalImages[0]) != "01.png" {
+		t.Errorf("screenshots = %v, want only the regular file", metadata.LocalImages)
+	}
+}
+
+func TestFetchLocalFastlaneMetadataRejectsSymlinkedTree(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(outside, "en-US"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "fastlane", "metadata"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, fastlaneMetadataPath)); err != nil {
+		t.Fatal(err)
+	}
+	if hasLocalFastlane(root) {
+		t.Error("hasLocalFastlane() = true for a symlinked tree")
+	}
+	_, err := NewMetadataFetcher(&config.Config{BaseDir: root}).fetchFastlaneMetadata(t.Context())
+	if err == nil || errors.Is(err, errFastlaneUnavailable) {
+		t.Fatalf("fetchFastlaneMetadata() error = %v, want a failure other than unavailable", err)
+	}
+}
+
+func TestFetchStopsWhenContextIsCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	fetcher := NewMetadataFetcher(&config.Config{Repository: "https://github.com/example/app"})
-	result := fetcher.FetchMetadataWithResult(ctx, []string{"github", "playstore"})
+	result := fetcher.Fetch(ctx, MetadataPlan{Sources: []string{"github", "playstore"}})
 	if len(result.Errors) != 1 || !errors.Is(result.Errors[0].Err, context.Canceled) {
 		t.Fatalf("metadata errors = %v, want one cancellation", result.Errors)
 	}
@@ -542,10 +588,11 @@ func TestFetchFastlaneMetadata(t *testing.T) {
 	}
 }
 
+var automaticGitHubPlan = MetadataPlan{Sources: []string{"fastlane", "github"}, Automatic: true}
+
 func TestFetchAutomaticMetadataFallback(t *testing.T) {
 	t.Run("uses GitHub metadata when Fastlane is absent", func(t *testing.T) {
-		cfg := &config.Config{Repository: "https://github.com/owner/app"}
-		fetcher := NewMetadataFetcher(cfg)
+		fetcher := NewMetadataFetcher(&config.Config{Repository: "https://github.com/owner/app"})
 		fetcher.client = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			switch req.URL.Path {
 			case "/repos/owner/app/contents/fastlane/metadata/android":
@@ -562,17 +609,17 @@ func TestFetchAutomaticMetadataFallback(t *testing.T) {
 			}
 		})}
 
-		if err := fetcher.FetchAutomaticMetadata(context.Background(), "github"); err != nil {
-			t.Fatalf("FetchAutomaticMetadata() error = %v", err)
+		result := fetcher.Fetch(context.Background(), automaticGitHubPlan)
+		if result.HasErrors() {
+			t.Fatalf("unexpected metadata errors: %v", result.Errors[0])
 		}
-		if cfg.Name != "Repository name" {
-			t.Errorf("Name = %q, want native GitHub metadata", cfg.Name)
+		if len(result.Metadata) != 1 || result.Metadata[0].Source != "github" || result.Metadata[0].Name != "Repository name" {
+			t.Errorf("metadata = %+v, want native GitHub metadata only", result.Metadata)
 		}
 	})
 
 	t.Run("does not call GitHub when Fastlane has a description", func(t *testing.T) {
-		cfg := &config.Config{Repository: "https://github.com/owner/app"}
-		fetcher := NewMetadataFetcher(cfg)
+		fetcher := NewMetadataFetcher(&config.Config{Repository: "https://github.com/owner/app"})
 		fetcher.client = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			switch req.URL.Path {
 			case "/repos/owner/app/contents/fastlane/metadata/android":
@@ -594,20 +641,17 @@ func TestFetchAutomaticMetadataFallback(t *testing.T) {
 			return testResponse(http.StatusNotFound, ""), nil
 		})}
 
-		if err := fetcher.FetchAutomaticMetadata(context.Background(), "github"); err != nil {
-			t.Fatalf("FetchAutomaticMetadata() error = %v", err)
+		result := fetcher.Fetch(context.Background(), automaticGitHubPlan)
+		if result.HasErrors() || len(result.Metadata) != 1 {
+			t.Fatalf("metadata = %+v errors = %v, want Fastlane only", result.Metadata, result.Errors)
 		}
-		if cfg.Name != "Fastlane title" {
-			t.Errorf("Name = %q, want Fastlane metadata", cfg.Name)
-		}
-		if cfg.Description != "Fastlane full description" {
-			t.Errorf("Description = %q, want Fastlane full description", cfg.Description)
+		if got := result.Metadata[0]; got.Source != "fastlane" || got.Name != "Fastlane title" || got.Description != "Fastlane full description" {
+			t.Errorf("metadata = %+v, want Fastlane metadata", got)
 		}
 	})
 
 	t.Run("uses GitHub description when Fastlane has no full description", func(t *testing.T) {
-		cfg := &config.Config{Repository: "https://github.com/owner/app"}
-		fetcher := NewMetadataFetcher(cfg)
+		fetcher := NewMetadataFetcher(&config.Config{Repository: "https://github.com/owner/app"})
 		fetcher.client = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			switch req.URL.Path {
 			case "/repos/owner/app/contents/fastlane/metadata/android":
@@ -628,21 +672,21 @@ func TestFetchAutomaticMetadataFallback(t *testing.T) {
 			}
 		})}
 
-		result := fetcher.FetchAutomaticMetadataWithResult(context.Background(), "github")
+		result := fetcher.Fetch(context.Background(), automaticGitHubPlan)
 		if result.HasErrors() {
 			t.Fatalf("unexpected metadata errors: %v", result.Errors[0])
 		}
-		if cfg.Name != "Fastlane title" {
-			t.Errorf("Name = %q, want Fastlane title to win", cfg.Name)
+		if len(result.Metadata) != 2 || result.Metadata[0].Source != "fastlane" || result.Metadata[1].Source != "github" {
+			t.Fatalf("metadata = %+v, want Fastlane then GitHub in order", result.Metadata)
 		}
-		if cfg.Description != "A repository description that is deliberately long enough to avoid a README request." {
-			t.Errorf("Description = %q, want GitHub description", cfg.Description)
+		if result.Metadata[0].Name != "Fastlane title" || result.Metadata[0].Description != "" ||
+			result.Metadata[1].Description != "A repository description that is deliberately long enough to avoid a README request." {
+			t.Errorf("metadata = %+v, want Fastlane name and GitHub description", result.Metadata)
 		}
 	})
 
 	t.Run("uses GitHub description when Fastlane lookup fails", func(t *testing.T) {
-		cfg := &config.Config{Repository: "https://github.com/owner/app"}
-		fetcher := NewMetadataFetcher(cfg)
+		fetcher := NewMetadataFetcher(&config.Config{Repository: "https://github.com/owner/app"})
 		fetcher.client = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			switch req.URL.Path {
 			case "/repos/owner/app/contents/fastlane/metadata/android":
@@ -657,14 +701,52 @@ func TestFetchAutomaticMetadataFallback(t *testing.T) {
 			}
 		})}
 
-		result := fetcher.FetchAutomaticMetadataWithResult(context.Background(), "github")
-		if !result.HasErrors() {
-			t.Fatal("expected the Fastlane failure to be recorded")
+		result := fetcher.Fetch(context.Background(), automaticGitHubPlan)
+		if len(result.Errors) != 1 || result.Errors[0].Source != "fastlane" {
+			t.Fatalf("errors = %v, want the Fastlane failure recorded", result.Errors)
 		}
-		if cfg.Description != "A repository description that is deliberately long enough to avoid a README request." {
-			t.Errorf("Description = %q, want GitHub description", cfg.Description)
+		if len(result.Metadata) != 1 || result.Metadata[0].Source != "github" {
+			t.Errorf("metadata = %+v, want the GitHub fallback", result.Metadata)
 		}
 	})
+
+	t.Run("cancellation skips the fallback", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		fetcher := NewMetadataFetcher(&config.Config{Repository: "https://github.com/owner/app"})
+		fetcher.client = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			cancel()
+			return nil, req.Context().Err()
+		})}
+
+		result := fetcher.Fetch(ctx, automaticGitHubPlan)
+		if len(result.Metadata) != 0 || len(result.Errors) != 1 || !errors.Is(result.Errors[0], context.Canceled) {
+			t.Fatalf("metadata = %+v errors = %v, want one cancellation and no fallback", result.Metadata, result.Errors)
+		}
+	})
+}
+
+func TestFetchExplicitSourcesKeepOrderAndSkipFailures(t *testing.T) {
+	fetcher := NewMetadataFetcher(&config.Config{Repository: "https://codeberg.org/owner/app"})
+	fetcher.client = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return testResponse(http.StatusOK, `{"name":"Example","description":"d"}`), nil
+	})}
+	result := fetcher.Fetch(t.Context(), MetadataPlan{Sources: []string{"github", "gitea", "bogus"}})
+	if len(result.Metadata) != 1 || result.Metadata[0].Source != "gitea" {
+		t.Fatalf("metadata = %+v, want only the gitea answer", result.Metadata)
+	}
+	if len(result.Errors) != 2 || result.Errors[0].Source != "github" || result.Errors[1].Source != "bogus" {
+		t.Fatalf("errors = %v, want github and bogus recorded in order", result.Errors)
+	}
+}
+
+func TestMetadataErrorMessage(t *testing.T) {
+	err := &MetadataError{Source: "github", Err: errors.New("rate limited")}
+	if got, want := err.Error(), "fetch github metadata: rate limited"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+	if !errors.Is(err, err.Err) {
+		t.Error("MetadataError does not unwrap to its cause")
+	}
 }
 
 func TestFetchFDroidMetadataDescription(t *testing.T) {
@@ -773,5 +855,73 @@ func TestFetchFastlaneMetadataErrors(t *testing.T) {
 				t.Fatal("fetchFastlaneMetadata() error = nil, want error")
 			}
 		})
+	}
+}
+
+func TestFetchGitLabMetadataLicenseAndWebsite(t *testing.T) {
+	tests := []struct {
+		name    string
+		license string
+		want    string
+	}{
+		{"mit", `{"key":"mit"}`, "MIT"},
+		{"apache", `{"key":"apache-2.0"}`, "Apache-2.0"},
+		{"gpl-3.0", `{"key":"gpl-3.0"}`, "GPL-3.0"},
+		{"name", `{"key":"other","name":"MIT License"}`, "MIT"},
+		{"upper-case key", `{"key":"MIT"}`, "MIT"},
+		{"unmapped key", `{"key":"other"}`, ""},
+		{"no license", `null`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fetcher := NewMetadataFetcher(&config.Config{Repository: "https://gitlab.com/owner/app"})
+			fetcher.client = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				return testResponse(http.StatusOK, `{
+					"name":"Example","description":"`+strings.Repeat("d", 120)+`",
+					"web_url":"https://gitlab.com/owner/app","license":`+tt.license+`}`), nil
+			})}
+			meta, err := fetcher.fetchGitLabMetadata(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if meta.License != tt.want {
+				t.Errorf("License = %q, want %q", meta.License, tt.want)
+			}
+			if meta.Website != "" {
+				t.Errorf("Website = %q, want empty", meta.Website)
+			}
+		})
+	}
+}
+
+func TestFetchGitLabMetadataNotFoundNamesProject(t *testing.T) {
+	fetcher := NewMetadataFetcher(&config.Config{Repository: "https://gitlab.com/group/sub/app"})
+	fetcher.client = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return testResponse(http.StatusNotFound, ""), nil
+	})}
+	_, err := fetcher.fetchGitLabMetadata(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "group/sub/app") {
+		t.Fatalf("fetchGitLabMetadata() error = %v, want it to name group/sub/app", err)
+	}
+}
+
+func TestFetchGitLabReadmeClosesEveryAttempt(t *testing.T) {
+	var bodies []*closeTracker
+	fetcher := NewMetadataFetcher(&config.Config{Repository: "https://gitlab.com/owner/app"})
+	fetcher.client = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		body := &closeTracker{Reader: strings.NewReader("not found")}
+		bodies = append(bodies, body)
+		return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: body, Request: req}, nil
+	})}
+	if _, err := fetcher.fetchGitLabReadme(t.Context(), "https://gitlab.com", "owner%2Fapp", "main"); err == nil {
+		t.Fatal("fetchGitLabReadme() error = nil, want not found")
+	}
+	if len(bodies) < 2 {
+		t.Fatalf("attempted %d README files, want several", len(bodies))
+	}
+	for i, body := range bodies {
+		if !body.closed {
+			t.Errorf("response body %d left open", i)
+		}
 	}
 }

@@ -1,8 +1,7 @@
 package config
 
 import (
-	"os"
-	"path/filepath"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -38,9 +37,18 @@ var specSupportedFields = map[string]bool{
 // deprecated: they must decode without error but have no effect on parsing,
 // validation, or behavior within this package.
 var specDeprecatedFields = map[string]bool{
-	"changelog":   true,
-	"pubkey":      true,
-	"communities": true,
+	"changelog":          true,
+	"pubkey":             true,
+	"communities":        true,
+	"identifier":         true,
+	"version":            true,
+	"assets":             true,
+	"executables":        true,
+	"release_repository": true,
+	"homepage":           true,
+	"remote_metadata":    true,
+	"fetch_metadata":     true,
+	"blossom_server":     true,
 }
 
 // TestConfigSupportedFieldsExact ensures Config exposes exactly the fields
@@ -48,32 +56,52 @@ var specDeprecatedFields = map[string]bool{
 // legacy callers. It fails if a new yaml field is added without updating the
 // spec/deprecated lists, and it fails if a documented field goes missing.
 func TestConfigSupportedFieldsExact(t *testing.T) {
-	typ := reflect.TypeOf(Config{})
-	seen := map[string]bool{}
+	supported := yamlKeys(reflect.TypeOf(Config{}))
+	for name := range supported {
+		if !specSupportedFields[name] {
+			t.Errorf("Config has undocumented yaml field %q (add to zsp.md or specDeprecatedFields)", name)
+		}
+	}
+	for name := range specSupportedFields {
+		if !supported[name] {
+			t.Errorf("Config is missing documented field %q", name)
+		}
+	}
 
+	deprecated := yamlKeys(reflect.TypeOf(deprecatedKeys{}))
+	for name := range deprecated {
+		if !specDeprecatedFields[name] {
+			t.Errorf("deprecatedKeys has unlisted yaml field %q", name)
+		}
+	}
+	for name := range specDeprecatedFields {
+		if !deprecated[name] {
+			t.Errorf("deprecatedKeys is missing field %q", name)
+		}
+	}
+}
+
+// yamlKeys returns the yaml key of every directly tagged field of typ,
+// skipping inline groups.
+func yamlKeys(typ reflect.Type) map[string]bool {
+	keys := map[string]bool{}
 	for i := 0; i < typ.NumField(); i++ {
 		tag := typ.Field(i).Tag.Get("yaml")
 		if tag == "" || tag == "-" {
 			continue
 		}
-		name := strings.Split(tag, ",")[0]
-		seen[name] = true
-		if !specSupportedFields[name] && !specDeprecatedFields[name] {
-			t.Errorf("Config has undocumented yaml field %q (add to zsp.md or specDeprecatedFields)", name)
+		name, options, _ := strings.Cut(tag, ",")
+		if name == "" && strings.Contains(options, "inline") {
+			continue
 		}
+		keys[name] = true
 	}
-
-	for name := range specSupportedFields {
-		if !seen[name] {
-			t.Errorf("Config is missing documented field %q", name)
-		}
-	}
+	return keys
 }
 
 // TestDeprecatedFieldsDecodeWithoutError verifies changelog, pubkey, and
 // communities are accepted by Parse without error (so old zapstore.yaml
-// files continue to load) but never influence the resulting Config beyond
-// their own deprecated struct fields.
+// files continue to load) but never influence the resulting Config.
 func TestDeprecatedFieldsDecodeWithoutError(t *testing.T) {
 	cfg, err := Parse(strings.NewReader(`
 repository: https://github.com/user/app
@@ -103,62 +131,133 @@ changelog: CHANGELOG.md
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
-	if cfg.Changelog != "CHANGELOG.md" {
-		t.Fatalf("Changelog = %q, want CHANGELOG.md (field itself should still decode)", cfg.Changelog)
-	}
 	if cfg.ReleaseNotes != "" {
 		t.Errorf("ReleaseNotes = %q, want empty: changelog must be inert", cfg.ReleaseNotes)
 	}
 }
 
-// TestLoadDoesNotDependOnSigner ensures loading never resolves SIGN_WITH or
+// TestParseDoesNotDependOnSigner ensures parsing never resolves SIGN_WITH or
 // fails because a zapstore.yaml pubkey does not match the current signer.
-// This is a hard requirement: signer-dependent behavior must not exist in
-// config loading.
-func TestLoadDoesNotDependOnSigner(t *testing.T) {
-	const mismatchedPubkey = "npub1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "zapstore.yaml")
-	contents := "repository: https://github.com/user/app\npubkey: " + mismatchedPubkey + "\n"
-	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
+func TestParseDoesNotDependOnSigner(t *testing.T) {
 	t.Setenv("SIGN_WITH", "this value must not be read")
 
-	cfg, err := Load(path)
+	_, err := Parse(strings.NewReader(`
+repository: https://github.com/user/app
+pubkey: npub1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+`))
 	if err != nil {
-		t.Fatalf("Load() error = %v, want nil: loading must not depend on SIGN_WITH", err)
-	}
-	if cfg.Pubkey != mismatchedPubkey {
-		t.Errorf("Pubkey = %q, want %q (field decodes, just has no effect)", cfg.Pubkey, mismatchedPubkey)
+		t.Fatalf("Parse() error = %v, want nil: parsing must not depend on SIGN_WITH", err)
 	}
 }
 
-// TestLoadLocalPathIsNotResolvedByInternalLoad documents that internal Load
-// leaves ReleaseSource.LocalPath untouched (only BaseDir is recorded); actual
-// local-path resolution relative to the config file is the responsibility of
-// the public zsp.LoadConfig, not this package.
-func TestLoadLocalPathIsNotResolvedByInternalLoad(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "zapstore.yaml")
-	if err := os.WriteFile(path, []byte("release_source: builds/app.apk\n"), 0o600); err != nil {
-		t.Fatal(err)
+func TestParseRejectsUnknownKeysAndEmptyInput(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr string
+	}{
+		{name: "typo in top-level key", input: "release_sorce: https://github.com/a/b\n", wantErr: "release_sorce"},
+		{name: "typo in release_source key", input: "release_source:\n  url: https://github.com/a/b\n  tpye: github\n", wantErr: "tpye"},
+		{name: "typo in extractor key", input: "release_source:\n  asset_url: https://example.com/a.apk\n  version:\n    url: https://example.com/v\n    selecter: .v\n", wantErr: "selecter"},
+		{name: "empty input", input: "", wantErr: "zapstore.yaml is empty"},
+		{name: "comments only", input: "# nothing here\n\n", wantErr: "zapstore.yaml is empty"},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse(strings.NewReader(tt.input))
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Parse(%q) error = %v, want it to contain %q", tt.input, err, tt.wantErr)
+			}
+			if tt.input == "" && !errors.Is(err, ErrEmpty) {
+				t.Errorf("Parse(empty) error = %v, want ErrEmpty", err)
+			}
+		})
+	}
+}
 
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+func TestNormalizeReleaseSource(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     ReleaseSource
+		want    ReleaseSource
+		wantErr string
+	}{
+		{name: "forge url", raw: ReleaseSource{URL: "https://github.com/a/b"}, want: ReleaseSource{URL: "https://github.com/a/b"}},
+		{name: "direct apk url", raw: ReleaseSource{URL: "https://example.com/app.apk"}, want: ReleaseSource{AssetURL: "https://example.com/app.apk", IsWebSource: true}},
+		{name: "type is lowered", raw: ReleaseSource{URL: "https://git.example.com/a/b", Type: " GitLab "}, want: ReleaseSource{URL: "https://git.example.com/a/b", Type: "gitlab"}},
+		{name: "typed unknown host is not a direct download", raw: ReleaseSource{URL: "https://example.com/app.apk", Type: "fdroid"}, want: ReleaseSource{URL: "https://example.com/app.apk", Type: "fdroid"}},
+		{name: "asset url", raw: ReleaseSource{AssetURL: "https://example.com/app.apk"}, want: ReleaseSource{AssetURL: "https://example.com/app.apk", IsWebSource: true}},
+		{name: "asset url keeps url", raw: ReleaseSource{URL: "https://example.com/page", AssetURL: "https://example.com/app.apk"}, want: ReleaseSource{URL: "https://example.com/page", AssetURL: "https://example.com/app.apk", IsWebSource: true}},
+		{name: "IsWebSource is honored", raw: ReleaseSource{URL: "https://github.com/a/b", IsWebSource: true}, want: ReleaseSource{URL: "https://github.com/a/b", IsWebSource: true}},
+		{name: "local path", raw: ReleaseSource{LocalPath: "/x/app.apk"}, want: ReleaseSource{LocalPath: "/x/app.apk"}},
+		{name: "type local moves url", raw: ReleaseSource{URL: "/x/*.apk", Type: "local"}, want: ReleaseSource{LocalPath: "/x/*.apk", Type: "local"}},
+		{name: "type local two paths", raw: ReleaseSource{URL: "/x", LocalPath: "/y", Type: "local"}, wantErr: "one path"},
+		{name: "local with remote type", raw: ReleaseSource{LocalPath: "/x", Type: "github"}, wantErr: "remote type"},
+		{name: "local with asset url", raw: ReleaseSource{LocalPath: "/x", AssetURL: "https://example.com/a.apk"}, wantErr: "remote settings"},
+		{name: "empty", raw: ReleaseSource{}, wantErr: "must specify"},
 	}
-	if cfg.ReleaseSource == nil {
-		t.Fatal("ReleaseSource is nil")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NormalizeReleaseSource(tt.raw)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("NormalizeReleaseSource(%+v) error = %v, want it to contain %q", tt.raw, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NormalizeReleaseSource(%+v): %v", tt.raw, err)
+			}
+			if *got != tt.want {
+				t.Errorf("NormalizeReleaseSource(%+v) = %+v, want %+v", tt.raw, *got, tt.want)
+			}
+		})
 	}
-	if cfg.ReleaseSource.LocalPath != "builds/app.apk" {
-		t.Errorf("LocalPath = %q, want unresolved %q", cfg.ReleaseSource.LocalPath, "builds/app.apk")
+}
+
+func TestNormalizeReleaseSourceIsIdempotent(t *testing.T) {
+	for _, raw := range []ReleaseSource{
+		{URL: "https://example.com/app.apk"},
+		{URL: "https://example.com/downloads"},
+		{URL: "https://github.com/a/b"},
+		{URL: "/x/*.apk", Type: "local"},
+		{AssetURL: "https://example.com/app.apk"},
+	} {
+		once, err := NormalizeReleaseSource(raw)
+		if err != nil {
+			t.Fatalf("NormalizeReleaseSource(%+v): %v", raw, err)
+		}
+		twice, err := NormalizeReleaseSource(*once)
+		if err != nil || *twice != *once {
+			t.Errorf("NormalizeReleaseSource(%+v) twice = %+v, %v, want %+v", raw, twice, err, *once)
+		}
 	}
-	if cfg.BaseDir == "" {
-		t.Error("BaseDir should still be recorded for callers that resolve paths themselves")
+}
+
+func TestParseKeepsDirectURLAsWritten(t *testing.T) {
+	for name, input := range map[string]string{
+		"scalar":  "release_source: https://example.com/app.apk\n",
+		"mapping": "release_source:\n  url: https://example.com/app.apk\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := Parse(strings.NewReader(input))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate(): %v", err)
+			}
+			if got := *cfg.ReleaseSource; got != (ReleaseSource{URL: "https://example.com/app.apk"}) {
+				t.Errorf("ReleaseSource = %+v, want the URL as written", got)
+			}
+			normalized, err := NormalizeReleaseSource(*cfg.ReleaseSource)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := (ReleaseSource{AssetURL: "https://example.com/app.apk", IsWebSource: true}); *normalized != want {
+				t.Errorf("normalized = %+v, want %+v", *normalized, want)
+			}
+		})
 	}
 }
 
@@ -317,11 +416,10 @@ min_allowed_version_code: 42
 	}
 }
 
-// TestUnknownFieldsIgnoredAndInert extends the base "unknown fields ignored"
-// coverage with fields that could plausibly be mistaken for supported ones
-// (e.g. legacy zapstore-cli names), ensuring they neither error nor leak into
-// any Config field.
-func TestUnknownFieldsIgnoredAndInert(t *testing.T) {
+// TestLegacyKeysAreInert covers deprecated keys that could plausibly be
+// mistaken for supported ones (e.g. legacy zapstore-cli names), ensuring they
+// neither error nor leak into any Config field.
+func TestLegacyKeysAreInert(t *testing.T) {
 	cfg, err := Parse(strings.NewReader(`
 repository: https://github.com/user/app
 identifier: com.example.app

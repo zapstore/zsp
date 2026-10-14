@@ -10,7 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
-	"strings"
+	"sync"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -56,49 +56,57 @@ func NewPublisher(relayURLs []string) *Publisher {
 }
 
 // EnsureReachable verifies that at least one configured relay accepts a
-// connection. It returns the URLs that could not be reached.
+// connection. Relays are probed concurrently. It returns the URLs that could
+// not be reached.
 func (p *Publisher) EnsureReachable(ctx context.Context) ([]string, error) {
+	errs := make([]error, len(p.relayURLs))
+	var wg sync.WaitGroup
+	for i, relayURL := range p.relayURLs {
+		wg.Go(func() { errs[i] = reachRelay(ctx, relayURL) })
+	}
+	wg.Wait()
+
 	unreachable := make([]string, 0)
 	var failures []error
-	reachable := false
-	for _, relayURL := range p.relayURLs {
-		relayCtx, cancel := context.WithTimeout(ctx, RelayTimeout)
-		if path, ok := socketPath(relayURL); ok {
-			conn, err := dialSocket(relayCtx, path)
-			cancel()
-			if err != nil {
-				unreachable = append(unreachable, relayURL)
-				failures = append(failures, fmt.Errorf("%s: %w", relayURL, err))
-				continue
-			}
-			_ = conn.Close()
-			reachable = true
-			continue
-		}
-		relay, err := nostr.RelayConnect(relayCtx, relayURL)
-		cancel()
+	for i, err := range errs {
 		if err != nil {
-			unreachable = append(unreachable, relayURL)
-			failures = append(failures, relayFailure(relayURL, err))
-			continue
+			unreachable = append(unreachable, p.relayURLs[i])
+			failures = append(failures, relayFailure(p.relayURLs[i], err))
 		}
-		_ = relay.Close()
-		reachable = true
 	}
-	if reachable {
+	if len(failures) < len(p.relayURLs) {
 		return unreachable, nil
 	}
 	return unreachable, relayQueryError("reachability", failures)
 }
 
+func reachRelay(ctx context.Context, relayURL string) error {
+	ctx, cancel := context.WithTimeout(ctx, RelayTimeout)
+	defer cancel()
+	if path, ok := socketPath(relayURL); ok {
+		conn, err := dialSocket(ctx, path)
+		if err != nil {
+			return newOpError("connect", err)
+		}
+		_ = conn.Close() // the probe is over; a close failure does not change the answer
+		return nil
+	}
+	relay, err := nostr.RelayConnect(ctx, relayURL)
+	if err != nil {
+		return newOpError("connect", err)
+	}
+	_ = relay.Close() // the probe is over; a close failure does not change the answer
+	return nil
+}
+
 // relayFailure renders a relay failure without credentials: the relay URL is
-// reduced to its public form and the underlying error is sanitized.
+// reduced to its public form and the cause is sanitized when printed.
 func relayFailure(relayURL string, err error) error {
 	public := sanitize.URL(relayURL)
 	if public == "" {
 		public = "relay"
 	}
-	return fmt.Errorf("%s: %s", public, sanitize.Text(err.Error()))
+	return newOpError(public, err)
 }
 
 // PublishResult contains the result of publishing to a single relay.
@@ -107,76 +115,89 @@ type PublishResult struct {
 	Success     bool
 	IsDuplicate bool
 	Error       error
+	// Message is the sanitized reason the relay gave, or the sanitized failure
+	// text when no relay answered. It carries no operation prefix.
+	Message string
 }
 
-// Publish publishes an event to all configured relays.
+// Publish publishes an event to all configured relays concurrently. Results
+// are in the order of the configured relays.
 func (p *Publisher) Publish(ctx context.Context, event *nostr.Event) []PublishResult {
 	results := make([]PublishResult, len(p.relayURLs))
-
-	for i, url := range p.relayURLs {
-		results[i] = p.publishToRelay(ctx, url, event)
+	var wg sync.WaitGroup
+	for i, relayURL := range p.relayURLs {
+		wg.Go(func() { results[i] = p.publishToRelay(ctx, relayURL, event) })
 	}
-
+	wg.Wait()
 	return results
 }
 
-// isDuplicateError checks if an error indicates the event already exists.
-func isDuplicateError(err error) bool {
-	if err == nil {
-		return false
-	}
-	errStr := strings.ToLower(err.Error())
-	return strings.Contains(errStr, "duplicate") || strings.Contains(errStr, "already exists")
-}
-
 // publishToRelay publishes an event to a single relay.
-func (p *Publisher) publishToRelay(ctx context.Context, url string, event *nostr.Event) PublishResult {
-	result := PublishResult{RelayURL: url}
+func (p *Publisher) publishToRelay(ctx context.Context, relayURL string, event *nostr.Event) PublishResult {
+	result := PublishResult{RelayURL: relayURL}
+	fail := func(err error) PublishResult {
+		result.Error = err
+		result.Message = errorReason(err)
+		return result
+	}
+	// A relay's free-form duplicate wording is not authoritative. The exact
+	// signed event must be present before it counts as accepted.
+	duplicate := func(err error) PublishResult {
+		result.Success = true
+		result.IsDuplicate = true
+		result.Error = err // kept for diagnostics only
+		result.Message = errorReason(err)
+		return result
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, RelayTimeout)
 	defer cancel()
 
-	if path, ok := socketPath(url); ok {
+	if path, ok := socketPath(relayURL); ok {
 		err := publishSocket(ctx, path, event)
-		if err != nil {
-			// A relay's free-form duplicate wording is not authoritative. Confirm
-			// the exact event is present before treating it as accepted.
-			if isDuplicateError(err) && socketEventExists(ctx, path, event.ID) {
-				result.Success = true
-				result.IsDuplicate = true
-				result.Error = err
-				return result
-			}
-			result.Error = err
+		if err == nil {
+			result.Success = true
 			return result
 		}
-		result.Success = true
-		return result
+		if isDuplicateError(err) && socketEventExists(ctx, path, event.ID) {
+			return duplicate(err)
+		}
+		return fail(err)
 	}
 
-	relay, err := nostr.RelayConnect(ctx, url)
+	relay, err := nostr.RelayConnect(ctx, relayURL)
 	if err != nil {
-		result.Error = fmt.Errorf("failed to connect: %s", sanitize.Text(err.Error()))
-		return result
+		return fail(newOpError("connect", err))
 	}
 	defer relay.Close()
 
 	err = relay.Publish(ctx, *event)
 	if err != nil {
-		// A relay's free-form duplicate wording is not authoritative. Confirm
-		// the exact signed event is present before treating it as accepted.
+		err = newOpError("publish", relayRejection(err))
 		if isDuplicateError(err) && eventExists(ctx, relay, event.ID) {
-			result.Success = true
-			result.IsDuplicate = true
-			result.Error = errors.New(sanitize.Text(err.Error())) // kept for diagnostics only
-			return result
+			return duplicate(err)
 		}
-		result.Error = fmt.Errorf("failed to publish: %s", sanitize.Text(err.Error()))
-		return result
+		return fail(err)
+	}
+	// go-nostr returns nil when the connection drops after the write but before
+	// the relay's OK, so a nil error alone does not prove acceptance.
+	if !relay.IsConnected() && !storedOnRelay(ctx, relayURL, event.ID) {
+		return fail(newOpError("publish", errors.New("connection closed before the relay confirmed the event")))
 	}
 
 	result.Success = true
 	return result
+}
+
+// storedOnRelay opens a fresh connection and reports whether the relay has
+// the event.
+func storedOnRelay(ctx context.Context, relayURL, eventID string) bool {
+	relay, err := nostr.RelayConnect(ctx, relayURL)
+	if err != nil {
+		return false
+	}
+	defer relay.Close()
+	return eventExists(ctx, relay, eventID)
 }
 
 func eventExists(ctx context.Context, relay *nostr.Relay, eventID string) bool {
@@ -205,14 +226,15 @@ func socketEventExists(ctx context.Context, path, eventID string) bool {
 	return false
 }
 
-// PublishIdentityProof publishes a single kind 30509 event to all relays.
-func (p *Publisher) PublishIdentityProof(ctx context.Context, event *nostr.Event) ([]PublishResult, error) {
-	return p.Publish(ctx, event), nil
-}
+// identityProofLimit is the page size requested per relay for identity proofs.
+const identityProofLimit = 500
 
 // FetchIdentityProofsByCertificate returns current matching proofs reported by
 // each configured relay. ZSP applies its certificate-global selection rule
-// after strict local validation.
+// after strict local validation. Each relay is asked for at most
+// identityProofLimit events; a relay that returns a full page adds a warning
+// wrapping ErrIncompleteResults, because the proof sought may be beyond it. The
+// events it did return are still included.
 func (p *Publisher) FetchIdentityProofsByCertificate(ctx context.Context, certHash string) ([]*nostr.Event, []error, error) {
 	filter := nostr.Filter{
 		Kinds: []int{KindIdentityProof},
@@ -221,7 +243,7 @@ func (p *Publisher) FetchIdentityProofsByCertificate(ctx context.Context, certHa
 		// enough current author variants to select the latest valid proof
 		// locally; limiting this query to one lets one malformed event hide a
 		// valid proof from another author.
-		Limit: 100,
+		Limit: identityProofLimit,
 	}
 	proofsByID := make(map[string]*nostr.Event)
 	var warnings []error
@@ -233,6 +255,9 @@ func (p *Publisher) FetchIdentityProofsByCertificate(ctx context.Context, certHa
 			continue
 		}
 		completed++
+		if len(events) >= identityProofLimit {
+			warnings = append(warnings, relayFailure(relayURL, ErrIncompleteResults))
+		}
 		for _, event := range events {
 			if event != nil {
 				proofsByID[event.ID] = event
@@ -561,21 +586,25 @@ func relayQueryError(operation string, warnings []error) error {
 }
 
 // queryRelayMultiple queries a single relay and returns all matching events.
-func (p *Publisher) queryRelayMultiple(ctx context.Context, url string, filter nostr.Filter) ([]*nostr.Event, error) {
+func (p *Publisher) queryRelayMultiple(ctx context.Context, relayURL string, filter nostr.Filter) ([]*nostr.Event, error) {
 	ctx, cancel := context.WithTimeout(ctx, RelayTimeout)
 	defer cancel()
 
-	if path, ok := socketPath(url); ok {
+	if path, ok := socketPath(relayURL); ok {
 		return querySocket(ctx, path, filter)
 	}
 
-	relay, err := nostr.RelayConnect(ctx, url)
+	relay, err := nostr.RelayConnect(ctx, relayURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect: %s", sanitize.Text(err.Error()))
+		return nil, newOpError("connect", err)
 	}
 	defer relay.Close()
 
-	return relay.QuerySync(ctx, filter)
+	events, err := relay.QuerySync(ctx, filter)
+	if err != nil {
+		return nil, newOpError("query", err)
+	}
+	return events, nil
 }
 
 // BuildIdentityProofEvent creates a kind 30509 identity proof event per NIP-C1.

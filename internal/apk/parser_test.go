@@ -3,17 +3,24 @@ package apk
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
+	"encoding/xml"
+	"errors"
 	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/zapstore/zsp/internal/media"
 )
 
 func TestReadZipFileRejectsOversizedResource(t *testing.T) {
@@ -21,7 +28,7 @@ func TestReadZipFileRejectsOversizedResource(t *testing.T) {
 		Name:               "res/mipmap/icon.png",
 		UncompressedSize64: maxAPKResourceSize + 1,
 	}}
-	if _, err := readZipFile(file); err == nil {
+	if _, err := readZipFile(file, maxAPKResourceSize); err == nil {
 		t.Fatal("readZipFile() error = nil, want size-limit rejection")
 	}
 }
@@ -53,7 +60,7 @@ func TestParse(t *testing.T) {
 				t.Skipf("test APK not found: %s", path)
 			}
 
-			info, err := Parse(path)
+			info, err := Parse(t.Context(), path)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Parse() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -103,7 +110,7 @@ func TestParseAllTestAPKs(t *testing.T) {
 		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".apk" {
 			t.Run(entry.Name(), func(t *testing.T) {
 				path := filepath.Join(testdataDir, entry.Name())
-				info, err := Parse(path)
+				info, err := Parse(t.Context(), path)
 				if err != nil {
 					t.Errorf("Parse(%s) failed: %v", entry.Name(), err)
 					return
@@ -130,7 +137,7 @@ func TestParseBraveAPI37Manifest(t *testing.T) {
 		t.Skipf("test APK not found: %s", path)
 	}
 
-	info, err := Parse(path)
+	info, err := Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
@@ -161,7 +168,7 @@ func TestParseAmberAdaptiveIcon(t *testing.T) {
 		t.Skipf("test APK not found: %s", path)
 	}
 
-	info, err := Parse(path)
+	info, err := Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
@@ -179,6 +186,39 @@ func TestParseAmberAdaptiveIcon(t *testing.T) {
 	red, green, blue, _ := icon.At(256, 256).RGBA()
 	if red <= green || green <= blue {
 		t.Errorf("icon center color = (%d, %d, %d), want Amber's yellow foreground", red, green, blue)
+	}
+}
+
+// Resource-shrunk APKs hide their density variants behind obfuscated names, so
+// these only reach full size through the resource table's density configs.
+func TestParseIconWidth(t *testing.T) {
+	tests := []struct {
+		apkFile  string
+		minWidth int
+	}{
+		{"ironfox-152.0.6-arm64-v8a.apk", 192},
+		{"misty-breez-breez-signed.apk", 192},
+		{"exiferaser.apk", 512},
+		{"mempal-v1.5.3.apk", 512},
+	}
+	for _, tt := range tests {
+		t.Run(tt.apkFile, func(t *testing.T) {
+			path := filepath.Join("..", "..", "testdata", "apks", tt.apkFile)
+			if _, err := os.Stat(path); os.IsNotExist(err) {
+				t.Skipf("test APK not found: %s", path)
+			}
+			info, err := Parse(t.Context(), path)
+			if err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+			config, _, err := image.DecodeConfig(bytes.NewReader(info.Icon))
+			if err != nil {
+				t.Fatalf("decode icon: %v", err)
+			}
+			if config.Width < tt.minWidth {
+				t.Errorf("icon width = %d, want at least %d", config.Width, tt.minWidth)
+			}
+		})
 	}
 }
 
@@ -255,13 +295,13 @@ func TestParseRejectsMultipleCurrentSigners(t *testing.T) {
 	// additionally reject it because it has more than one current signer.
 	path := filepath.Join("testdata", "two-signers.apk")
 
-	if _, err := Parse(path); err == nil {
+	if _, err := Parse(t.Context(), path); err == nil {
 		t.Fatal("Parse() succeeded, want error for multiple current signers")
 	} else if !strings.Contains(err.Error(), "current signer") {
 		t.Errorf("Parse() error = %q, want it to mention multiple current signers", err.Error())
 	}
 
-	if _, err := ExtractCertificate(path); err == nil {
+	if _, err := ExtractCertificate(t.Context(), path); err == nil {
 		t.Fatal("ExtractCertificate() succeeded, want error for multiple current signers")
 	} else if !strings.Contains(err.Error(), "current signer") {
 		t.Errorf("ExtractCertificate() error = %q, want it to mention multiple current signers", err.Error())
@@ -281,11 +321,11 @@ func TestParseRejectsMalformedSignatures(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			path := filepath.Join("testdata", tt.file)
 
-			if _, err := Parse(path); err == nil {
+			if _, err := Parse(t.Context(), path); err == nil {
 				t.Fatal("Parse() succeeded, want error for malformed signature")
 			}
 
-			if _, err := ExtractCertificate(path); err == nil {
+			if _, err := ExtractCertificate(t.Context(), path); err == nil {
 				t.Fatal("ExtractCertificate() succeeded, want error for malformed signature")
 			}
 		})
@@ -297,7 +337,7 @@ func TestParseExposesValidatedV3SigningAncestors(t *testing.T) {
 	// certificates: rsa-2048 (oldest) -> rsa-2048_2 -> rsa-2048_3 (current).
 	path := filepath.Join("testdata", "v1v2v3-with-rsa-2048-lineage-3-signers.apk")
 
-	info, err := Parse(path)
+	info, err := Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
@@ -327,7 +367,7 @@ func TestParseExposesValidatedV3SigningAncestors(t *testing.T) {
 		}
 	}
 
-	cert, err := ExtractCertificate(path)
+	cert, err := ExtractCertificate(t.Context(), path)
 	if err != nil {
 		t.Fatalf("ExtractCertificate() error = %v", err)
 	}
@@ -346,7 +386,7 @@ func TestParseNoRotationHasNoSigningAncestors(t *testing.T) {
 		t.Skipf("test APK not found: %s", path)
 	}
 
-	info, err := Parse(path)
+	info, err := Parse(t.Context(), path)
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
@@ -367,7 +407,7 @@ func TestHashFile(t *testing.T) {
 		t.Fatalf("failed to create test file: %v", err)
 	}
 
-	hash, err := hashFile(tmpFile)
+	hash, err := hashFile(t.Context(), tmpFile)
 	if err != nil {
 		t.Fatalf("hashFile() error: %v", err)
 	}
@@ -467,7 +507,7 @@ func TestExtractArchitectures(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := extractArchitectures(writeABIZip(t, tt.files))
+			got := extractArchitectures(openZipFiles(t, writeABIZip(t, tt.files)))
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("extractArchitectures() = %v, want %v", got, tt.want)
 			}
@@ -496,11 +536,21 @@ func TestExtractArchitecturesBackslashPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := extractArchitectures(path)
+	got := extractArchitectures(openZipFiles(t, path))
 	want := []string{"arm64-v8a"}
 	if !slices.Equal(got, want) {
 		t.Errorf("extractArchitectures() = %v, want %v", got, want)
 	}
+}
+
+func openZipFiles(t *testing.T, path string) []*zip.File {
+	t.Helper()
+	r, err := zip.OpenReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { r.Close() })
+	return r.File
 }
 
 func writeABIZip(t *testing.T, files map[string][]byte) string {
@@ -548,4 +598,231 @@ func elfBytes(class byte, machine uint16, big bool) []byte {
 	hdr[18] = byte(machine)
 	hdr[19] = byte(machine >> 8)
 	return hdr
+}
+
+func manifestTokens(t *testing.T, attrs map[string]map[string]string) *manifestCollector {
+	t.Helper()
+	collector := &manifestCollector{}
+	for _, element := range []string{"manifest", "uses-sdk", "application"} {
+		start := xml.StartElement{Name: xml.Name{Local: element}}
+		for name, value := range attrs[element] {
+			start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Local: name}, Value: value})
+		}
+		if err := collector.EncodeToken(start); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return collector
+}
+
+func TestManifestCollectorResult(t *testing.T) {
+	tests := []struct {
+		name     string
+		manifest map[string]string
+		sdk      map[string]string
+		wantCode int64
+		wantMin  int32
+		wantErr  string
+	}{
+		{name: "valid", manifest: map[string]string{"versionCode": "12"}, sdk: map[string]string{"minSdkVersion": "24", "targetSdkVersion": "35"}, wantCode: 12, wantMin: 24},
+		{name: "hex version code", manifest: map[string]string{"versionCode": "0x10"}, wantCode: 16},
+		{name: "missing version code", manifest: map[string]string{}, wantErr: "versionCode is missing"},
+		{name: "non-numeric version code", manifest: map[string]string{"versionCode": "abc"}, wantErr: "not a number"},
+		{name: "zero version code", manifest: map[string]string{"versionCode": "0"}, wantErr: "must be positive"},
+		{name: "negative version code", manifest: map[string]string{"versionCode": "-5"}, wantErr: "must be positive"},
+		{name: "no uses-sdk", manifest: map[string]string{"versionCode": "1"}, wantCode: 1},
+		{name: "negative minSdk", manifest: map[string]string{"versionCode": "1"}, sdk: map[string]string{"minSdkVersion": "-1"}, wantErr: "minSdkVersion"},
+		{name: "negative targetSdk", manifest: map[string]string{"versionCode": "1"}, sdk: map[string]string{"targetSdkVersion": "-30"}, wantErr: "targetSdkVersion"},
+		{name: "minSdk over int32", manifest: map[string]string{"versionCode": "1"}, sdk: map[string]string{"minSdkVersion": "4294967296"}, wantErr: "minSdkVersion"},
+		{name: "targetSdk over int64", manifest: map[string]string{"versionCode": "1"}, sdk: map[string]string{"targetSdkVersion": "99999999999999999999"}, wantErr: "targetSdkVersion"},
+		{name: "preview codename is not a level", manifest: map[string]string{"versionCode": "1"}, sdk: map[string]string{"minSdkVersion": "VanillaIceCream"}, wantCode: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.manifest["package"] = "dev.example"
+			collector := manifestTokens(t, map[string]map[string]string{"manifest": tt.manifest, "uses-sdk": tt.sdk})
+			got, err := collector.result()
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("result() error = %v, want it to contain %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("result() error = %v", err)
+			}
+			if got.VersionCode != tt.wantCode || got.MinSDK != tt.wantMin {
+				t.Errorf("result() = code %d min %d, want code %d min %d", got.VersionCode, got.MinSDK, tt.wantCode, tt.wantMin)
+			}
+		})
+	}
+}
+
+func TestManifestCollectorRequiresPackage(t *testing.T) {
+	collector := manifestTokens(t, map[string]map[string]string{"manifest": {"versionCode": "1"}})
+	if _, err := collector.result(); err == nil {
+		t.Fatal("result() error = nil, want missing package")
+	}
+}
+
+func TestParseRejectsMalformedArchives(t *testing.T) {
+	tests := []struct {
+		name  string
+		files map[string][]byte
+	}{
+		{"missing manifest", map[string][]byte{"classes.dex": []byte("dex")}},
+		{"garbage manifest", map[string][]byte{"AndroidManifest.xml": []byte("\x03\x00\x08\x00\xff\xff\xff\xff garbage")}},
+		{"truncated manifest header", map[string][]byte{"AndroidManifest.xml": {0x03, 0x00}}},
+		{"garbage resource table", map[string][]byte{
+			"AndroidManifest.xml": []byte("\x03\x00\x08\x00\x10\x00\x00\x00 garbage garbage"),
+			"resources.arsc":      bytes.Repeat([]byte{0xff}, 256),
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeABIZip(t, tt.files)
+			info, err := Parse(t.Context(), path)
+			if err == nil {
+				t.Fatalf("Parse(%s) = %+v, want error", tt.name, info)
+			}
+		})
+	}
+}
+
+func TestParseHonoursCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	path := filepath.Join("..", "..", "testdata", "apks", "sample.apk")
+	if _, err := Parse(ctx, path); !errors.Is(err, context.Canceled) {
+		t.Errorf("Parse(cancelled) error = %v, want context.Canceled", err)
+	}
+	if _, err := ExtractCertificate(ctx, path); !errors.Is(err, context.Canceled) {
+		t.Errorf("ExtractCertificate(cancelled) error = %v, want context.Canceled", err)
+	}
+}
+
+func TestParseReturnsSigningCertificate(t *testing.T) {
+	path := filepath.Join("testdata", "v1v2v3-with-rsa-2048-lineage-3-signers.apk")
+	info, err := Parse(t.Context(), path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if info.Certificate == nil {
+		t.Fatal("Parse() Certificate = nil")
+	}
+	sum := sha256.Sum256(info.Certificate.Raw)
+	if got := hex.EncodeToString(sum[:]); got != info.CertFingerprint {
+		t.Errorf("Certificate fingerprint = %s, want %s", got, info.CertFingerprint)
+	}
+}
+
+func TestIsValidZipEntryPath(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"res/mipmap-hdpi/ic_launcher.png", true},
+		{"lib/arm64-v8a/", true},
+		{"AndroidManifest.xml", true},
+		{"../evil", false},
+		{"res/../../evil", false},
+		{"/etc/passwd", false},
+		{"res//double.png", false},
+		{"res/./dot.png", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isValidZipEntryPath(tt.name); got != tt.want {
+				t.Errorf("isValidZipEntryPath(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseColor(t *testing.T) {
+	tests := []struct {
+		in     string
+		want   color.NRGBA
+		wantOK bool
+	}{
+		{"#112233", color.NRGBA{0x11, 0x22, 0x33, 0xff}, true},
+		{"#80112233", color.NRGBA{0x11, 0x22, 0x33, 0x80}, true},
+		{"#fff", color.NRGBA{0xff, 0xff, 0xff, 0xff}, true},
+		{"#8f00", color.NRGBA{0xff, 0x00, 0x00, 0x88}, true},
+		{"112233", color.NRGBA{}, false},
+		{"#12345", color.NRGBA{}, false},
+		{"#gggggg", color.NRGBA{}, false},
+		{"", color.NRGBA{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			got, ok := parseColor(tt.in)
+			if ok != tt.wantOK || got != tt.want {
+				t.Errorf("parseColor(%q) = %v, %v, want %v, %v", tt.in, got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestSVGFill(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"#112233", `fill="#112233"`},
+		{"#ff112233", `fill="#112233"`},
+		{"#80112233", `fill="#112233" fill-opacity="0.502"`},
+		{"#00112233", `fill="#112233" fill-opacity="0.000"`},
+		{"16711680", `fill="#ff0000"`},
+		{"?attr/colorPrimary", `fill="none"`},
+		{"", `fill="none"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			if got := svgFill(tt.in); got != tt.want {
+				t.Errorf("svgFill(%q) = %s, want %s", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAdaptiveIconBackgroundIsOpaque(t *testing.T) {
+	got := adaptiveIconBackground("#80112233")
+	if want := (color.RGBA{0x11, 0x22, 0x33, 0xff}); got != want {
+		t.Errorf("adaptiveIconBackground() = %v, want %v", got, want)
+	}
+	if got := adaptiveIconBackground("@7f010000"); got != color.White {
+		t.Errorf("adaptiveIconBackground(reference) = %v, want white", got)
+	}
+}
+
+func TestToPNGBoundsDecoding(t *testing.T) {
+	var small bytes.Buffer
+	if err := png.Encode(&small, image.NewNRGBA(image.Rect(0, 0, 4, 4))); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := toPNG(small.Bytes()); err != nil || !bytes.Equal(got, small.Bytes()) {
+		t.Fatalf("toPNG(PNG) = %d bytes, %v, want the input unchanged", len(got), err)
+	}
+	var huge bytes.Buffer
+	if err := png.Encode(&huge, image.NewGray(image.Rect(0, 0, 7000, 7000))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := toPNG(huge.Bytes()); !errors.Is(err, media.ErrInvalidImage) {
+		t.Fatalf("toPNG(7000x7000) error = %v, want media.ErrInvalidImage", err)
+	}
+	if _, err := toPNG([]byte("not an image")); !errors.Is(err, media.ErrInvalidImage) {
+		t.Fatalf("toPNG(junk) error = %v, want media.ErrInvalidImage", err)
+	}
+}
+
+func TestReadZipFileEnforcesLimitOnActualBytes(t *testing.T) {
+	path := writeABIZip(t, map[string][]byte{"big.bin": bytes.Repeat([]byte{1}, 2048)})
+	files := openZipFiles(t, path)
+	if _, err := readZipFile(files[0], 1024); err == nil {
+		t.Fatal("readZipFile() error = nil, want size-limit rejection")
+	}
+	if data, err := readZipFile(files[0], 2048); err != nil || len(data) != 2048 {
+		t.Fatalf("readZipFile() = %d bytes, %v, want 2048 bytes", len(data), err)
+	}
 }

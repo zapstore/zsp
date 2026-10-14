@@ -1,4 +1,4 @@
-package zsp
+package release
 
 import (
 	"reflect"

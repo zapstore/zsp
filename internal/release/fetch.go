@@ -1,4 +1,4 @@
-package zsp
+package release
 
 import (
 	"context"
@@ -124,10 +124,14 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 			report(options, "fetch", "warning", displayName+": APK exceeds the size limit", 0, 0)
 			continue
 		}
-		parsed, parseErr := apk.Parse(path)
+		parsed, parseErr := apk.Parse(ctx, path)
 		if parseErr != nil {
 			if managed {
 				_ = os.RemoveAll(tempDir)
+			}
+			if ctx.Err() != nil {
+				closeAPKs(results)
+				return nil, contextOperationError(ctx.Err(), "fetch")
 			}
 			report(options, "fetch", "warning", displayName+": invalid or unsigned APK", 0, 0)
 			continue
@@ -442,31 +446,15 @@ func report(options FetchOptions, operation, phase, target string, completed, to
 	}
 }
 
-func isRetryableSourceError(err error) bool {
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return false
-	}
-	message := strings.ToLower(err.Error())
-	for _, fragment := range []string{"rate limit", "temporar", "timeout", "connection reset", "unavailable", "status 429", "status 502", "status 503", "status 504"} {
-		if strings.Contains(message, fragment) {
-			return true
-		}
-	}
-	return false
-}
-
 func sourceErrorClassification(err error) (error, bool) {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	switch {
+	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
 		return ErrTemporaryFailure, true
-	}
-	if err == nil {
+	case err == nil:
 		return ErrSourceFailed, false
-	}
-	message := strings.ToLower(err.Error())
-	if strings.Contains(message, "rate limit") || strings.Contains(message, "status 429") {
+	case errors.Is(err, source.ErrRateLimited):
 		return ErrRateLimited, true
-	}
-	if isRetryableSourceError(err) {
+	case source.IsTransient(err):
 		return ErrTemporaryFailure, true
 	}
 	return ErrSourceFailed, false

@@ -1,4 +1,4 @@
-package zsp
+package release
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,6 +21,7 @@ import (
 	"github.com/zapstore/zsp/internal/identity"
 	internalnostr "github.com/zapstore/zsp/internal/nostr"
 	"github.com/zapstore/zsp/internal/sanitize"
+	"github.com/zapstore/zsp/internal/source"
 )
 
 // Publish uploads one verified APK and publishes its NIP-82 events.
@@ -60,8 +60,11 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 	if err != nil {
 		return nil, err
 	}
-	parsed, err := apk.Parse(path)
+	parsed, err := apk.Parse(ctx, path)
 	if err != nil {
+		if contextErr := contextOperationError(ctx.Err(), "verify APK"); contextErr != nil {
+			return nil, contextErr
+		}
 		return nil, wrapOperationError(ErrInvalidAPK, err, false, "verify APK"+causeDetail(err))
 	}
 	if parsed.SHA256 != verified.hash {
@@ -71,7 +74,10 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 		parsed.CertFingerprint != verified.certificateHash {
 		return nil, operationErr(ErrInvalidAPK, false, "APK facts changed after Fetch")
 	}
-	signWith := internalconfig.GetSignWith()
+	signWith, err := internalconfig.GetSignWith()
+	if err != nil {
+		return nil, wrapOperationError(ErrInvalidConfig, err, false, "read SIGN_WITH"+causeDetail(err))
+	}
 	if signWith == "" {
 		return nil, operationErr(ErrSigner, false, "SIGN_WITH is required")
 	}
@@ -121,10 +127,7 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 			return nil, wrapOperationError(sentinel, proofErr, retryable, "check C1 proof"+causeDetail(proofErr))
 		}
 		result.Warnings = append(result.Warnings, safeRelayQueryWarnings("C1 proof", proofWarnings)...)
-		certificate, certificateErr := apk.ExtractCertificate(path)
-		if certificateErr != nil {
-			return nil, wrapOperationError(ErrInvalidAPK, certificateErr, false, "extract signing certificate"+causeDetail(certificateErr))
-		}
+		certificate := parsed.Certificate
 		active := activeC1Proof(proofs, parsed.CertFingerprint, certificate, time.Now())
 		c1Status = "active"
 		authorizedPublishers = c1Publishers(active)
@@ -183,7 +186,7 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 		}
 		result.Warnings = append(result.Warnings, mediaWarnings...)
 	}
-	releaseNotes, err := loadReleaseNotes(ctx, preparedConfig.ReleaseNotes)
+	releaseNotes, err := loadReleaseNotes(ctx, preparedConfig.baseDir, preparedConfig.ReleaseNotes)
 	if err != nil {
 		return nil, err
 	}
@@ -553,14 +556,14 @@ func uploadFailureDetail(err error) string {
 // descriptorReason returns the specific disagreement reported by a descriptor
 // validation error, without the sentinel prefix, or "" when err is not one.
 func descriptorReason(err error) string {
-	if !errors.Is(err, blossom.ErrInvalidDescriptor) {
+	var descriptorErr *blossom.DescriptorError
+	if !errors.As(err, &descriptorErr) {
 		return ""
 	}
-	prefix := blossom.ErrInvalidDescriptor.Error() + ": "
-	if !strings.HasPrefix(err.Error(), prefix) {
-		return ""
+	if descriptorErr.Err != nil {
+		return descriptorErr.Reason + ": " + descriptorErr.Err.Error()
 	}
-	return strings.TrimPrefix(err.Error(), prefix)
+	return descriptorErr.Reason
 }
 
 // descriptorMismatch names the fields where the descriptor a server returned
@@ -597,18 +600,11 @@ func networkErrorClassification(err error) (error, bool) {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err, false
 	}
-	var networkError net.Error
-	if errors.As(err, &networkError) && (networkError.Timeout() || networkError.Temporary()) {
-		return ErrTemporaryFailure, true
-	}
-	message := strings.ToLower(err.Error())
-	if strings.Contains(message, "rate limit") || strings.Contains(message, "status 429") {
+	if errors.Is(err, source.ErrRateLimited) || internalnostr.IsRateLimited(err) {
 		return ErrRateLimited, true
 	}
-	for _, fragment := range []string{"connection refused", "connection reset", "temporar", "timeout", "status 502", "status 503", "status 504"} {
-		if strings.Contains(message, fragment) {
-			return ErrTemporaryFailure, true
-		}
+	if source.IsTransient(err) {
+		return ErrTemporaryFailure, true
 	}
 	return ErrSourceFailed, false
 }
@@ -856,7 +852,7 @@ func publishEvent(ctx context.Context, publisher *internalnostr.Publisher, event
 		if relay.Error != nil {
 			if relay.IsDuplicate {
 				message = "event already exists"
-			} else if detail := publicDetail(strings.TrimPrefix(relay.Error.Error(), "failed to publish: ")); detail != "" {
+			} else if detail := publicDetail(relay.Message); detail != "" {
 				message = detail
 			} else {
 				message = "relay rejected event"

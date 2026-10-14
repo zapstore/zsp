@@ -42,38 +42,45 @@ var gitlabExternalRedirectHref = regexp.MustCompile(`(?i)href=["'](https?://[^"'
 // GitLab implements Source for GitLab releases.
 // Supports both gitlab.com and self-hosted GitLab instances.
 type GitLab struct {
-	cfg                *config.Config
 	baseURL            string // e.g., "https://gitlab.com" or self-hosted URL
+	repoPath           string // namespace/project, for messages
 	projectID          string // URL-encoded project path (e.g., "user%2Frepo")
 	numericProjectID   int    // GitLab numeric project id (needed for /-/project/:id/uploads/ URLs)
 	client             *http.Client
+	downloadClient     *http.Client
+	filter             *releaseFilter
 	IncludePreReleases bool
 	maxReleases        int
 }
 
 // NewGitLab creates a new GitLab source.
 func NewGitLab(cfg *config.Config) (*GitLab, error) {
+	return newGitLab(cfg, Options{})
+}
+
+func newGitLab(cfg *config.Config, opts Options) (*GitLab, error) {
 	repoURL := cfg.GetAPKSourceURL()
 
-	// Use the new helper that extracts both base URL and repo path
 	baseURL, repoPath := config.GetGitLabRepoWithBase(repoURL)
 	if repoPath == "" {
-		// Fallback to old method for gitlab.com URLs
-		repoPath = config.GetGitLabRepo(repoURL)
-		if repoPath == "" {
-			return nil, fmt.Errorf("invalid GitLab URL: %s", repoURL)
-		}
-		baseURL = "https://gitlab.com"
+		return nil, fmt.Errorf("invalid GitLab URL: %s", repoURL)
+	}
+	if err := validateDownloadURL(baseURL); err != nil {
+		return nil, fmt.Errorf("gitlab base URL: %w", err)
+	}
+	filter, err := newReleaseFilter(cfg.ReleaseFilter)
+	if err != nil {
+		return nil, err
 	}
 
-	// URL-encode the project path for API calls
-	projectID := url.PathEscape(repoPath)
-
+	tor := opts.tor()
 	return &GitLab{
-		cfg:       cfg,
-		baseURL:   baseURL,
-		projectID: projectID,
-		client:    newSecureHTTPClient(30 * time.Second),
+		baseURL:        baseURL,
+		repoPath:       repoPath,
+		projectID:      url.PathEscape(repoPath),
+		client:         newSecureHTTPClient(30*time.Second, tor),
+		downloadClient: newDownloadHTTPClient(tor),
+		filter:         filter,
 	}, nil
 }
 
@@ -122,32 +129,28 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	limit := releaseScanLimit(g.maxReleases)
 	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/releases?per_page=%d", g.baseURL, g.projectID, limit)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	req, err := newForgeRequest(ctx, config.SourceGitLab, apiURL)
 	if err != nil {
 		return nil, err
 	}
 
 	resp, err := g.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch releases: %w", err)
+		return nil, fmt.Errorf("fetch releases: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("no releases found or project not accessible")
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitLab API error (status %d)", resp.StatusCode)
+	if err := checkHTTPStatus(resp, "GitLab API"); err != nil {
+		return nil, describeNotFound(err, fmt.Sprintf("no releases found or project %s not accessible", g.repoPath))
 	}
 
 	var releases []gitlabRelease
 	if err := decodeJSONResponse(resp, MaxJSONResponseSize, &releases); err != nil {
-		return nil, fmt.Errorf("failed to parse releases: %w", err)
+		return nil, fmt.Errorf("parse releases: %w", err)
 	}
 
 	if len(releases) == 0 {
-		return nil, fmt.Errorf("no releases found")
+		return nil, fmt.Errorf("no releases found for %s", g.repoPath)
 	}
 
 	// Find the first release with valid APKs.
@@ -160,7 +163,7 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		if !g.IncludePreReleases && semverPreRelease(glRelease.TagName) {
 			continue
 		}
-		if !g.matchesReleaseFilter(glRelease.TagName, glRelease.Name) {
+		if !g.filter.matches(glRelease.TagName, glRelease.Name) {
 			continue
 		}
 		release := g.convertRelease(&glRelease)
@@ -169,7 +172,7 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("no releases with valid APKs found in the last %d releases", limit)
+	return nil, fmt.Errorf("no releases with valid APKs found in the last %d releases for %s", limit, g.repoPath)
 }
 
 // ensureNumericProjectID loads the project's numeric id from the GitLab API once.
@@ -180,32 +183,29 @@ func (g *GitLab) ensureNumericProjectID(ctx context.Context) error {
 	}
 
 	apiURL := fmt.Sprintf("%s/api/v4/projects/%s", g.baseURL, g.projectID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	req, err := newForgeRequest(ctx, config.SourceGitLab, apiURL)
 	if err != nil {
 		return err
 	}
 
 	resp, err := g.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to fetch GitLab project: %w", err)
+		return fmt.Errorf("fetch GitLab project: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("GitLab project not found or not accessible")
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GitLab API error (status %d)", resp.StatusCode)
+	if err := checkHTTPStatus(resp, "GitLab API"); err != nil {
+		return describeNotFound(err, fmt.Sprintf("GitLab project %s not found or not accessible", g.repoPath))
 	}
 
 	var project struct {
 		ID int `json:"id"`
 	}
 	if err := decodeJSONResponse(resp, MaxJSONResponseSize, &project); err != nil {
-		return fmt.Errorf("failed to parse GitLab project: %w", err)
+		return fmt.Errorf("parse GitLab project: %w", err)
 	}
 	if project.ID <= 0 {
-		return fmt.Errorf("GitLab project response missing id")
+		return fmt.Errorf("GitLab project %s response missing id", g.repoPath)
 	}
 
 	g.numericProjectID = project.ID
@@ -279,26 +279,15 @@ func (g *GitLab) convertRelease(glRelease *gitlabRelease) *Release {
 	// uploads in the description, with no formal assets.links entries.
 	assets = mergeGitLabAssets(assets, g.descriptionAPKAssets(glRelease.Description))
 
-	// Extract version from tag name
-	version := strings.TrimPrefix(glRelease.TagName, "v")
-
-	// Parse release date from released_at (RFC 3339 format)
-	var createdAt time.Time
-	if glRelease.ReleasedAt != "" {
-		if t, err := time.Parse(time.RFC3339, glRelease.ReleasedAt); err == nil {
-			createdAt = t
-		}
-	}
-
 	return &Release{
-		Version:    version,
+		Version:    versionFromTag(glRelease.TagName),
 		TagName:    glRelease.TagName,
 		Name:       glRelease.Name,
 		Changelog:  glRelease.Description,
 		Assets:     assets,
 		PreRelease: semverPreRelease(glRelease.TagName),
 		URL:        glRelease.Links.Self,
-		CreatedAt:  createdAt,
+		CreatedAt:  parseReleaseTime(glRelease.ReleasedAt),
 	}
 }
 
@@ -318,10 +307,14 @@ func (g *GitLab) Download(ctx context.Context, asset *Asset, destDir string, pro
 		return "", err
 	}
 
-	fetch := func(ctx context.Context) (*http.Response, error) {
-		return g.doAssetDownload(ctx, newDownloadHTTPClient(), asset.URL)
+	client := g.downloadClient
+	if client == nil {
+		client = newDownloadHTTPClient(nil)
 	}
-	if err := downloadWithRetries(ctx, destPath, asset.Size, progress, fetch); err != nil {
+	fetch := func(ctx context.Context) (*http.Response, error) {
+		return g.doAssetDownload(ctx, client, asset.URL)
+	}
+	if err := downloadWithRetries(ctx, destPath, asset.Size, asset.SHA256, progress, fetch); err != nil {
 		return "", err
 	}
 
@@ -335,7 +328,7 @@ func (g *GitLab) Download(ctx context.Context, asset *Asset, destDir string, pro
 // (downloadWithRetries, via writeDownloadResponse) applies the shared size
 // limit and stall detection when streaming it to disk.
 func (g *GitLab) doAssetDownload(ctx context.Context, client *http.Client, downloadURL string) (*http.Response, error) {
-	resp, err := doGet(ctx, client, downloadURL, nil)
+	resp, err := doGet(ctx, client, downloadURL, forgeAuthHeaders(config.SourceGitLab, downloadURL))
 	if err != nil {
 		return nil, err
 	}
@@ -343,7 +336,7 @@ func (g *GitLab) doAssetDownload(ctx context.Context, client *http.Client, downl
 	externalURL, ok, err := maybeGitLabExternalRedirect(resp)
 	if err != nil {
 		resp.Body.Close()
-		return nil, fmt.Errorf("download failed: %w", err)
+		return nil, fmt.Errorf("download: %w", err)
 	}
 	if !ok {
 		return resp, nil
@@ -353,7 +346,7 @@ func (g *GitLab) doAssetDownload(ctx context.Context, client *http.Client, downl
 	if err := validateDownloadURL(externalURL); err != nil {
 		return nil, fmt.Errorf("follow GitLab external redirect: %w", err)
 	}
-	resp, err = doGet(ctx, client, externalURL, nil)
+	resp, err = doGet(ctx, client, externalURL, forgeAuthHeaders(config.SourceGitLab, externalURL))
 	if err != nil {
 		return nil, fmt.Errorf("follow GitLab external redirect: %w", err)
 	}
@@ -387,8 +380,9 @@ func maybeGitLabExternalRedirect(resp *http.Response) (string, bool, error) {
 	}
 
 	if !strings.Contains(string(body), gitlabExternalRedirectMarker) {
-		// Not the interstitial — put the peeked bytes back for the caller.
-		resp.Body = io.NopCloser(bytes.NewReader(body))
+		// Not the interstitial: put the peeked bytes back in front of the rest
+		// of the body, which stays the one to close.
+		resp.Body = &peekedBody{Reader: io.MultiReader(bytes.NewReader(body), resp.Body), Closer: resp.Body}
 		return "", false, nil
 	}
 
@@ -397,6 +391,13 @@ func maybeGitLabExternalRedirect(resp *http.Response) (string, bool, error) {
 		return "", false, fmt.Errorf("GitLab redirect page missing external URL")
 	}
 	return externalURL, true, nil
+}
+
+// peekedBody reads previously peeked bytes followed by the rest of the original
+// body, and closes that body.
+type peekedBody struct {
+	io.Reader
+	io.Closer
 }
 
 func looksLikeGitLabExternalRedirect(resp *http.Response) bool {
@@ -440,26 +441,6 @@ func semverPreRelease(tag string) bool {
 		return r == '.' || r == '-'
 	}) {
 		if preReleaseIdent.MatchString(seg) {
-			return true
-		}
-	}
-	return false
-}
-
-// matchesReleaseFilter checks whether a release tag or name matches the filter.
-func (g *GitLab) matchesReleaseFilter(tagName string, names ...string) bool {
-	if g.cfg.ReleaseFilter == "" {
-		return true
-	}
-	re, err := regexp.Compile(g.cfg.ReleaseFilter)
-	if err != nil {
-		return false
-	}
-	if re.MatchString(tagName) {
-		return true
-	}
-	for _, name := range names {
-		if re.MatchString(name) {
 			return true
 		}
 	}

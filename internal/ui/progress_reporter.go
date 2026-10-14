@@ -17,6 +17,7 @@ type ProgressReporter struct {
 	spinner     *Spinner
 	tracker     *DownloadTracker
 	phase       string
+	message     string
 }
 
 // NewProgressReporter creates a reporter suitable for FetchOptions and PublishOptions.
@@ -27,7 +28,7 @@ func NewProgressReporter(writer io.Writer, interactive bool) *ProgressReporter {
 // Report renders a single progress event.
 func (r *ProgressReporter) Report(update zsp.Progress) {
 	if update.Phase == "warning" {
-		r.finishActive()
+		r.finishActive(false)
 		fmt.Fprintln(r.writer, StatusLine("warning", update.Target))
 		return
 	}
@@ -39,9 +40,10 @@ func (r *ProgressReporter) Report(update zsp.Progress) {
 		return
 	}
 	if update.Total > 0 {
-		if r.tracker == nil || r.phase != update.Phase {
-			r.finishActive()
-			r.phase = update.Phase
+		if r.tracker == nil || r.phase != update.Phase || r.message != message {
+			// A target change without completion abandoned the old download.
+			r.finishActive(r.tracker == nil || r.phase != update.Phase)
+			r.phase, r.message = update.Phase, message
 			r.tracker = NewDownloadTrackerWithWriter(r.writer, message, update.Total)
 		}
 		r.tracker.Update(update.Completed, update.Total)
@@ -52,27 +54,42 @@ func (r *ProgressReporter) Report(update zsp.Progress) {
 		return
 	}
 	if r.spinner == nil || r.phase != update.Phase {
-		r.finishActive()
-		r.phase = update.Phase
+		r.finishActive(true)
+		r.phase, r.message = update.Phase, message
 		r.spinner = NewSpinnerWithWriter(r.writer, message)
 		r.spinner.Start()
+		return
+	}
+	if r.message != message {
+		r.message = message
+		r.spinner.UpdateMessage(message)
 	}
 }
 
-func (r *ProgressReporter) finishActive() {
+// finishActive stops the active tracker or spinner. With completed it leaves
+// a success line; without, it only erases the progress line.
+func (r *ProgressReporter) finishActive(completed bool) {
 	if r.tracker != nil {
-		r.tracker.Done()
+		if completed {
+			r.tracker.Done()
+		} else {
+			r.tracker.Clear()
+		}
 		r.tracker = nil
 	}
 	if r.spinner != nil {
-		r.spinner.StopWithSuccess(r.spinner.message)
+		if completed {
+			r.spinner.StopWithSuccess(r.message)
+		} else {
+			r.spinner.Stop()
+		}
 		r.spinner = nil
 	}
 }
 
 // Finish stops any dynamic terminal rendering and leaves a completed final line.
 func (r *ProgressReporter) Finish() {
-	r.finishActive()
+	r.finishActive(true)
 }
 
 func progressMessage(update zsp.Progress) string {

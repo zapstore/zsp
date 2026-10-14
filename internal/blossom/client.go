@@ -118,7 +118,7 @@ func (c *Client) Upload(ctx context.Context, filePath string, sha256 string, sig
 	signCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	if err := signer.Sign(signCtx, authEvent); err != nil {
-		return nil, fmt.Errorf("failed to sign auth event: %w", err)
+		return nil, fmt.Errorf("sign auth event: %w", err)
 	}
 	return c.UploadWithAuth(ctx, filePath, sha256, authEvent, onProgress, contentType...)
 }
@@ -135,13 +135,13 @@ func (c *Client) UploadWithAuth(ctx context.Context, filePath string, sha256 str
 
 	f, err := os.Open(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open file: %w", err)
+		return nil, fmt.Errorf("open file: %w", err)
 	}
 	defer f.Close()
 
 	fi, err := f.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("failed to stat file: %w", err)
+		return nil, fmt.Errorf("stat file: %w", err)
 	}
 
 	authHeader, err := encodeAuthHeader(authEvent)
@@ -174,7 +174,7 @@ func (c *Client) UploadBytes(ctx context.Context, data []byte, sha256 string, co
 	signCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	if err := signer.Sign(signCtx, authEvent); err != nil {
-		return nil, fmt.Errorf("failed to sign auth event: %w", err)
+		return nil, fmt.Errorf("sign auth event: %w", err)
 	}
 	return c.UploadBytesWithAuth(ctx, data, sha256, contentType, authEvent)
 }
@@ -183,13 +183,6 @@ func (c *Client) UploadBytes(ctx context.Context, data []byte, sha256 string, co
 // authorization event, following the same strict HEAD-then-PUT behavior as
 // UploadWithAuth.
 func (c *Client) UploadBytesWithAuth(ctx context.Context, data []byte, sha256 string, contentType string, authEvent *nostr.Event) (*UploadResult, error) {
-	return c.uploadBytesWithAuth(ctx, data, sha256, contentType, authEvent)
-}
-
-// UploadBytesWithAuthPreChecked is retained for callers that already probed a
-// blob, but strict publication still performs the required HEAD /upload.
-func (c *Client) UploadBytesWithAuthPreChecked(ctx context.Context, data []byte, sha256 string, contentType string, authEvent *nostr.Event, existed bool) (*UploadResult, error) {
-	_ = existed
 	return c.uploadBytesWithAuth(ctx, data, sha256, contentType, authEvent)
 }
 
@@ -220,7 +213,7 @@ func (c *Client) uploadBytesWithAuth(ctx context.Context, data []byte, sha256 st
 func (c *Client) preflight(ctx context.Context, authHeader, sha256, contentType string, size int64) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, c.serverURL+"/upload", nil)
 	if err != nil {
-		return fmt.Errorf("failed to create upload preflight request: %w", err)
+		return fmt.Errorf("create upload preflight request: %w", err)
 	}
 	req.Header.Set("Authorization", authHeader)
 	req.Header.Set("X-SHA-256", sha256)
@@ -245,10 +238,12 @@ func (c *Client) preflight(ctx context.Context, authHeader, sha256, contentType 
 func (c *Client) putUpload(ctx context.Context, body io.Reader, authHeader, sha256, contentType string, size int64) (*UploadResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.serverURL+"/upload", body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create upload request: %w", err)
+		return nil, fmt.Errorf("create upload request: %w", err)
 	}
 	req.Header.Set("Authorization", authHeader)
 	req.Header.Set("Content-Type", contentType)
+	// The Zapstore Blossom server (blossy) parses Content-Digest as the bare
+	// 64-character hex hash, not an RFC 9530 structured value.
 	req.Header.Set("Content-Digest", sha256)
 	req.Header.Set("X-SHA-256", sha256)
 	req.Header.Set("X-Content-Type", contentType)
@@ -267,7 +262,7 @@ func (c *Client) putUpload(ctx context.Context, body io.Reader, authHeader, sha2
 
 	var descriptor UploadResult
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&descriptor); err != nil {
-		return nil, fmt.Errorf("%w: response was not a blob descriptor: %v", ErrInvalidDescriptor, err)
+		return nil, invalidDescriptor(err, "response was not a blob descriptor")
 	}
 	// BUD-02: 200 OK means the blob already existed; 201 Created means it
 	// was newly stored.
@@ -284,14 +279,14 @@ func (c *Client) putUpload(ctx context.Context, body io.Reader, authHeader, sha2
 // that resolves to this server and this hash.
 func (c *Client) validateDescriptor(d *UploadResult, sha256, contentType string, size int64) error {
 	if d.SHA256 == "" || !strings.EqualFold(d.SHA256, sha256) {
-		return fmt.Errorf("%w: sha256 %q, want %q", ErrInvalidDescriptor, d.SHA256, sha256)
+		return invalidDescriptor(nil, "sha256 %q, want %q", d.SHA256, sha256)
 	}
 	d.SHA256 = sha256
 	if d.Size != size {
-		return fmt.Errorf("%w: size %d, want %d", ErrInvalidDescriptor, d.Size, size)
+		return invalidDescriptor(nil, "size %d, want %d", d.Size, size)
 	}
 	if !strings.EqualFold(d.Type, contentType) {
-		return fmt.Errorf("%w: type %q, want %q", ErrInvalidDescriptor, d.Type, contentType)
+		return invalidDescriptor(nil, "type %q, want %q", d.Type, contentType)
 	}
 	return c.validateDescriptorURL(d.URL, sha256)
 }
@@ -300,22 +295,22 @@ func (c *Client) validateDescriptor(d *UploadResult, sha256, contentType string,
 // this blob's hash, ignoring an optional file extension.
 func (c *Client) validateDescriptorURL(rawURL, sha256 string) error {
 	if rawURL == "" {
-		return fmt.Errorf("%w: missing url", ErrInvalidDescriptor)
+		return invalidDescriptor(nil, "missing url")
 	}
 	server, err := url.Parse(c.serverURL)
 	if err != nil {
-		return fmt.Errorf("%w: configured server URL is invalid: %v", ErrInvalidDescriptor, err)
+		return invalidDescriptor(err, "configured server URL is invalid")
 	}
 	got, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("%w: url %q is invalid: %v", ErrInvalidDescriptor, rawURL, err)
+		return invalidDescriptor(err, "url %q is invalid", rawURL)
 	}
 	if !strings.EqualFold(got.Scheme, server.Scheme) || !strings.EqualFold(got.Hostname(), server.Hostname()) {
-		return fmt.Errorf("%w: url %q is not on the configured server %q", ErrInvalidDescriptor, rawURL, c.serverURL)
+		return invalidDescriptor(nil, "url %q is not on the configured server %q", rawURL, c.serverURL)
 	}
 	name := strings.TrimSuffix(path.Base(got.Path), path.Ext(got.Path))
 	if !strings.EqualFold(name, sha256) {
-		return fmt.Errorf("%w: url %q does not reference blob %q", ErrInvalidDescriptor, rawURL, sha256)
+		return invalidDescriptor(nil, "url %q does not reference blob %q", rawURL, sha256)
 	}
 	return nil
 }
@@ -362,7 +357,7 @@ func (c *Client) ServerURL() string {
 func encodeAuthHeader(authEvent *nostr.Event) (string, error) {
 	authJSON, err := json.Marshal(authEvent)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal auth event: %w", err)
+		return "", fmt.Errorf("marshal auth event: %w", err)
 	}
 	return "Nostr " + base64.StdEncoding.EncodeToString(authJSON), nil
 }

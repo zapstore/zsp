@@ -97,9 +97,9 @@ func GenerateIdentityProof(privateKey crypto.PrivateKey, cert *x509.Certificate,
 	result := VerifyIdentityProofWithCert(proof, nil, pubkeyHex, cert)
 	if !result.Valid {
 		if result.Error != nil {
-			return nil, fmt.Errorf("generated identity proof failed self-verification: %w", result.Error)
+			return nil, fmt.Errorf("self-verify generated identity proof: %w", result.Error)
 		}
-		return nil, fmt.Errorf("generated identity proof failed self-verification: signature does not verify against certificate")
+		return nil, errors.New("self-verify generated identity proof: signature does not verify against certificate")
 	}
 
 	return proof, nil
@@ -122,7 +122,7 @@ func SignProofMessage(privateKey crypto.PrivateKey, pubkeyHex string, createdAt,
 		return nil, fmt.Errorf("unsupported key type: %T", privateKey)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to sign: %w", err)
+		return nil, fmt.Errorf("sign proof message: %w", err)
 	}
 	return signature, nil
 }
@@ -187,7 +187,8 @@ func (p *IdentityProof) IsExpired() bool {
 
 // VerificationResult contains the result of verifying an identity proof.
 type VerificationResult struct {
-	Valid         bool      // Whether the signature is valid
+	Valid         bool      // Signature verifies against the certificate and the proof is neither expired nor revoked
+	SignatureOK   bool      // Whether the signature alone verifies against the certificate
 	Expired       bool      // Whether the proof has expired
 	Revoked       bool      // Whether the proof has been revoked
 	RevokeReason  string    // Revocation reason if revoked
@@ -197,7 +198,10 @@ type VerificationResult struct {
 	Error         error     // Any error encountered
 }
 
-// ParseIdentityProofFromEvent parses a kind 30509 event into an IdentityProof.
+// ParseIdentityProofFromEvent checks the shape of a kind 30509 event and
+// returns its proof fields. It does not verify the event signature, the
+// certificate signature, expiry, or revocation, so a successful parse is not
+// acceptance: use ValidateActiveProofEvent to accept a proof.
 func ParseIdentityProofFromEvent(event *nostr.Event) (*IdentityProof, error) {
 	if event == nil {
 		return nil, fmt.Errorf("identity proof event is required")
@@ -253,8 +257,9 @@ func ParseIdentityProofFromEvent(event *nostr.Event) (*IdentityProof, error) {
 	}, nil
 }
 
-// ValidateActiveProofEvent verifies that event is a current, valid C1 proof
-// for certificate at now.
+// ValidateActiveProofEvent is the way to accept a C1 proof. It verifies that
+// event is a signed, well-formed kind 30509 proof for certificate that is
+// neither expired nor revoked at now and whose certificate signature verifies.
 func ValidateActiveProofEvent(event *nostr.Event, certificate *x509.Certificate, now time.Time) (*IdentityProof, error) {
 	if event == nil || certificate == nil {
 		return nil, fmt.Errorf("identity proof event and certificate are required")
@@ -345,14 +350,11 @@ func IsRevoked(event *nostr.Event) (bool, string) {
 	return true, reason
 }
 
-// VerifyIdentityProof verifies a cryptographic identity proof against a hex pubkey.
-// This performs signature verification only (no certificate comparison).
-func VerifyIdentityProof(proof *IdentityProof, event *nostr.Event, pubkeyHex string) *VerificationResult {
-	return verifyProofSignature(proof, event, pubkeyHex, nil)
-}
-
-// VerifyIdentityProofWithCert verifies an identity proof against a pubkey and certificate.
-// This performs full verification: cert hash match and signature.
+// VerifyIdentityProofWithCert verifies an identity proof against a pubkey and
+// certificate: certificate hash match and signature. The result is Valid only
+// when the proof is also unexpired and, when event is given, unrevoked. It does
+// not check the event's own signature; use ValidateActiveProofEvent to accept
+// a proof from a relay.
 func VerifyIdentityProofWithCert(proof *IdentityProof, event *nostr.Event, pubkeyHex string, cert *x509.Certificate) *VerificationResult {
 	return verifyProofSignature(proof, event, pubkeyHex, cert)
 }
@@ -385,7 +387,7 @@ func verifyProofSignature(proof *IdentityProof, event *nostr.Event, pubkeyHex st
 
 	signature, err := base64.StdEncoding.DecodeString(proof.Signature)
 	if err != nil {
-		result.Error = fmt.Errorf("failed to decode signature: %w", err)
+		result.Error = fmt.Errorf("decode signature: %w", err)
 		return result
 	}
 
@@ -403,7 +405,7 @@ func verifyProofSignature(proof *IdentityProof, event *nostr.Event, pubkeyHex st
 	case *ecdsa.PublicKey:
 		messageHash := sha256.Sum256([]byte(message))
 		if ecdsa.VerifyASN1(pubKey, messageHash[:], signature) {
-			result.Valid = true
+			result.SignatureOK = true
 		} else {
 			result.Error = fmt.Errorf("ECDSA signature verification failed")
 		}
@@ -413,12 +415,13 @@ func verifyProofSignature(proof *IdentityProof, event *nostr.Event, pubkeyHex st
 		if err != nil {
 			result.Error = fmt.Errorf("RSA signature verification failed: %w", err)
 		} else {
-			result.Valid = true
+			result.SignatureOK = true
 		}
 	default:
 		result.Error = fmt.Errorf("unsupported public key type: %T", pubKeyInterface)
 	}
 
+	result.Valid = result.SignatureOK && !result.Expired && !result.Revoked
 	return result
 }
 
@@ -438,37 +441,30 @@ func IsJKS(data []byte) bool {
 	return detectJKS(data)
 }
 
-// LoadPKCS12 loads a private key and certificate from PKCS12 data.
-// Security: The password is zeroed after use to minimize exposure in memory.
+// LoadPKCS12 loads a private key and leaf certificate from PKCS12 data. The
+// store may hold a certificate chain; the leaf is the certificate matching the
+// private key.
 func LoadPKCS12(data []byte, password string) (crypto.PrivateKey, *x509.Certificate, error) {
 	// Check for JKS format first
 	if detectJKS(data) {
 		return nil, nil, ErrJKSFormat
 	}
 
-	privateKey, cert, err := pkcs12.Decode(data, password)
+	privateKey, cert, _, err := pkcs12.DecodeChain(data, password)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse PKCS12: %w", wrapKeystorePasswordError(err))
+		return nil, nil, fmt.Errorf("parse PKCS12: %w", wrapKeystorePasswordError(err))
+	}
+	if err := ValidateKeyCertPair(privateKey, cert); err != nil {
+		return nil, nil, err
 	}
 	return privateKey, cert, nil
 }
 
-// LoadPKCS12WithSecurePassword loads a private key and certificate from PKCS12 data.
-// The password byte slice is zeroed after use for security.
+// LoadPKCS12WithSecurePassword is LoadPKCS12 with a password byte slice that is
+// zeroed after use.
 func LoadPKCS12WithSecurePassword(data []byte, password []byte) (crypto.PrivateKey, *x509.Certificate, error) {
-	// Zero the password when done
 	defer zeroBytes(password)
-
-	// Check for JKS format first
-	if detectJKS(data) {
-		return nil, nil, ErrJKSFormat
-	}
-
-	privateKey, cert, err := pkcs12.Decode(data, string(password))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse PKCS12: %w", wrapKeystorePasswordError(err))
-	}
-	return privateKey, cert, nil
+	return LoadPKCS12(data, string(password))
 }
 
 // zeroBytes zeroes a byte slice to clear sensitive data from memory.
@@ -482,22 +478,17 @@ func wrapKeystorePasswordError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, pkcs12.ErrIncorrectPassword) || errors.Is(err, pkcs12.ErrDecryption) || strings.Contains(err.Error(), "got invalid digest") {
-		return fmt.Errorf("%w", ErrInvalidPassword)
+	if errors.Is(err, pkcs12.ErrIncorrectPassword) || errors.Is(err, pkcs12.ErrDecryption) || isJKSDigestError(err) {
+		return ErrInvalidPassword
 	}
 	return err
 }
 
-// LoadPKCS12File loads a private key and certificate from a PKCS12 file.
-// Security: The password is zeroed after use.
-func LoadPKCS12File(path, password string) (crypto.PrivateKey, *x509.Certificate, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read keystore file: %w", err)
-	}
-	// Convert to bytes and use secure version that zeros after use
-	passwordBytes := []byte(password)
-	return LoadPKCS12WithSecurePassword(data, passwordBytes)
+// isJKSDigestError reports a JKS integrity-check failure, which is what a wrong
+// store password produces. keystore-go returns it as an unexported
+// errors.New("got invalid digest"), so the text is the only thing to match.
+func isJKSDigestError(err error) bool {
+	return strings.Contains(err.Error(), "got invalid digest")
 }
 
 // JKSKeyAliasRequiredError identifies the private-key aliases available in a JKS.
@@ -589,7 +580,7 @@ func LoadPEM(keyPath, certPath string) (crypto.PrivateKey, *x509.Certificate, er
 	// Load private key
 	keyData, err := os.ReadFile(keyPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read key file: %w", err)
+		return nil, nil, fmt.Errorf("read key file: %w", err)
 	}
 
 	// Find and decode the private key block (skip EC PARAMETERS and other blocks)
@@ -618,7 +609,7 @@ func LoadPEM(keyPath, certPath string) (crypto.PrivateKey, *x509.Certificate, er
 			// Try PKCS1 (RSA)
 			privateKey, err = x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
 			if err != nil {
-				return nil, nil, fmt.Errorf("failed to parse private key: %w", err)
+				return nil, nil, fmt.Errorf("parse private key: %w", err)
 			}
 		}
 	}
@@ -626,17 +617,17 @@ func LoadPEM(keyPath, certPath string) (crypto.PrivateKey, *x509.Certificate, er
 	// Load certificate
 	certData, err := os.ReadFile(certPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read cert file: %w", err)
+		return nil, nil, fmt.Errorf("read cert file: %w", err)
 	}
 
 	certBlock, _ := pem.Decode(certData)
 	if certBlock == nil {
-		return nil, nil, fmt.Errorf("failed to decode PEM certificate")
+		return nil, nil, errors.New("no PEM certificate found")
 	}
 
 	cert, err := x509.ParseCertificate(certBlock.Bytes)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse certificate: %w", err)
+		return nil, nil, fmt.Errorf("parse certificate: %w", err)
 	}
 
 	if err := ValidateKeyCertPair(privateKey, cert); err != nil {

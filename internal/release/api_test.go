@@ -1,4 +1,4 @@
-package zsp
+package release
 
 import (
 	"bytes"
@@ -18,10 +18,12 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	gonostr "github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip19"
 	"gopkg.in/yaml.v3"
 
 	"github.com/zapstore/zsp/internal/apk"
@@ -613,7 +615,7 @@ func TestBlossomErrorClassification(t *testing.T) {
 		{"bad request", &blossom.StatusError{Err: blossom.ErrUploadRejected, StatusCode: http.StatusBadRequest}, ErrUploadRejected, false},
 		{"invalid descriptor", blossom.ErrInvalidDescriptor, ErrTemporaryFailure, true},
 		{"missing local file", os.ErrNotExist, ErrSourceFailed, false},
-		{"connection reset", errors.New("write: connection reset by peer"), ErrTemporaryFailure, true},
+		{"connection reset", fmt.Errorf("write: %w", syscall.ECONNRESET), ErrTemporaryFailure, true},
 		{"unknown permanent failure", errors.New("unsupported operation"), ErrSourceFailed, false},
 		{"cancelled", context.Canceled, context.Canceled, false},
 	}
@@ -633,8 +635,10 @@ func TestSourceErrorClassification(t *testing.T) {
 		sentinel  error
 		retryable bool
 	}{
-		{errors.New("status 429"), ErrRateLimited, true},
-		{errors.New("service temporarily unavailable"), ErrTemporaryFailure, true},
+		{&source.HTTPStatusError{StatusCode: http.StatusTooManyRequests}, ErrRateLimited, true},
+		{fmt.Errorf("resolve: %w", source.ErrRateLimited), ErrRateLimited, true},
+		{&source.HTTPStatusError{StatusCode: http.StatusServiceUnavailable}, ErrTemporaryFailure, true},
+		{fmt.Errorf("download: %w", syscall.ECONNRESET), ErrTemporaryFailure, true},
 		{errors.New("invalid repository"), ErrSourceFailed, false},
 		{context.DeadlineExceeded, ErrTemporaryFailure, true},
 	}
@@ -706,8 +710,7 @@ func TestRelayPublicationErrorsRemainClassifiable(t *testing.T) {
 		retryable bool
 	}{
 		{"cancelled", cancelled, errors.New("publish failed"), context.Canceled, false},
-		{"rate limited", t.Context(), errors.New("relay returned status 429"), ErrRateLimited, true},
-		{"temporary outage", t.Context(), errors.New("connection refused"), ErrTemporaryFailure, true},
+		{"temporary outage", t.Context(), fmt.Errorf("connect: %w", syscall.ECONNREFUSED), ErrTemporaryFailure, true},
 		{"policy rejection", t.Context(), errors.New("blocked by relay policy"), ErrPublishRejected, false},
 	}
 	for _, test := range tests {
@@ -737,12 +740,12 @@ func TestUploadErrorDetailSurfacesStatusAndReason(t *testing.T) {
 		{"unrelated error", errors.New("upload failed: connection reset"), ""},
 		{
 			"descriptor mismatch",
-			fmt.Errorf("%w: url %q is not on the configured server %q", blossom.ErrInvalidDescriptor, "https://localhost/deadbeef", "http://localhost:3335"),
+			&blossom.DescriptorError{Reason: fmt.Sprintf("url %q is not on the configured server %q", "https://localhost/deadbeef", "http://localhost:3335")},
 			`: url "https://localhost/deadbeef" is not on the configured server "http://localhost:3335"`,
 		},
 		{
 			"descriptor url is redacted",
-			fmt.Errorf("%w: url %q does not reference blob %q", blossom.ErrInvalidDescriptor, "https://evil.example/?token=secret", "deadbeef"),
+			&blossom.DescriptorError{Reason: fmt.Sprintf("url %q does not reference blob %q", "https://evil.example/?token=secret", "deadbeef")},
 			`: url "https://evil.example/" does not reference blob "deadbeef"`,
 		},
 		{"bare descriptor error", blossom.ErrInvalidDescriptor, ""},
@@ -1236,9 +1239,13 @@ func TestPublishKeepsHTTPCacheOnCancel(t *testing.T) {
 
 func TestPublishClearsHTTPCacheOnRetryableFailure(t *testing.T) {
 	config, candidates := fetchCachedTestAPK(t)
-	t.Setenv("SIGN_WITH", gonostr.GeneratePrivateKey())
+	nsec, err := nip19.EncodePrivateKey(gonostr.GeneratePrivateKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SIGN_WITH", nsec)
 
-	_, err := Publish(t.Context(), PublishConfig{}, candidates[0], PublishOptions{
+	_, err = Publish(t.Context(), PublishConfig{}, candidates[0], PublishOptions{
 		Relays: []string{"ws://127.0.0.1:1"},
 	})
 	if err == nil {
@@ -1260,7 +1267,9 @@ func TestPublishClearsHTTPCacheOnRetryableFailure(t *testing.T) {
 
 func fetchCachedTestAPK(t *testing.T) (FetchConfig, []*APK) {
 	t.Helper()
-	t.Cleanup(source.SetCacheDirForTest(t.TempDir()))
+	cacheHome := t.TempDir()
+	t.Setenv("HOME", cacheHome)
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
 	path := buildSignedTestAPK(t)
 	payload, err := os.ReadFile(path)
 	if err != nil {

@@ -1,16 +1,16 @@
 package source
 
 import (
+	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
-	"github.com/zapstore/zsp/internal/config"
 )
 
 // PlayStore provides metadata fetching from Google Play Store.
@@ -23,7 +23,7 @@ type PlayStore struct {
 func NewPlayStore(packageID string) *PlayStore {
 	return &PlayStore{
 		packageID: packageID,
-		client:    newSecureHTTPClient(30 * time.Second),
+		client:    newSecureHTTPClient(30*time.Second, nil),
 	}
 }
 
@@ -37,9 +37,9 @@ type PlayStoreMetadata struct {
 
 // FetchMetadata fetches app metadata from the Google Play Store.
 func (p *PlayStore) FetchMetadata(ctx context.Context) (*PlayStoreMetadata, error) {
-	url := fmt.Sprintf("https://play.google.com/store/apps/details?id=%s&hl=en_US", p.packageID)
+	pageURL := fmt.Sprintf("https://play.google.com/store/apps/details?id=%s&hl=en_US", url.QueryEscape(p.packageID))
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := newRequest(ctx, http.MethodGet, pageURL)
 	if err != nil {
 		return nil, err
 	}
@@ -51,22 +51,22 @@ func (p *PlayStore) FetchMetadata(ctx context.Context) (*PlayStoreMetadata, erro
 
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch Play Store page: %w", err)
+		return nil, fmt.Errorf("fetch Play Store page: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("app %s not found on Play Store", p.packageID)
+	if err := checkHTTPStatus(resp, "Play Store"); err != nil {
+		return nil, describeNotFound(err, fmt.Sprintf("app %s not found on Play Store", p.packageID))
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Play Store returned status %d", resp.StatusCode)
-	}
-
-	// Parse the HTML with size limit to prevent memory exhaustion
-	doc, err := goquery.NewDocumentFromReader(io.LimitReader(resp.Body, MaxRemoteDownloadSize))
+	// Bound the page to prevent memory exhaustion
+	page, err := readBounded(resp.Body, MaxRemoteDownloadSize)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse HTML: %w", err)
+		return nil, fmt.Errorf("read Play Store page: %w", err)
+	}
+	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(page))
+	if err != nil {
+		return nil, fmt.Errorf("parse HTML: %w", err)
 	}
 
 	meta := &PlayStoreMetadata{}
@@ -102,11 +102,6 @@ func (p *PlayStore) FetchMetadata(ctx context.Context) (*PlayStoreMetadata, erro
 	})
 
 	return meta, nil
-}
-
-// PackageID returns the package ID.
-func (p *PlayStore) PackageID() string {
-	return p.packageID
 }
 
 // updateImageDimensions updates the image URL to request high-resolution images.
@@ -293,37 +288,4 @@ func GetPlayStorePackageID(url string) string {
 		}
 	}
 	return ""
-}
-
-// DetectPlayStore checks if a URL is a Play Store URL.
-func DetectPlayStore(url string) bool {
-	lower := strings.ToLower(url)
-	return strings.Contains(lower, "play.google.com/store/apps")
-}
-
-// FetchPlayStoreMetadata is a convenience function to fetch metadata by package ID.
-func FetchPlayStoreMetadata(ctx context.Context, packageID string) (*AppMetadata, error) {
-	ps := NewPlayStore(packageID)
-	psMeta, err := ps.FetchMetadata(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	meta := &AppMetadata{
-		Name:        psMeta.Name,
-		Description: psMeta.Description,
-	}
-
-	// Note: IconURL is returned separately since it needs to be downloaded
-	// and uploaded to blossom, which is handled by the caller
-	if len(psMeta.ImageURLs) > 0 {
-		meta.ImageURLs = psMeta.ImageURLs
-	}
-
-	return meta, nil
-}
-
-// Type returns the source type for Play Store.
-func (p *PlayStore) Type() config.SourceType {
-	return config.SourcePlayStore
 }

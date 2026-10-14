@@ -236,7 +236,7 @@ func (s *PreviewServer) Start() (string, error) {
 	}
 	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", s.port))
 	if err != nil {
-		return "", fmt.Errorf("failed to start preview server: %w", err)
+		return "", fmt.Errorf("start preview server: %w", err)
 	}
 	s.listener = listener
 

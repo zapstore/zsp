@@ -1,115 +1,68 @@
 package source
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
-
-	"github.com/zapstore/zsp/internal/config"
 )
 
-func TestGitHub_matchesReleaseFilter(t *testing.T) {
+// TestGitHubDownloadSendsBearerToken confirms GitHub's Download method routes
+// through the shared download pipeline while attaching the configured token
+// as a bearer Authorization header, but only to GitHub hosts.
+func TestGitHubDownloadSendsBearerToken(t *testing.T) {
+	payload := []byte("apk-bytes-ok")
 	tests := []struct {
-		name          string
-		releaseFilter string
-		tagName       string
-		want          bool
+		name     string
+		url      string
+		wantAuth string
 	}{
-		{
-			name:          "no filter matches everything",
-			releaseFilter: "",
-			tagName:       "v1.0.0",
-			want:          true,
-		},
-		{
-			name:          "K9MAIL filter matches K9MAIL tag",
-			releaseFilter: "^K9MAIL_.*",
-			tagName:       "K9MAIL_17_0",
-			want:          true,
-		},
-		{
-			name:          "K9MAIL filter does not match THUNDERBIRD tag",
-			releaseFilter: "^K9MAIL_.*",
-			tagName:       "THUNDERBIRD_18_0b4",
-			want:          false,
-		},
-		{
-			name:          "THUNDERBIRD filter matches THUNDERBIRD tag",
-			releaseFilter: "^THUNDERBIRD_.*",
-			tagName:       "THUNDERBIRD_18_0b4",
-			want:          true,
-		},
-		{
-			name:          "THUNDERBIRD filter does not match K9MAIL tag",
-			releaseFilter: "^THUNDERBIRD_.*",
-			tagName:       "K9MAIL_17_0",
-			want:          false,
-		},
-		{
-			name:          "version pattern matches v-prefixed tags",
-			releaseFilter: "^v[0-9]+\\.[0-9]+\\.[0-9]+$",
-			tagName:       "v1.2.3",
-			want:          true,
-		},
-		{
-			name:          "version pattern does not match beta tags",
-			releaseFilter: "^v[0-9]+\\.[0-9]+\\.[0-9]+$",
-			tagName:       "v1.2.3-beta",
-			want:          false,
-		},
+		{"github.com", "https://github.com/o/r/releases/download/v1/app.apk", "Bearer test-token"},
+		{"api.github.com", "https://api.github.com/repos/o/r/releases/assets/1", "Bearer test-token"},
+		{"CDN host", "https://objects.githubusercontent.com/app.apk", ""},
+		{"lookalike host", "https://github.com.evil.example/app.apk", ""},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := &GitHub{
-				cfg: &config.Config{
-					ReleaseFilter: tt.releaseFilter,
-				},
+			t.Chdir(t.TempDir())
+			t.Setenv("GITHUB_TOKEN", "test-token")
+			var gotAuth string
+			g := &GitHub{downloadClient: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				gotAuth = req.Header.Get("Authorization")
+				return &http.Response{
+					StatusCode:    http.StatusOK,
+					Body:          io.NopCloser(bytes.NewReader(payload)),
+					ContentLength: int64(len(payload)),
+					Header:        make(http.Header),
+					Request:       req,
+				}, nil
+			})}}
+			asset := &Asset{Name: "app.apk", URL: tt.url}
+
+			path, err := g.Download(context.Background(), asset, t.TempDir(), nil)
+			if err != nil {
+				t.Fatalf("Download() error = %v", err)
 			}
-			got := g.matchesReleaseFilter(tt.tagName)
-			if got != tt.want {
-				t.Errorf("matchesReleaseFilter(%q) = %v, want %v", tt.tagName, got, tt.want)
+			if gotAuth != tt.wantAuth {
+				t.Fatalf("Authorization header = %q, want %q", gotAuth, tt.wantAuth)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("ReadFile: %v", err)
+			}
+			if string(got) != string(payload) {
+				t.Fatalf("downloaded %q, want %q", got, payload)
+			}
+			if asset.LocalPath != path {
+				t.Fatalf("asset.LocalPath = %q, want %q", asset.LocalPath, path)
 			}
 		})
-	}
-}
-
-// TestGitHubDownloadSendsBearerToken confirms GitHub's Download method routes
-// through the shared DownloadHTTP pipeline while still attaching the
-// configured token as a bearer Authorization header.
-func TestGitHubDownloadSendsBearerToken(t *testing.T) {
-	var gotAuth string
-	payload := []byte("apk-bytes-ok")
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		_, _ = w.Write(payload)
-	}))
-	defer srv.Close()
-
-	g := &GitHub{token: "test-token"}
-	asset := &Asset{Name: "app.apk", URL: srv.URL + "/app.apk"}
-
-	path, err := g.Download(context.Background(), asset, t.TempDir(), nil)
-	if err != nil {
-		t.Fatalf("Download() error = %v", err)
-	}
-	if gotAuth != "Bearer test-token" {
-		t.Fatalf("Authorization header = %q, want %q", gotAuth, "Bearer test-token")
-	}
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	if string(got) != string(payload) {
-		t.Fatalf("downloaded %q, want %q", got, payload)
-	}
-	if asset.LocalPath != path {
-		t.Fatalf("asset.LocalPath = %q, want %q", asset.LocalPath, path)
 	}
 }
 
@@ -129,7 +82,6 @@ func TestGitHubFetchLatestReleaseUsesETag(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	github := &GitHub{
-		cfg:      &config.Config{},
 		owner:    "owner",
 		repo:     "repo",
 		client:   server.Client(),
@@ -201,7 +153,6 @@ func TestGitHubFetchLatestReleaseIgnoresETagOnlyChanges(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	github := &GitHub{
-		cfg:      &config.Config{},
 		owner:    "owner",
 		repo:     "repo",
 		client:   server.Client(),
@@ -269,7 +220,6 @@ func TestGitHubListHonorsMaxReleases(t *testing.T) {
 			t.Cleanup(server.Close)
 
 			github := &GitHub{
-				cfg:         &config.Config{},
 				owner:       "owner",
 				repo:        "repo",
 				client:      server.Client(),
@@ -305,5 +255,67 @@ func TestGitHubDownloadRejectsInsecureURL(t *testing.T) {
 
 	if _, err := g.Download(context.Background(), asset, t.TempDir(), nil); err == nil {
 		t.Fatal("Download() error = nil, want rejection of insecure URL")
+	}
+}
+
+func TestGitHubReleaseAssetDigest(t *testing.T) {
+	hexSum := strings.Repeat("cd", 32)
+	g := &GitHub{}
+	release := g.convertRelease(&githubRelease{
+		TagName: "v1.0.0",
+		Assets: []githubAsset{
+			{Name: "a.apk", BrowserDownloadURL: "https://github.com/o/r/a.apk", Digest: "sha256:" + hexSum},
+			{Name: "b.apk", BrowserDownloadURL: "https://github.com/o/r/b.apk"},
+			{Name: "c.apk", BrowserDownloadURL: "https://github.com/o/r/c.apk", Digest: "sha512:abcd"},
+		},
+	})
+	want := []string{hexSum, "", ""}
+	for i, asset := range release.Assets {
+		if asset.SHA256 != want[i] {
+			t.Errorf("asset %s SHA256 = %q, want %q", asset.Name, asset.SHA256, want[i])
+		}
+	}
+}
+
+func TestGitHubDownloadRejectsDigestMismatch(t *testing.T) {
+	g := &GitHub{downloadClient: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return testResponse(http.StatusOK, "tampered"), nil
+	})}}
+	asset := &Asset{Name: "app.apk", URL: "https://github.com/o/r/app.apk", SHA256: strings.Repeat("0", 64)}
+	if _, err := g.Download(context.Background(), asset, t.TempDir(), nil); !errors.Is(err, ErrChecksumMismatch) {
+		t.Fatalf("Download() error = %v, want ErrChecksumMismatch", err)
+	}
+}
+
+func TestGitHubRateLimitHintWithoutToken(t *testing.T) {
+	t.Chdir(t.TempDir())
+	tests := []struct {
+		name      string
+		token     string
+		wantHint  bool
+		wantLimit bool
+	}{
+		{"no token", "", true, true},
+		{"token set", "ghp_test", false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GITHUB_TOKEN", tt.token)
+			// The test client has no Tor fallback, so the direct 403 surfaces.
+			client := &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				resp := testResponse(http.StatusForbidden, "")
+				resp.Header.Set("X-RateLimit-Remaining", "0")
+				resp.Request = req
+				return resp, nil
+			})}
+			g := &GitHub{owner: "o", repo: "r", client: client, apiBase: "https://api.github.com", cacheDir: t.TempDir()}
+			_, err := g.FetchLatestRelease(t.Context())
+			if errors.Is(err, ErrRateLimited) != tt.wantLimit {
+				t.Fatalf("FetchLatestRelease() = %v, rate limited want %v", err, tt.wantLimit)
+			}
+			if got := strings.Contains(err.Error(), "GITHUB_TOKEN"); got != tt.wantHint {
+				t.Errorf("error %q mentions GITHUB_TOKEN = %v, want %v", err, got, tt.wantHint)
+			}
+		})
 	}
 }

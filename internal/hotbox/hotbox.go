@@ -47,14 +47,13 @@ func (c Client) SignProof(ctx context.Context, createdAt, expiry int64) (Proof, 
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(ctx, "unix", c.Socket)
 	if err != nil {
-		return Proof{}, fmt.Errorf("hotbox is not listening on %s; start it and unlock the vault", c.Socket)
+		return Proof{}, fmt.Errorf("hotbox is not listening on %s; start it and unlock the vault: %w", c.Socket, err)
 	}
 	defer conn.Close()
-	deadline := time.Now().Add(timeout)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
-	}
-	_ = conn.SetDeadline(deadline)
+	// Closing the connection unblocks reads when ctx ends without a deadline.
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
 
 	body := make([]byte, 0, 2+len(c.PIN)+16)
 	body = binary.BigEndian.AppendUint16(body, uint16(len(c.PIN)))
@@ -62,11 +61,11 @@ func (c Client) SignProof(ctx context.Context, createdAt, expiry int64) (Proof, 
 	body = binary.BigEndian.AppendUint64(body, uint64(createdAt))
 	body = binary.BigEndian.AppendUint64(body, uint64(expiry))
 	if err := writeFrame(conn, opProof, body); err != nil {
-		return Proof{}, fmt.Errorf("hotbox request: %w", err)
+		return Proof{}, fmt.Errorf("hotbox request: %w", connErr(ctx, err))
 	}
 	status, resp, err := readFrame(conn)
 	if err != nil {
-		return Proof{}, fmt.Errorf("hotbox response: %w", err)
+		return Proof{}, fmt.Errorf("hotbox response: %w", connErr(ctx, err))
 	}
 	switch status {
 	case statusOK:
@@ -91,6 +90,14 @@ func (c Client) SignProof(ctx context.Context, createdAt, expiry int64) (Proof, 
 		CertificateHash: hex.EncodeToString(resp[32:64]),
 		Signature:       append([]byte(nil), resp[68:]...),
 	}, nil
+}
+
+// connErr prefers the context error when ctx closed the connection.
+func connErr(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return err
 }
 
 func writeFrame(w io.Writer, kind byte, body []byte) error {

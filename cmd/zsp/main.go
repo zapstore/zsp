@@ -18,15 +18,20 @@ import (
 var version = "dev"
 
 func main() {
+	os.Exit(runMain())
+}
+
+// runMain owns the signal handler so its Stop runs before the process exits.
+func runMain() int {
 	handler := cli.NewSignalHandler()
 	defer handler.Stop()
-	os.Exit(run(handler))
+	return run(handler)
 }
 
 func run(handler *cli.SignalHandler) int {
 	ctx := handler.Context()
-	ui.SetContext(ctx)
 	options := cli.ParseCommand()
+	handler.SetQuiet(options.Global.JSON)
 	if options.FlagParseError != nil {
 		if options.Global.JSON {
 			_ = json.NewEncoder(os.Stderr).Encode(cliErrorDocument{
@@ -121,6 +126,17 @@ func run(handler *cli.SignalHandler) int {
 			})
 		} else {
 			ui.WritePanel(os.Stderr, "error", ".env is readable by other users", nil, []string{err.Error()})
+		}
+		return 1
+	}
+	if err := config.CheckDotEnv(); err != nil {
+		if options.Global.JSON {
+			_ = json.NewEncoder(os.Stderr).Encode(cliErrorDocument{
+				OK: false, Operation: string(options.Command),
+				Error: cliErrorBody{Code: "invalid_env", Summary: ".env cannot be read.", Detail: ui.SanitizeErrorMessage(err), Retryable: false},
+			})
+		} else {
+			ui.WritePanel(os.Stderr, "error", ".env cannot be read", nil, []string{ui.SanitizeErrorMessage(err)})
 		}
 		return 1
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
@@ -14,18 +13,22 @@ import (
 // Gitea implements Source for Gitea/Forgejo/Codeberg releases.
 // This covers any Gitea-compatible forge (Gitea, Forgejo, Codeberg, etc.)
 type Gitea struct {
-	cfg                *config.Config
 	baseURL            string // e.g., "https://codeberg.org"
 	owner              string
 	repo               string
-	token              string
 	client             *http.Client
+	downloadClient     *http.Client
+	filter             *releaseFilter
 	IncludePreReleases bool // Set to true to include pre-releases (--pre-release)
 	maxReleases        int
 }
 
 // NewGitea creates a new Gitea source.
 func NewGitea(cfg *config.Config) (*Gitea, error) {
+	return newGitea(cfg, Options{})
+}
+
+func newGitea(cfg *config.Config, opts Options) (*Gitea, error) {
 	repoURL := cfg.GetAPKSourceURL()
 	baseURL, repoPath := config.GetGiteaRepo(repoURL)
 	if repoPath == "" {
@@ -37,13 +40,22 @@ func NewGitea(cfg *config.Config) (*Gitea, error) {
 		return nil, fmt.Errorf("invalid Gitea repo path: %s", repoPath)
 	}
 
+	if err := validateDownloadURL(baseURL); err != nil {
+		return nil, fmt.Errorf("gitea base URL: %w", err)
+	}
+	filter, err := newReleaseFilter(cfg.ReleaseFilter)
+	if err != nil {
+		return nil, err
+	}
+
+	tor := opts.tor()
 	return &Gitea{
-		cfg:     cfg,
-		baseURL: baseURL,
-		owner:   parts[0],
-		repo:    parts[1],
-		token:   config.GetEnv("GITEA_TOKEN"),
-		client:  newSecureHTTPClient(30 * time.Second),
+		baseURL:        baseURL,
+		owner:          parts[0],
+		repo:           parts[1],
+		client:         newSecureHTTPClient(30*time.Second, tor),
+		downloadClient: newDownloadHTTPClient(tor),
+		filter:         filter,
 	}, nil
 }
 
@@ -89,33 +101,25 @@ func (g *Gitea) fetchLatestFromList(ctx context.Context) (*Release, error) {
 	limit := releaseScanLimit(g.maxReleases)
 	apiURL := fmt.Sprintf("%s/api/v1/repos/%s/%s/releases?limit=%d", g.baseURL, g.owner, g.repo, limit)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	req, err := newForgeRequest(ctx, config.SourceGitea, apiURL)
 	if err != nil {
 		return nil, err
 	}
-
 	req.Header.Set("Accept", "application/json")
-	if g.token != "" {
-		req.Header.Set("Authorization", "token "+g.token)
-	}
 
 	resp, err := g.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch releases: %w", err)
+		return nil, fmt.Errorf("fetch releases: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("no releases found for %s/%s", g.owner, g.repo)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Gitea API error (status %d)", resp.StatusCode)
+	if err := checkHTTPStatus(resp, "Gitea API"); err != nil {
+		return nil, describeNotFound(err, fmt.Sprintf("no releases found for %s/%s", g.owner, g.repo))
 	}
 
 	var releases []giteaRelease
 	if err := decodeJSONResponse(resp, MaxJSONResponseSize, &releases); err != nil {
-		return nil, fmt.Errorf("failed to parse releases: %w", err)
+		return nil, fmt.Errorf("parse releases: %w", err)
 	}
 
 	if len(releases) == 0 {
@@ -128,7 +132,7 @@ func (g *Gitea) fetchLatestFromList(ctx context.Context) (*Release, error) {
 		if r.Draft || (r.Prerelease && !g.IncludePreReleases) {
 			continue
 		}
-		if !g.matchesReleaseFilter(r.TagName, r.Name) {
+		if !g.filter.matches(r.TagName, r.Name) {
 			continue
 		}
 		release := g.convertRelease(&r)
@@ -151,39 +155,21 @@ func (g *Gitea) convertRelease(gtRelease *giteaRelease) *Release {
 		})
 	}
 
-	// Extract version from tag name (strip leading 'v' if present)
-	version := gtRelease.TagName
-	if strings.HasPrefix(version, "v") {
-		version = version[1:]
-	}
-
-	// Parse release date from published_at (RFC 3339 format), fallback to created_at
-	var createdAt time.Time
-	dateStr := gtRelease.PublishedAt
-	if dateStr == "" {
-		dateStr = gtRelease.CreatedAt
-	}
-	if dateStr != "" {
-		if t, err := time.Parse(time.RFC3339, dateStr); err == nil {
-			createdAt = t
-		}
-	}
-
 	return &Release{
-		Version:    version,
+		Version:    versionFromTag(gtRelease.TagName),
 		TagName:    gtRelease.TagName,
 		Name:       gtRelease.Name,
 		Changelog:  gtRelease.Body,
 		Assets:     assets,
 		PreRelease: gtRelease.Prerelease,
 		URL:        gtRelease.HTMLURL,
-		CreatedAt:  createdAt,
+		CreatedAt:  parseReleaseTime(gtRelease.PublishedAt, gtRelease.CreatedAt),
 	}
 }
 
 // Download downloads an asset from a Gitea-compatible forge, using the
 // shared DownloadHTTP pipeline (size limit, redirect validation, stall
-// detection, bounded retries) with Gitea's token attached when configured.
+// detection, bounded retries) with Gitea's token attached when the asset is hosted on GITEA_HOST.
 func (g *Gitea) Download(ctx context.Context, asset *Asset, destDir string, progress DownloadProgress) (string, error) {
 	if asset.URL == "" {
 		return "", fmt.Errorf("asset has no download URL")
@@ -194,35 +180,11 @@ func (g *Gitea) Download(ctx context.Context, asset *Asset, destDir string, prog
 		return "", err
 	}
 
-	var headers map[string]string
-	if g.token != "" {
-		headers = map[string]string{"Authorization": "token " + g.token}
-	}
-
-	if err := DownloadHTTP(ctx, asset.URL, destPath, asset.Size, headers, progress); err != nil {
+	headers := forgeAuthHeaders(config.SourceGitea, asset.URL)
+	if err := downloadHTTP(ctx, g.downloadClient, asset.URL, destPath, asset.Size, asset.SHA256, headers, progress); err != nil {
 		return "", err
 	}
 
 	asset.LocalPath = destPath
 	return destPath, nil
-}
-
-// matchesReleaseFilter checks whether a release tag or name matches the filter.
-func (g *Gitea) matchesReleaseFilter(tagName string, names ...string) bool {
-	if g.cfg.ReleaseFilter == "" {
-		return true
-	}
-	re, err := regexp.Compile(g.cfg.ReleaseFilter)
-	if err != nil {
-		return false
-	}
-	if re.MatchString(tagName) {
-		return true
-	}
-	for _, name := range names {
-		if re.MatchString(name) {
-			return true
-		}
-	}
-	return false
 }

@@ -1,5 +1,6 @@
-// Package zsp provides the public API for validating and publishing Zapstore releases.
-package zsp
+// Package release fetches, checks, and publishes Zapstore releases. The root
+// zsp package re-exports its public API.
+package release
 
 import (
 	"context"

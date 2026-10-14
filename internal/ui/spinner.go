@@ -141,71 +141,6 @@ func (s *Spinner) UpdateMessage(message string) {
 	s.mu.Unlock()
 }
 
-// Progress displays a progress indicator with animated bar.
-type Progress struct {
-	total   int64
-	current int64
-	message string
-	writer  io.Writer
-	bar     progress.Model
-	mu      sync.Mutex
-}
-
-// NewProgress creates a new progress indicator with animated bar.
-func NewProgress(message string, total int64) *Progress {
-	var bar progress.Model
-	if NoColor {
-		// Simple ASCII bar without colors
-		bar = progress.New(
-			progress.WithWidth(30),
-			progress.WithoutPercentage(),
-		)
-	} else {
-		// Greyscale gradient bar
-		bar = progress.New(
-			progress.WithGradient("#404040", "#808080"),
-			progress.WithWidth(30),
-			progress.WithoutPercentage(),
-		)
-	}
-
-	return &Progress{
-		message: message,
-		total:   total,
-		writer:  os.Stderr,
-		bar:     bar,
-	}
-}
-
-// Update updates the progress.
-func (p *Progress) Update(current int64) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	p.current = current
-	pct := float64(current) / float64(p.total)
-
-	// Format size
-	currentMB := float64(current) / (1024 * 1024)
-	totalMB := float64(p.total) / (1024 * 1024)
-
-	// Render the progress bar
-	barView := p.bar.ViewAs(pct)
-
-	fmt.Fprintf(p.writer, "\r\033[K%s %s %.1f%% (%.1f / %.1f MB)", p.message, barView, pct*100, currentMB, totalMB)
-}
-
-// Done marks the progress as complete.
-func (p *Progress) Done() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// Show completed bar
-	barView := p.bar.ViewAs(1.0)
-	totalMB := float64(p.total) / (1024 * 1024)
-	fmt.Fprintf(p.writer, "\r\033[K%s %s 100%% (%.1f MB)\n", p.message, barView, totalMB)
-}
-
 // DownloadTracker tracks download progress, handling both known and unknown sizes.
 // It provides a callback function for use with download operations.
 type DownloadTracker struct {
@@ -220,13 +155,8 @@ type DownloadTracker struct {
 	mu         sync.Mutex
 }
 
-// NewDownloadTracker creates a new download tracker.
-// Pass 0 for initialTotal if the size is unknown.
-func NewDownloadTracker(message string, initialTotal int64) *DownloadTracker {
-	return NewDownloadTrackerWithWriter(os.Stderr, message, initialTotal)
-}
-
-// NewDownloadTrackerWithWriter creates a byte progress tracker for a terminal stream.
+// NewDownloadTrackerWithWriter creates a byte progress tracker for a terminal
+// stream. Pass 0 for initialTotal if the size is unknown.
 func NewDownloadTrackerWithWriter(writer io.Writer, message string, initialTotal int64) *DownloadTracker {
 	var bar progress.Model
 	if NoColor {
@@ -317,6 +247,14 @@ func (dt *DownloadTracker) Done() {
 	} else {
 		fmt.Fprintf(dt.writer, "\r\033[K\n")
 	}
+}
+
+// Clear erases the progress line without reporting completion, for a download
+// that did not finish.
+func (dt *DownloadTracker) Clear() {
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	fmt.Fprintf(dt.writer, "\r\033[K")
 }
 
 // DoneWithMessage marks the download as complete with a custom message.

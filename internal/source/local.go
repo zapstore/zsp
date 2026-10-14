@@ -16,14 +16,6 @@ type Local struct {
 	baseDir string // Base directory for relative paths
 }
 
-// NewLocal creates a new local source.
-func NewLocal(pattern string) (*Local, error) {
-	if pattern == "" {
-		return nil, fmt.Errorf("local path is empty")
-	}
-	return &Local{pattern: pattern}, nil
-}
-
 // NewLocalWithBase creates a new local source with a base directory for relative paths.
 func NewLocalWithBase(pattern, baseDir string) (*Local, error) {
 	if pattern == "" {

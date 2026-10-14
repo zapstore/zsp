@@ -73,3 +73,62 @@ func TestProgressReporterNonInteractiveIsLineOriented(t *testing.T) {
 		}
 	}
 }
+
+func TestProgressReporterWarningDoesNotMarkActiveSpinnerSuccessful(t *testing.T) {
+	oldNoColor := NoColor
+	SetNoColor(true)
+	t.Cleanup(func() { SetNoColor(oldNoColor) })
+
+	var output bytes.Buffer
+	reporter := NewProgressReporter(&output, true)
+	reporter.Report(zsp.Progress{Phase: "download", Target: "app.apk"})
+	reporter.Report(zsp.Progress{Phase: "warning", Target: "app.apk: download failed"})
+	reporter.Finish()
+
+	text := output.String()
+	if !strings.Contains(text, "app.apk: download failed") {
+		t.Fatalf("warning missing from output:\n%s", text)
+	}
+	for _, mark := range []string{"✓", "[OK]"} {
+		if strings.Contains(text, mark) {
+			t.Fatalf("a failed step was marked successful with %q:\n%s", mark, text)
+		}
+	}
+}
+
+func TestProgressReporterUpdatesSpinnerTextOnTargetChange(t *testing.T) {
+	var output bytes.Buffer
+	reporter := NewProgressReporter(&output, true)
+	reporter.Report(zsp.Progress{Phase: "verify", Target: "first.apk"})
+	first := reporter.spinner
+	reporter.Report(zsp.Progress{Phase: "verify", Target: "second.apk"})
+	defer reporter.Finish()
+
+	if reporter.spinner != first {
+		t.Fatal("a target change inside one phase replaced the spinner")
+	}
+	first.mu.Lock()
+	message := first.message
+	first.mu.Unlock()
+	if message != "Verify second.apk" {
+		t.Fatalf("spinner text = %q, want %q", message, "Verify second.apk")
+	}
+}
+
+func TestProgressReporterTargetChangeAbandonsDownloadWithoutSuccess(t *testing.T) {
+	oldNoColor := NoColor
+	SetNoColor(true)
+	t.Cleanup(func() { SetNoColor(oldNoColor) })
+
+	var output bytes.Buffer
+	reporter := NewProgressReporter(&output, true)
+	reporter.Report(zsp.Progress{Phase: "download", Target: "a.apk", Completed: 10, Total: 100})
+	reporter.Report(zsp.Progress{Phase: "download", Target: "b.apk", Completed: 10, Total: 100})
+	text := output.String()
+	if strings.Contains(text, "[OK]") {
+		t.Fatalf("abandoned download was marked successful:\n%s", text)
+	}
+	if !strings.Contains(text, "b.apk") {
+		t.Fatalf("new target missing from output:\n%s", text)
+	}
+}

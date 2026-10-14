@@ -9,36 +9,26 @@ import (
 
 // PromptField collects a single terminal value with a consistent Huh form.
 func PromptField(title, description string, secret, required bool) (string, error) {
-	return PromptFieldDefault(title, description, "", secret, required)
+	form, value := fieldForm(title, description, secret, required)
+	if err := form.Run(); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(*value), nil
 }
 
-// PromptFieldDefault collects a terminal value with a prefilled default.
-// Clearing a prefilled optional value removes it from the caller's config.
-func PromptFieldDefault(title, description, defaultValue string, secret, required bool) (string, error) {
-	return promptField(title, description, defaultValue, secret, required, false)
-}
-
-func promptField(title, description, defaultValue string, secret, required, back bool) (string, error) {
-	value := defaultValue
+func fieldForm(title, description string, secret, required bool) (*huh.Form, *string) {
+	value := new(string)
 	input := huh.NewInput().
 		Title(title).
 		Description(description).
-		Value(&value)
+		Value(value)
 	if secret {
 		input = input.EchoMode(huh.EchoModePassword)
 	}
 	if required {
-		input = input.Validate(func(value string) error {
-			if strings.TrimSpace(value) == "" {
-				return RequiredError{}
-			}
-			return nil
-		})
+		input = input.Validate(requiredValue)
 	}
-	if err := runForm(huh.NewForm(huh.NewGroup(input)), back); err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(value), nil
+	return huh.NewForm(huh.NewGroup(input)), value
 }
 
 // PromptPath collects a filesystem path and offers Tab completion of files
@@ -50,30 +40,34 @@ func PromptPath(title, description string, required bool) (string, error) {
 // PromptPathDefault collects a filesystem path with Tab completion and a
 // prefilled default directory or file.
 func PromptPathDefault(title, description, defaultValue string, required bool) (string, error) {
-	return promptPath(title, description, defaultValue, required, false)
+	form, value := pathForm(title, description, defaultValue, required)
+	if err := form.Run(); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(*value), nil
 }
 
-func promptPath(title, description, defaultValue string, required, back bool) (string, error) {
-	value := defaultValue
+func pathForm(title, description, defaultValue string, required bool) (*huh.Form, *string) {
+	value := new(string)
+	*value = defaultValue
 	input := huh.NewInput().
 		Title(title).
 		Description(description).
-		Value(&value).
+		Value(value).
 		SuggestionsFunc(func() []string {
-			return pathCompletions(value)
-		}, &value)
+			return pathCompletions(*value)
+		}, value)
 	if required {
-		input = input.Validate(func(value string) error {
-			if strings.TrimSpace(value) == "" {
-				return RequiredError{}
-			}
-			return nil
-		})
+		input = input.Validate(requiredValue)
 	}
-	if err := runForm(huh.NewForm(huh.NewGroup(input)).WithKeyMap(pathInputKeyMap()), back); err != nil {
-		return "", err
+	return huh.NewForm(huh.NewGroup(input)).WithKeyMap(pathInputKeyMap()), value
+}
+
+func requiredValue(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return RequiredError{}
 	}
-	return strings.TrimSpace(value), nil
+	return nil
 }
 
 func pathInputKeyMap() *huh.KeyMap {

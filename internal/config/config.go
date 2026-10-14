@@ -2,18 +2,18 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/url"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
-	"github.com/zapstore/zsp/internal/sanitize"
+	"github.com/zapstore/zsp/internal/netpolicy"
 	"gopkg.in/yaml.v3"
 )
 
@@ -59,10 +59,6 @@ type Config struct {
 	// only the section for this release is extracted.
 	ReleaseNotes string `yaml:"release_notes,omitempty"`
 
-	// Changelog is deprecated and has no effect on parsing or validation; use
-	// ReleaseNotes instead. Kept only for legacy callers outside this package.
-	Changelog string `yaml:"changelog,omitempty"`
-
 	// SupportedNIPs lists Nostr NIPs supported by this application
 	SupportedNIPs []string `yaml:"supported_nips,omitempty"`
 
@@ -78,18 +74,29 @@ type Config struct {
 	// then fall back to their native repository metadata.
 	MetadataSources []string `yaml:"metadata_sources,omitempty"`
 
-	// Pubkey is deprecated and has no effect on parsing, validation, or
-	// loading: Load never resolves or checks it against the process signer.
-	// Kept only for legacy callers outside this package (e.g. the wizard).
-	Pubkey string `yaml:"pubkey,omitempty"`
+	// Deprecated holds keys that older files still carry. They decode so those
+	// files load, and nothing reads them.
+	Deprecated deprecatedKeys `yaml:",inline"`
 
-	// Communities is deprecated and has no effect on parsing or validation.
-	// Kept only for legacy callers outside this package.
-	Communities []string `yaml:"communities,omitempty"`
-
-	// BaseDir is the directory containing the config file (for relative paths).
-	// Not parsed from YAML, set by Load().
+	// BaseDir is the directory that local media, release notes, and Fastlane
+	// files must stay inside. Not parsed from YAML; the caller sets it.
 	BaseDir string `yaml:"-"`
+}
+
+// deprecatedKeys lists every zapstore.yaml key that is accepted and ignored.
+type deprecatedKeys struct {
+	Changelog         yaml.Node `yaml:"changelog"`
+	Pubkey            yaml.Node `yaml:"pubkey"`
+	Communities       yaml.Node `yaml:"communities"`
+	Identifier        yaml.Node `yaml:"identifier"`
+	Version           yaml.Node `yaml:"version"`
+	Assets            yaml.Node `yaml:"assets"`
+	Executables       yaml.Node `yaml:"executables"`
+	ReleaseRepository yaml.Node `yaml:"release_repository"`
+	Homepage          yaml.Node `yaml:"homepage"`
+	RemoteMetadata    yaml.Node `yaml:"remote_metadata"`
+	FetchMetadata     yaml.Node `yaml:"fetch_metadata"`
+	BlossomServer     yaml.Node `yaml:"blossom_server"`
 }
 
 // NIP34RepoPointer represents a parsed NIP-34 repository naddr.
@@ -250,52 +257,31 @@ func ParseSourceType(s string) SourceType {
 	}
 }
 
-// Load reads and parses a config file.
-// Loading never depends on the process signer: it performs no SIGN_WITH
-// resolution and never fails based on the resolved signing identity.
-func Load(path string) (*Config, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open config file: %w", err)
-	}
-	defer f.Close()
+// ErrEmpty is returned by Parse when the input holds no YAML document.
+var ErrEmpty = errors.New("zapstore.yaml is empty")
 
-	cfg, err := Parse(f)
-	if err != nil {
-		return nil, err
-	}
-
-	// Set base directory for relative path resolution
-	absPath, err := filepath.Abs(path)
-	if err == nil {
-		cfg.BaseDir = filepath.Dir(absPath)
-	}
-
-	return cfg, nil
-}
-
-// Parse reads and parses config from a reader.
+// Parse reads and parses config from a reader. Keys that are neither
+// supported nor deprecated are an error, so a typo does not silently drop a
+// setting.
 func Parse(r io.Reader) (*Config, error) {
 	var cfg Config
 	decoder := yaml.NewDecoder(r)
+	decoder.KnownFields(true)
 	if err := decoder.Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse YAML: %w", err)
+		if errors.Is(err, io.EOF) {
+			return nil, ErrEmpty
+		}
+		return nil, fmt.Errorf("parse YAML: %w", err)
 	}
 
-	// Parse release_source which can be string or map
 	if err := cfg.parseReleaseSource(); err != nil {
 		return nil, err
 	}
 	cfg.CanonicalizeForgeURLs()
 
-	// Parse repository if it's an naddr
 	if err := cfg.parseRepository(); err != nil {
 		return nil, err
 	}
-
-	// changelog, pubkey, and communities are deprecated and unknown fields are
-	// ignored: they are decoded (when the struct still declares them for
-	// legacy callers) but have no effect on parsing, validation, or behavior.
 
 	return &cfg, nil
 }
@@ -377,7 +363,7 @@ func ValidateForgeRepositoryURL(source, sourceType string) error {
 func ParseNaddr(naddrStr string) (*NIP34RepoPointer, error) {
 	prefix, data, err := nip19.Decode(naddrStr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode naddr: %w", err)
+		return nil, fmt.Errorf("decode naddr: %w", err)
 	}
 
 	if prefix != "naddr" {
@@ -402,67 +388,109 @@ func ParseNaddr(naddrStr string) (*NIP34RepoPointer, error) {
 	}, nil
 }
 
-// parseReleaseSource handles the polymorphic release_source field.
+// parseReleaseSource reads the release_source field, which is a string or a
+// mapping. The result keeps the URL as written; NormalizeReleaseSource derives
+// what a source consumes.
 func (c *Config) parseReleaseSource() error {
-	if c.ReleaseSourceRaw.Kind == 0 {
-		return nil // Not specified
-	}
-
+	var raw ReleaseSource
 	switch c.ReleaseSourceRaw.Kind {
+	case 0:
+		return nil
 	case yaml.ScalarNode:
-		// Simple string - could be URL or local path
 		var value string
 		if err := c.ReleaseSourceRaw.Decode(&value); err != nil {
-			return fmt.Errorf("failed to parse release_source: %w", err)
+			return fmt.Errorf("parse release_source: %w", err)
 		}
-
-		// Check if it's a local path (starts with . or / or contains glob patterns without http)
 		if isLocalPath(value) {
-			c.ReleaseSource = &ReleaseSource{LocalPath: value}
-		} else if DetectSourceType(value) == SourceUnknown {
-			// If the URL is from an unknown source (not GitHub, GitLab, etc.),
-			// treat it as a web source with the URL as the asset_url.
-			// This allows: release_source: https://example.com/app.apk
-			// to be shorthand for: release_source: { asset_url: https://example.com/app.apk }
-			// Uses HTTP caching (ETag/Last-Modified) to detect changes.
-			c.ReleaseSource = &ReleaseSource{
-				IsWebSource: true,
-				AssetURL:    value,
-			}
+			raw.LocalPath = value
 		} else {
-			c.ReleaseSource = &ReleaseSource{URL: value}
+			raw.URL = value
 		}
-
 	case yaml.MappingNode:
-		// Complex release source config
 		var web webReleaseSource
-		if err := c.ReleaseSourceRaw.Decode(&web); err != nil {
-			return fmt.Errorf("failed to parse release_source config: %w", err)
+		if err := decodeStrict(&c.ReleaseSourceRaw, &web); err != nil {
+			return fmt.Errorf("parse release_source: %w", err)
 		}
-
-		// Any extractor or asset setting selects structured web mode. This also
-		// makes an otherwise-unused version extractor fail validation unless an
-		// asset URL or asset extractor is provided.
-		isWebSource := web.AssetURL != "" || web.Version != nil || web.Asset != nil
-
-		c.ReleaseSource = &ReleaseSource{
-			URL:         web.URL,
-			Type:        web.Type,
-			IsWebSource: isWebSource,
-			AssetURL:    web.AssetURL,
-			Version:     web.Version,
-			Asset:       web.Asset,
-		}
-		if ParseSourceType(web.Type) == SourceLocal {
-			c.ReleaseSource.LocalPath = web.URL
-			c.ReleaseSource.URL = ""
-		}
-
+		raw = ReleaseSource{URL: web.URL, Type: web.Type, AssetURL: web.AssetURL, Version: web.Version, Asset: web.Asset}
 	default:
 		return fmt.Errorf("release_source must be a string or map")
 	}
 
+	source, err := writtenReleaseSource(raw)
+	if err != nil {
+		return fmt.Errorf("release_source: %w", err)
+	}
+	c.ReleaseSource = &source
 	return nil
+}
+
+// decodeStrict decodes node into out, rejecting keys out does not declare.
+func decodeStrict(node *yaml.Node, out any) error {
+	data, err := yaml.Marshal(node)
+	if err != nil {
+		return err
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	return decoder.Decode(out)
+}
+
+// writtenReleaseSource returns raw as the user wrote it, checked for
+// consistency. It lowercases the type, moves the path of a `type: local` source
+// into LocalPath, and marks a source with asset settings as a web source. It
+// never rewrites a URL, so the result is what the public API shows and what
+// marshals back to YAML.
+func writtenReleaseSource(raw ReleaseSource) (ReleaseSource, error) {
+	source := raw
+	source.Type = strings.ToLower(strings.TrimSpace(raw.Type))
+
+	if source.Type == "local" {
+		if source.LocalPath != "" && source.URL != "" {
+			return ReleaseSource{}, errors.New("local source must specify one path")
+		}
+		if source.LocalPath == "" {
+			source.LocalPath, source.URL = source.URL, ""
+		}
+	}
+	webSettings := raw.IsWebSource || source.AssetURL != "" || source.Version != nil || source.Asset != nil
+
+	if source.LocalPath != "" {
+		if source.Type != "" && source.Type != "local" {
+			return ReleaseSource{}, errors.New("local source cannot use a remote type")
+		}
+		if source.URL != "" || webSettings {
+			return ReleaseSource{}, errors.New("local source cannot include remote settings")
+		}
+		source.IsWebSource = false
+		return source, nil
+	}
+	if source.URL == "" && !webSettings {
+		return ReleaseSource{}, errors.New("must specify a url, asset_url, or asset")
+	}
+	source.IsWebSource = webSettings
+	return source, nil
+}
+
+// NormalizeReleaseSource returns the form release sources consume, from a
+// source as written in zapstore.yaml or built by a library caller. It is
+// idempotent and does not change its argument.
+//
+//   - type local, or a LocalPath, makes a local source; it takes no remote settings.
+//   - an asset_url, a version extractor, or an asset extractor makes a web source.
+//   - a bare URL of no recognized forge is a direct download: the web source
+//     with that URL as asset_url.
+//
+// Apply it where a source is built, never to the value shown to callers.
+func NormalizeReleaseSource(raw ReleaseSource) (*ReleaseSource, error) {
+	source, err := writtenReleaseSource(raw)
+	if err != nil {
+		return nil, err
+	}
+	if !source.IsWebSource && source.LocalPath == "" && source.Type == "" && DetectSourceType(source.URL) == SourceUnknown {
+		source.AssetURL, source.URL = source.URL, ""
+		source.IsWebSource = true
+	}
+	return &source, nil
 }
 
 // isLocalPath returns true if the value looks like a local file path.
@@ -512,28 +540,36 @@ func (c *Config) ValidateSource() error {
 		}
 	}
 
+	var source *ReleaseSource
+	if c.ReleaseSource != nil {
+		var err error
+		if source, err = NormalizeReleaseSource(*c.ReleaseSource); err != nil {
+			return fmt.Errorf("invalid release_source: %w", err)
+		}
+	}
+
 	// Validate release_source URL if it's a simple string URL
-	if c.ReleaseSource != nil && !c.ReleaseSource.IsWebSource && c.ReleaseSource.URL != "" {
-		if err := ValidateURL(c.ReleaseSource.URL); err != nil {
+	if source != nil && !source.IsWebSource && source.URL != "" {
+		if err := ValidateURL(source.URL); err != nil {
 			return fmt.Errorf("invalid release_source URL: %w", err)
 		}
-		if err := ValidateForgeRepositoryURL(c.ReleaseSource.URL, c.ReleaseSource.Type); err != nil {
+		if err := ValidateForgeRepositoryURL(source.URL, source.Type); err != nil {
 			return fmt.Errorf("invalid release_source URL: %w", err)
 		}
 	}
-	if c.ReleaseSource != nil && c.ReleaseSource.Type != "" {
-		sourceType := ParseSourceType(c.ReleaseSource.Type)
+	if source != nil && source.Type != "" {
+		sourceType := ParseSourceType(source.Type)
 		if sourceType == SourceUnknown {
-			return fmt.Errorf("unsupported release_source type %q", c.ReleaseSource.Type)
+			return fmt.Errorf("unsupported release_source type %q", source.Type)
 		}
-		if sourceType == SourceFDroid && GetFDroidRepoInfo(c.ReleaseSource.URL) == nil {
+		if sourceType == SourceFDroid && GetFDroidRepoInfo(source.URL) == nil {
 			return fmt.Errorf("unsupported F-Droid release_source URL")
 		}
 	}
 
 	// Validate web source version extractors
-	if c.ReleaseSource != nil && c.ReleaseSource.IsWebSource {
-		if err := c.ReleaseSource.Validate(); err != nil {
+	if source != nil && source.IsWebSource {
+		if err := source.Validate(); err != nil {
 			return fmt.Errorf("invalid release_source: %w", err)
 		}
 	}
@@ -701,41 +737,21 @@ func (v *VersionExtractor) Mode() string {
 	return mode
 }
 
-// ValidateURL checks if a string is a valid URL with http/https scheme.
-// For security, HTTPS is required for all remote URLs except localhost.
+// ValidateURL checks that rawURL satisfies the network policy (netpolicy.ValidateURL:
+// HTTPS outside loopback, no userinfo or fragment) and that a remote host is
+// a domain name or an IP address.
 func ValidateURL(rawURL string) error {
+	if err := netpolicy.ValidateURL(rawURL); err != nil {
+		return err
+	}
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		// The parse error quotes the raw input, which may carry credentials.
-		return fmt.Errorf("malformed URL: %s", sanitize.Text(err.Error()))
+		return err
 	}
-
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return fmt.Errorf("URL must have http or https scheme, got %q", parsed.Scheme)
-	}
-
-	if parsed.Host == "" {
-		return fmt.Errorf("URL must have a host")
-	}
-	if parsed.User != nil {
-		return fmt.Errorf("URL must not contain userinfo")
-	}
-	if parsed.Fragment != "" {
-		return fmt.Errorf("URL must not contain a fragment")
-	}
-
-	// Host must be localhost or contain a dot (domain.tld)
 	host := parsed.Hostname()
 	if host != "localhost" && net.ParseIP(host) == nil && !strings.Contains(host, ".") {
 		return fmt.Errorf("invalid host %q: must be a valid domain (e.g., github.com/user/repo)", host)
 	}
-
-	// Security: Require HTTPS for all remote URLs except localhost
-	// This prevents man-in-the-middle attacks on APK downloads and metadata
-	if parsed.Scheme == "http" && host != "localhost" && host != "127.0.0.1" && host != "::1" {
-		return fmt.Errorf("HTTPS is required for remote URLs (got http://%s)", host)
-	}
-
 	return nil
 }
 
@@ -894,16 +910,6 @@ func GetFDroidRepoInfo(rawURL string) *FDroidRepoInfo {
 	return nil
 }
 
-// GetFDroidPackageID extracts the package ID from an F-Droid URL.
-// Deprecated: Use GetFDroidRepoInfo instead for full repo information.
-func GetFDroidPackageID(rawURL string) string {
-	info := GetFDroidRepoInfo(rawURL)
-	if info != nil {
-		return info.PackageID
-	}
-	return ""
-}
-
 // GetGitHubRepo extracts owner/repo from a GitHub URL.
 func GetGitHubRepo(rawURL string) string {
 	parsed, err := url.Parse(rawURL)
@@ -914,11 +920,7 @@ func GetGitHubRepo(rawURL string) string {
 	if host != "github.com" && host != "www.github.com" {
 		return ""
 	}
-	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
-	if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
-		return parts[0] + "/" + strings.TrimSuffix(parts[1], ".git")
-	}
-	return ""
+	return ownerRepo(parsed.Path)
 }
 
 // GetGitLabRepo extracts the project path from a gitlab.com URL.
@@ -932,24 +934,14 @@ func GetGitLabRepo(rawURL string) string {
 
 // GetGiteaRepo extracts owner/repo and base URL from a Gitea-compatible URL.
 // Returns baseURL (e.g., "https://codeberg.org") and repoPath (e.g., "owner/repo").
-// Supports Codeberg and other Gitea/Forgejo instances.
+// Supports Codeberg and other Gitea/Forgejo instances. repoPath is empty
+// unless both segments are present.
 func GetGiteaRepo(rawURL string) (baseURL, repoPath string) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return "", ""
 	}
-
-	// Extract base URL
-	baseURL = fmt.Sprintf("%s://%s", parsed.Scheme, parsed.Host)
-
-	// Extract repo path (first two segments after host)
-	path := strings.TrimPrefix(parsed.Path, "/")
-	parts := strings.Split(path, "/")
-	if len(parts) >= 2 {
-		repoPath = parts[0] + "/" + parts[1]
-	}
-
-	return baseURL, repoPath
+	return fmt.Sprintf("%s://%s", parsed.Scheme, parsed.Host), ownerRepo(parsed.Path)
 }
 
 // GetGitLabRepoWithBase extracts project path and base URL from a GitLab URL.
@@ -960,22 +952,39 @@ func GetGitLabRepoWithBase(rawURL string) (baseURL, repoPath string) {
 	if err != nil {
 		return "", ""
 	}
-
-	// Extract base URL
-	baseURL = fmt.Sprintf("%s://%s", parsed.Scheme, parsed.Host)
-
-	repoPath = gitLabProjectPath(parsed.Path)
-
-	return baseURL, repoPath
+	return fmt.Sprintf("%s://%s", parsed.Scheme, parsed.Host), gitLabProjectPath(parsed.Path)
 }
 
+// ownerRepo returns "owner/repo" from the first two segments of a URL path,
+// without a trailing ".git" on the repo. It is empty unless both are non-empty.
+func ownerRepo(path string) string {
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) < 2 {
+		return ""
+	}
+	repo := strings.TrimSuffix(parts[1], ".git")
+	if parts[0] == "" || repo == "" {
+		return ""
+	}
+	return parts[0] + "/" + repo
+}
+
+// gitLabProjectPath returns the namespace/project path of a GitLab URL path,
+// stopping at "/-/" and dropping a trailing ".git".
 func gitLabProjectPath(path string) string {
 	path = strings.Trim(path, "/")
 	if idx := strings.Index(path, "/-/"); idx >= 0 {
 		path = path[:idx]
 	}
-	if strings.Count(path, "/") < 1 {
+	path = strings.TrimSuffix(path, ".git")
+	segments := strings.Split(path, "/")
+	if len(segments) < 2 {
 		return ""
+	}
+	for _, segment := range segments {
+		if segment == "" {
+			return ""
+		}
 	}
 	return path
 }

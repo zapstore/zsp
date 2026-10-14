@@ -16,9 +16,9 @@ func TestLocalSource(t *testing.T) {
 			t.Skipf("test APK not found: %s", path)
 		}
 
-		src, err := NewLocal(path)
+		src, err := NewLocalWithBase(path, "")
 		if err != nil {
-			t.Fatalf("NewLocal() error: %v", err)
+			t.Fatalf("NewLocalWithBase() error: %v", err)
 		}
 
 		release, err := src.FetchLatestRelease(context.Background())
@@ -48,9 +48,9 @@ func TestLocalSource(t *testing.T) {
 	t.Run("glob pattern", func(t *testing.T) {
 		pattern := filepath.Join(testdataDir, "*.apk")
 
-		src, err := NewLocal(pattern)
+		src, err := NewLocalWithBase(pattern, "")
 		if err != nil {
-			t.Fatalf("NewLocal() error: %v", err)
+			t.Fatalf("NewLocalWithBase() error: %v", err)
 		}
 
 		release, err := src.FetchLatestRelease(context.Background())
@@ -69,7 +69,7 @@ func TestLocalSource(t *testing.T) {
 	})
 
 	t.Run("directory", func(t *testing.T) {
-		src, err := NewLocal(testdataDir)
+		src, err := NewLocalWithBase(testdataDir, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -83,9 +83,9 @@ func TestLocalSource(t *testing.T) {
 	})
 
 	t.Run("non-existent file", func(t *testing.T) {
-		src, err := NewLocal("/nonexistent/path/app.apk")
+		src, err := NewLocalWithBase("/nonexistent/path/app.apk", "")
 		if err != nil {
-			t.Fatalf("NewLocal() error: %v", err)
+			t.Fatalf("NewLocalWithBase() error: %v", err)
 		}
 
 		_, err = src.FetchLatestRelease(context.Background())
@@ -95,7 +95,7 @@ func TestLocalSource(t *testing.T) {
 	})
 
 	t.Run("empty pattern", func(t *testing.T) {
-		_, err := NewLocal("")
+		_, err := NewLocalWithBase("", "")
 		if err == nil {
 			t.Error("expected error for empty pattern")
 		}

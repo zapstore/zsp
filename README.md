@@ -99,9 +99,12 @@ metadata_sources: [fastlane, github]
 
 `release_source` also supports GitLab, Gitea/Forgejo, direct APK URLs,
 structured HTML/JSON/header extractors, local APK paths and globs. Local paths
-in a loaded file resolve from that file's directory.
+in a loaded file resolve from that file's directory. Local `icon`, `images`,
+`release_notes`, and Fastlane files must sit inside that directory and must
+not be symlinks. Unknown fields in `zapstore.yaml` are an error.
 
-Explicit YAML values win over gathered metadata. Without `metadata_sources`,
+Explicit YAML values win over gathered metadata. The app name falls back to
+the APK label, then metadata, then the package ID. Without `metadata_sources`,
 GitHub and GitLab try Fastlane first, then native repository metadata when
 Fastlane is absent, has no full description, or the lookup fails. Fastlane
 values that are present still win. Gitea tries Fastlane only. F-Droid and Play
@@ -111,9 +114,8 @@ external metadata.
 
 ## Signing and environment
 
-`SIGN_WITH` accepts an nsec, lowercase hexadecimal private key, or `bunker://`
-URL. An npub cannot publish. Prefer a short-lived NIP-46 bunker over exposing
-a private key.
+`SIGN_WITH` accepts an `nsec1…` or a `bunker://` URL. Hex keys and npubs are
+refused. Prefer a short-lived NIP-46 bunker over exposing a private key.
 
 | Variable | Purpose |
 | --- | --- |
@@ -123,7 +125,9 @@ a private key.
 | `APK_CACHE` | When set, copy each accepted APK into this directory, named by its SHA-256 |
 | `KEYSTORE_PASSWORD` | JKS/PKCS#12 store password |
 | `KEYSTORE_KEY_PASSWORD` | Optional JKS private-key password |
-| `GITHUB_TOKEN` | Optional GitHub API token |
+| `GITHUB_TOKEN` | Optional GitHub API token, sent only to GitHub hosts |
+| `GITEA_TOKEN`, `GITEA_HOST` | Optional Gitea/Forgejo token, sent only to `GITEA_HOST` (default `codeberg.org`) |
+| `GITLAB_TOKEN`, `GITLAB_HOST` | Optional GitLab token, sent only to `GITLAB_HOST` (default `gitlab.com`) |
 | `HOTBOX_SOCKET`, `HOTBOX_PIN` | Hotbox socket and PIN; `publish` creates or renews the C1 proof |
 
 Values resolve from the process environment, then `.env` in the exact current

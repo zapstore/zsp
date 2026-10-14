@@ -488,7 +488,7 @@ func TestUploadBytesGenericContentType(t *testing.T) {
 	}
 }
 
-func TestUploadBytesWithAuthPreCheckedStillPerformsRequiredPreflight(t *testing.T) {
+func TestUploadBytesWithAuthPerformsRequiredPreflight(t *testing.T) {
 	data := []byte("bytes")
 	hash := sha256Hex(data)
 	contentType := "image/png"
@@ -504,9 +504,9 @@ func TestUploadBytesWithAuthPreCheckedStillPerformsRequiredPreflight(t *testing.
 		t.Fatal(err)
 	}
 
-	result, err := client.UploadBytesWithAuthPreChecked(context.Background(), data, hash, contentType, authEvent, true)
+	result, err := client.UploadBytesWithAuth(context.Background(), data, hash, contentType, authEvent)
 	if err != nil {
-		t.Fatalf("UploadBytesWithAuthPreChecked() error = %v", err)
+		t.Fatalf("UploadBytesWithAuth() error = %v", err)
 	}
 	if result.Existed {
 		t.Error("Existed = true, want false")

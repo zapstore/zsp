@@ -3,7 +3,7 @@ package nostr
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"net"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -28,71 +28,99 @@ func writeMsg(conn net.Conn, v any) error {
 	return err
 }
 
+// closeOnDone closes conn when ctx ends so blocked reads and writes return.
+// The returned function releases the watcher.
+func closeOnDone(ctx context.Context, conn net.Conn) func() bool {
+	return context.AfterFunc(ctx, func() { conn.Close() })
+}
+
+// socketErr prefers the context error when ctx closed the connection.
+func socketErr(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return err
+}
+
 func publishSocket(ctx context.Context, path string, event *nostr.Event) error {
 	conn, err := dialSocket(ctx, path)
 	if err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
+		return newOpError("connect", err)
 	}
 	defer conn.Close()
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
-	}
+	stop := closeOnDone(ctx, conn)
+	defer stop()
+
 	if err := writeMsg(conn, []any{"EVENT", event}); err != nil {
-		return fmt.Errorf("failed to publish: %w", err)
+		return newOpError("publish", socketErr(ctx, err))
 	}
-	var msg []json.RawMessage
-	if err := json.NewDecoder(conn).Decode(&msg); err != nil {
-		return fmt.Errorf("failed to publish: %w", err)
+	dec := json.NewDecoder(conn)
+	for {
+		var msg []json.RawMessage
+		if err := dec.Decode(&msg); err != nil {
+			return newOpError("publish", socketErr(ctx, err))
+		}
+		if len(msg) == 0 {
+			continue
+		}
+		var typ string
+		if err := json.Unmarshal(msg[0], &typ); err != nil || typ != "OK" {
+			// NOTICE, AUTH and anything else are not an answer to the event.
+			continue
+		}
+		if len(msg) < 3 {
+			return newOpError("publish", errors.New("short response"))
+		}
+		var id string
+		if err := json.Unmarshal(msg[1], &id); err != nil || id != event.ID {
+			continue
+		}
+		var ok bool
+		if err := json.Unmarshal(msg[2], &ok); err != nil {
+			return newOpError("publish", errors.New("bad response"))
+		}
+		if ok {
+			return nil
+		}
+		var reason string
+		if len(msg) > 3 {
+			_ = json.Unmarshal(msg[3], &reason)
+		}
+		if reason == "" {
+			reason = "rejected"
+		}
+		return newOpError("publish", &rejectedError{reason: reason})
 	}
-	if len(msg) < 3 {
-		return fmt.Errorf("failed to publish: short response")
-	}
-	var typ, id string
-	var ok bool
-	_ = json.Unmarshal(msg[0], &typ)
-	_ = json.Unmarshal(msg[1], &id)
-	if err := json.Unmarshal(msg[2], &ok); err != nil || typ != "OK" || id != event.ID {
-		return fmt.Errorf("failed to publish: bad response")
-	}
-	if ok {
-		return nil
-	}
-	var reason string
-	if len(msg) > 3 {
-		_ = json.Unmarshal(msg[3], &reason)
-	}
-	if reason == "" {
-		reason = "rejected"
-	}
-	return fmt.Errorf("failed to publish: %s", reason)
 }
 
+// querySocket returns the events matching filter. Events that fail ID or
+// signature verification, or do not match filter, are dropped.
 func querySocket(ctx context.Context, path string, filter nostr.Filter) ([]*nostr.Event, error) {
 	conn, err := dialSocket(ctx, path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect: %w", err)
+		return nil, newOpError("connect", err)
 	}
 	defer conn.Close()
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
-	}
+	stop := closeOnDone(ctx, conn)
+	defer stop()
+
 	sub := "zsp"
 	if err := writeMsg(conn, []any{"REQ", sub, filter}); err != nil {
-		return nil, fmt.Errorf("failed to query: %w", err)
+		return nil, newOpError("query", socketErr(ctx, err))
 	}
 	dec := json.NewDecoder(conn)
 	var out []*nostr.Event
 	for {
 		var msg []json.RawMessage
 		if err := dec.Decode(&msg); err != nil {
-			return nil, fmt.Errorf("failed to query: %w", err)
+			return nil, newOpError("query", socketErr(ctx, err))
 		}
 		if len(msg) == 0 {
 			continue
 		}
 		var typ string
 		if err := json.Unmarshal(msg[0], &typ); err != nil {
-			return nil, fmt.Errorf("failed to query: %w", err)
+			return nil, newOpError("query", err)
 		}
 		switch typ {
 		case "EVENT":
@@ -101,7 +129,10 @@ func querySocket(ctx context.Context, path string, filter nostr.Filter) ([]*nost
 			}
 			var event nostr.Event
 			if err := json.Unmarshal(msg[2], &event); err != nil {
-				return nil, fmt.Errorf("failed to query: %w", err)
+				return nil, newOpError("query", err)
+			}
+			if !verifiedMatch(&event, filter) {
+				continue
 			}
 			out = append(out, &event)
 		case "EOSE":
@@ -114,7 +145,17 @@ func querySocket(ctx context.Context, path string, filter nostr.Filter) ([]*nost
 			if reason == "" {
 				reason = typ
 			}
-			return nil, fmt.Errorf("failed to query: %s", reason)
+			return nil, newOpError("query", errors.New(reason))
 		}
 	}
+}
+
+func verifiedMatch(event *nostr.Event, filter nostr.Filter) bool {
+	if !event.CheckID() {
+		return false
+	}
+	if valid, err := event.CheckSignature(); err != nil || !valid {
+		return false
+	}
+	return filter.Matches(event)
 }

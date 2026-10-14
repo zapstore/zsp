@@ -1,13 +1,13 @@
 package source
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,32 +22,39 @@ import (
 	"github.com/zapstore/zsp/internal/sanitize"
 )
 
-// webCache stores HTTP caching headers for a versionless direct URL.
+// webCache stores HTTP validators for a versionless direct URL. Content-Length
+// is not a validator: a rebuilt file often keeps its size.
 type webCache struct {
-	ETag          string `json:"etag,omitempty"`
-	LastModified  string `json:"last_modified,omitempty"`
-	ContentLength int64  `json:"content_length,omitempty"`
+	ETag         string `json:"etag,omitempty"`
+	LastModified string `json:"last_modified,omitempty"`
 }
 
 // Web implements Source for web scraping with version extraction.
 type Web struct {
-	cfg           *config.Config
-	client        *http.Client
-	cacheDir      string
-	SkipHTTPCache bool
-	pendingCache  *webCache
+	cfg            *config.Config
+	client         *http.Client
+	downloadClient *http.Client
+	cacheDir       string
+	SkipHTTPCache  bool
+	pendingCache   *webCache
 }
 
 // NewWeb creates a new web scraping source.
 func NewWeb(cfg *config.Config) (*Web, error) {
+	return newWeb(cfg, Options{})
+}
+
+func newWeb(cfg *config.Config, opts Options) (*Web, error) {
 	if cfg.ReleaseSource == nil || !cfg.ReleaseSource.IsWebSource {
-		return nil, fmt.Errorf("invalid web source configuration")
+		return nil, errors.New("invalid web source configuration")
 	}
 
+	tor := opts.tor()
 	return &Web{
-		cfg:      cfg,
-		client:   newSecureHTTPClient(30 * time.Second),
-		cacheDir: sourceCacheDir("web"),
+		cfg:            cfg,
+		client:         newSecureHTTPClient(30*time.Second, tor),
+		downloadClient: newDownloadHTTPClient(tor),
+		cacheDir:       sourceCacheDir(opts.CacheDir, "web"),
 	}, nil
 }
 
@@ -64,15 +71,15 @@ type probedURL struct {
 // response media type and length. HEAD is used first to avoid downloading the
 // asset, with a ranged GET fallback for endpoints that deliberately reject HEAD.
 func (w *Web) resolveRedirects(ctx context.Context, rawURL string) (probedURL, error) {
-	// Create a client that tracks redirects but still follows them
+	// Track redirects on a copy of the client, which still follows them.
 	var finalURL string
-	client := newSecureHTTPClient(30 * time.Second)
+	client := *w.client
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		finalURL = req.URL.String()
 		return validateRedirect(req, via)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "HEAD", rawURL, nil)
+	req, err := newRequest(ctx, http.MethodHead, rawURL)
 	if err != nil {
 		return probedURL{}, err
 	}
@@ -80,14 +87,14 @@ func (w *Web) resolveRedirects(ctx context.Context, rawURL string) (probedURL, e
 	resp, err := client.Do(req)
 	if err == nil && resp.StatusCode == http.StatusMethodNotAllowed {
 		resp.Body.Close()
-		req, err = http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+		req, err = newRequest(ctx, http.MethodGet, rawURL)
 		if err == nil {
 			req.Header.Set("Range", "bytes=0-0")
 			resp, err = client.Do(req)
 		}
 	}
 	if err != nil {
-		return probedURL{}, fmt.Errorf("failed to resolve redirects: %w", err)
+		return probedURL{}, fmt.Errorf("resolve redirects: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -144,7 +151,7 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 			var err error
 			version, err = w.extractVersion(ctx, repo)
 			if err != nil {
-				return nil, fmt.Errorf("failed to extract version: %w", err)
+				return nil, fmt.Errorf("extract version: %w", err)
 			}
 		}
 
@@ -152,18 +159,22 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		var err error
 		assetURL, err = w.extractAssetURL(ctx, repo)
 		if err != nil {
-			return nil, fmt.Errorf("failed to extract asset URL: %w", err)
+			return nil, fmt.Errorf("extract asset URL: %w", err)
 		}
 	} else if repo.HasVersionExtractor() {
 		// Mode 1: Extract version from page, construct asset URL
 		var err error
 		version, err = w.extractVersion(ctx, repo)
 		if err != nil {
-			return nil, fmt.Errorf("failed to extract version: %w", err)
+			return nil, fmt.Errorf("extract version: %w", err)
 		}
 
-		// Substitute {version} in asset_url
+		// Substitute {version} in asset_url. The version comes from a remote
+		// page, so the result is validated like any other runtime-derived URL.
 		assetURL = strings.ReplaceAll(repo.AssetURL, "{version}", version)
+		if err := validateDownloadURL(assetURL); err != nil {
+			return nil, fmt.Errorf("asset URL for version %q: %w", sanitize.Text(version), err)
+		}
 	} else {
 		// Mode 2/3: Direct URL (versionless)
 		assetURL = repo.AssetURL
@@ -185,18 +196,17 @@ func (w *Web) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		probedLength = probed.ContentLength
 
 		if !w.SkipHTTPCache {
-			cache := w.loadCache()
-			if cache != nil {
-				modified, etag, lastMod, contentLen, cacheErr := w.checkHTTPCacheHeaders(ctx, probed.FinalURL, cache.ETag, cache.LastModified, cache.ContentLength)
-				if cacheErr != nil {
-					return nil, fmt.Errorf("failed to check for updates: %w", cacheErr)
-				}
-				if !modified {
-					return nil, ErrNotModified
-				}
-				w.pendingCache = &webCache{ETag: etag, LastModified: lastMod, ContentLength: contentLen}
-			} else if _, etag, lastMod, contentLen, cacheErr := w.checkHTTPCacheHeaders(ctx, probed.FinalURL, "", "", 0); cacheErr == nil {
-				w.pendingCache = &webCache{ETag: etag, LastModified: lastMod, ContentLength: contentLen}
+			changed, validators, cacheErr := w.checkHTTPCacheHeaders(ctx, probed.FinalURL, w.loadCache())
+			switch {
+			case cacheErr != nil && (errors.Is(cacheErr, context.Canceled) || errors.Is(cacheErr, context.DeadlineExceeded)):
+				return nil, cacheErr
+			case cacheErr != nil:
+				// Validators only save a download. Without them, treat the
+				// source as changed and store nothing.
+			case !changed:
+				return nil, ErrNotModified
+			default:
+				w.pendingCache = validators
 			}
 		}
 
@@ -296,14 +306,14 @@ func (w *Web) extractValue(ctx context.Context, v *config.VersionExtractor) (str
 
 // extractVersionHTML extracts version from an HTML page using CSS selector.
 func (w *Web) extractVersionHTML(ctx context.Context, v *config.VersionExtractor) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", v.URL, nil)
+	req, err := newRequest(ctx, http.MethodGet, v.URL)
 	if err != nil {
 		return "", err
 	}
 
 	resp, err := w.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch page: %w", err)
+		return "", fmt.Errorf("fetch page: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -312,10 +322,14 @@ func (w *Web) extractVersionHTML(ctx context.Context, v *config.VersionExtractor
 		return "", err
 	}
 
-	// Security: Limit response size to prevent memory exhaustion
-	doc, err := goquery.NewDocumentFromReader(io.LimitReader(resp.Body, MaxRemoteDownloadSize))
+	// Security: bound the response to prevent memory exhaustion
+	page, err := readBounded(resp.Body, MaxRemoteDownloadSize)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse HTML: %w", err)
+		return "", fmt.Errorf("read page: %w", err)
+	}
+	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(page))
+	if err != nil {
+		return "", fmt.Errorf("parse HTML: %w", err)
 	}
 
 	// Find element using CSS selector
@@ -342,7 +356,7 @@ func (w *Web) extractVersionHTML(ctx context.Context, v *config.VersionExtractor
 
 // extractVersionJSON extracts version from a JSON API using JSONPath.
 func (w *Web) extractVersionJSON(ctx context.Context, v *config.VersionExtractor) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", v.URL, nil)
+	req, err := newRequest(ctx, http.MethodGet, v.URL)
 	if err != nil {
 		return "", err
 	}
@@ -350,7 +364,7 @@ func (w *Web) extractVersionJSON(ctx context.Context, v *config.VersionExtractor
 
 	resp, err := w.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch API: %w", err)
+		return "", fmt.Errorf("fetch API: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -362,7 +376,7 @@ func (w *Web) extractVersionJSON(ctx context.Context, v *config.VersionExtractor
 	// Parse a bounded response.
 	var data interface{}
 	if err := decodeJSONResponse(resp, MaxJSONResponseSize, &data); err != nil {
-		return "", fmt.Errorf("failed to parse JSON: %w", err)
+		return "", fmt.Errorf("parse JSON: %w", err)
 	}
 
 	// Evaluate JSONPath
@@ -397,19 +411,19 @@ func (w *Web) extractVersionJSON(ctx context.Context, v *config.VersionExtractor
 // extractVersionHeader extracts version from HTTP redirect headers.
 func (w *Web) extractVersionHeader(ctx context.Context, v *config.VersionExtractor) (string, error) {
 	// Don't follow redirects - we want to capture the redirect header
-	client := newSecureHTTPClient(30 * time.Second)
+	client := *w.client
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse // Stop at first redirect
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", v.URL, nil)
+	req, err := newRequest(ctx, http.MethodGet, v.URL)
 	if err != nil {
 		return "", err
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch page: %w", err)
+		return "", fmt.Errorf("fetch page: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -479,7 +493,7 @@ func (w *Web) loadCache() *webCache {
 	if err := json.Unmarshal(data, &cache); err != nil {
 		return nil
 	}
-	if cache.ETag == "" && cache.LastModified == "" && cache.ContentLength == 0 {
+	if cache.ETag == "" && cache.LastModified == "" {
 		return nil
 	}
 	return &cache
@@ -518,43 +532,51 @@ func (w *Web) ClearHTTPCache() error {
 	return err
 }
 
-// checkHTTPCacheHeaders reports whether a resource has changed using
-// ETag, Last-Modified, or Content-Length.
-func (w *Web) checkHTTPCacheHeaders(ctx context.Context, rawURL, etag, lastModified string, contentLength int64) (bool, string, string, int64, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, rawURL, nil)
+// checkHTTPCacheHeaders reports whether rawURL changed since cache, using a
+// conditional HEAD request, and returns the validators to store for the next
+// run (nil when the server offers none). Only 200 and 304 are answers; any
+// other status is an error. A source with no cached validator is changed, and
+// matching requires ETag or Last-Modified, never Content-Length.
+func (w *Web) checkHTTPCacheHeaders(ctx context.Context, rawURL string, cache *webCache) (bool, *webCache, error) {
+	req, err := newRequest(ctx, http.MethodHead, rawURL)
 	if err != nil {
-		return true, "", "", 0, err
+		return true, nil, err
 	}
-	if etag != "" {
-		req.Header.Set("If-None-Match", etag)
+	if cache != nil && cache.ETag != "" {
+		req.Header.Set("If-None-Match", cache.ETag)
 	}
-	if lastModified != "" {
-		req.Header.Set("If-Modified-Since", lastModified)
+	if cache != nil && cache.LastModified != "" {
+		req.Header.Set("If-Modified-Since", cache.LastModified)
 	}
 
 	resp, err := w.client.Do(req)
 	if err != nil {
-		return true, "", "", 0, fmt.Errorf("HEAD request failed: %w", err)
+		return true, nil, fmt.Errorf("HEAD request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotModified {
-		return false, etag, lastModified, contentLength, nil
+	if resp.StatusCode == http.StatusNotModified && cache != nil {
+		return false, cache, nil
+	}
+	if err := checkHTTPStatus(resp, "Web source"); err != nil {
+		return true, nil, err
 	}
 
-	newETag := resp.Header.Get("ETag")
-	newLastMod := resp.Header.Get("Last-Modified")
-	newContentLen := resp.ContentLength
-	if etag != "" && newETag != "" && etag == newETag {
-		return false, newETag, newLastMod, newContentLen, nil
+	etag, lastModified := resp.Header.Get("ETag"), resp.Header.Get("Last-Modified")
+	var validators *webCache
+	if etag != "" || lastModified != "" {
+		validators = &webCache{ETag: etag, LastModified: lastModified}
 	}
-	if lastModified != "" && newLastMod != "" && lastModified == newLastMod {
-		return false, newETag, newLastMod, newContentLen, nil
+	if cache == nil {
+		return true, validators, nil
 	}
-	if etag == "" && lastModified == "" && contentLength > 0 && newContentLen > 0 && contentLength == newContentLen {
-		return false, newETag, newLastMod, newContentLen, nil
+	switch {
+	case cache.ETag != "" && etag != "":
+		return cache.ETag != etag, validators, nil
+	case cache.LastModified != "" && lastModified != "":
+		return cache.LastModified != lastModified, validators, nil
 	}
-	return true, newETag, newLastMod, newContentLen, nil
+	return true, validators, nil
 }
 
 // Download downloads an APK from the web.
@@ -568,7 +590,7 @@ func (w *Web) Download(ctx context.Context, asset *Asset, destDir string, progre
 		return "", err
 	}
 
-	if err := DownloadHTTP(ctx, asset.URL, destPath, asset.Size, nil, progress); err != nil {
+	if err := downloadHTTP(ctx, w.downloadClient, asset.URL, destPath, asset.Size, asset.SHA256, nil, progress); err != nil {
 		return "", err
 	}
 

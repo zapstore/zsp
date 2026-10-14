@@ -4,19 +4,23 @@ package apk
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"image/draw"
 	"image/png"
 	"io"
+	"math"
 	"os"
-	"path/filepath"
+	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,15 +28,24 @@ import (
 	"github.com/avast/apkparser"
 	"github.com/avast/apkverifier"
 	"github.com/shogo82148/androidbinary"
-	"github.com/shogo82148/androidbinary/apk"
 	"github.com/srwiley/oksvg"
 	"github.com/srwiley/rasterx"
-	"golang.org/x/image/webp"
+
+	"github.com/zapstore/zsp/internal/media"
 )
 
-// maxAPKResourceSize bounds individual manifest resources and icons read into
-// memory. APKs can be large, but these auxiliary resources should be small.
-const maxAPKResourceSize = 16 * 1024 * 1024 // 16MB
+const (
+	// maxAPKResourceSize bounds individual manifest resources and icons read
+	// into memory. APKs can be large, but these auxiliary resources should be
+	// small.
+	maxAPKResourceSize = 16 * 1024 * 1024 // 16MB
+
+	// maxResourceTableSize bounds resources.arsc, which is read whole. Large
+	// browsers ship tables of tens of megabytes.
+	maxResourceTableSize = 128 * 1024 * 1024 // 128MB
+
+	hashChunkSize = 1024 * 1024
+)
 
 // APKInfo contains extracted metadata from an APK file.
 type APKInfo struct {
@@ -57,6 +70,9 @@ type APKInfo struct {
 	// Required device features declared by the manifest.
 	Features []string
 
+	// Certificate is the verified current signing certificate.
+	Certificate *x509.Certificate
+
 	// Certificate SHA-256 fingerprint (hex encoded, lowercase) of the
 	// current signing certificate.
 	CertFingerprint string
@@ -77,59 +93,86 @@ type APKInfo struct {
 	SHA256   string
 }
 
-// Parse extracts metadata from an APK file.
-func Parse(path string) (*APKInfo, error) {
-	// Get file info
-	fi, err := os.Stat(path)
+// Parse extracts metadata from an APK file. It rejects an APK that is
+// malformed, has an invalid version code or SDK level, or fails signature
+// verification. ctx is checked between phases.
+func Parse(ctx context.Context, apkPath string) (info *APKInfo, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			info, err = nil, malformedInput(r)
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	fi, err := os.Stat(apkPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to stat APK: %w", err)
+		return nil, fmt.Errorf("stat APK: %w", err)
 	}
-
-	// Calculate SHA256
-	sha256Hash, err := hashFile(path)
+	sha256Hash, err := hashFile(ctx, apkPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to hash APK: %w", err)
+		return nil, fmt.Errorf("hash APK: %w", err)
 	}
 
-	// Parse the manifest with apkparser. Unlike androidbinary, it supports
-	// manifests produced by current Android build tools.
-	manifest, err := parseManifest(path)
+	zr, err := zip.OpenReader(apkPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse APK manifest: %w", err)
+		return nil, fmt.Errorf("open APK: %w", err)
+	}
+	defer zr.Close()
+	archive := newAPKArchive(zr.File)
+
+	// An unreadable resource table only leaves references unresolved: the
+	// label falls back and the icon is found by name.
+	archive.table, _ = archive.loadResourceTable()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	manifest, err := archive.parseManifest()
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
-	info := &APKInfo{
-		PackageID:   manifest.PackageID,
-		VersionName: manifest.VersionName,
-		VersionCode: manifest.VersionCode,
-		MinSDK:      manifest.MinSDK,
-		TargetSDK:   manifest.TargetSDK,
-		Label:       manifest.Label,
-		Features:    manifest.Features,
-		FilePath:    path,
-		FileSize:    fi.Size(),
-		SHA256:      sha256Hash,
+	info = &APKInfo{
+		PackageID:     manifest.PackageID,
+		VersionName:   manifest.VersionName,
+		VersionCode:   manifest.VersionCode,
+		MinSDK:        manifest.MinSDK,
+		TargetSDK:     manifest.TargetSDK,
+		Label:         manifest.Label,
+		Features:      manifest.Features,
+		Architectures: extractArchitectures(zr.File),
+		FilePath:      apkPath,
+		FileSize:      fi.Size(),
+		SHA256:        sha256Hash,
 	}
-
-	info.Architectures = extractArchitectures(path)
 
 	// Verify v1/v2/v3 signatures, reject malformed signatures and multiple
 	// current signers, and extract the current certificate fingerprint plus
 	// any validated signing-rotation ancestors.
-	sig, err := verifySignature(path)
+	sig, err := verifySignature(apkPath)
 	if err != nil {
-		return nil, fmt.Errorf("signature verification failed: %w", err)
+		return nil, err
 	}
+	info.Certificate = sig.cert
 	info.CertFingerprint = sig.fingerprint()
 	info.SigningAncestors = sig.ancestors
-
-	// Extract icon. Icon extraction failure is not fatal.
-	icon, err := extractIcon(path, manifest.Icon)
-	if err == nil {
-		info.Icon = icon
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
+	// Icon extraction failure is not fatal.
+	if icon, err := archive.extractIcon(manifest); err == nil {
+		info.Icon = icon
+	}
 	return info, nil
+}
+
+func malformedInput(recovered any) error {
+	return fmt.Errorf("parse APK: malformed input: %v", recovered)
 }
 
 type manifestInfo struct {
@@ -139,15 +182,25 @@ type manifestInfo struct {
 	MinSDK      int32
 	TargetSDK   int32
 	Label       string
-	Icon        string
-	Features    []string
+	// Icon is the icon resource resolved through the resource table, and
+	// IconRef the same icon as an unresolved "@<id>" reference. Either may be
+	// empty.
+	Icon     string
+	IconRef  string
+	Features []string
 }
 
 // manifestCollector records the fields zsp needs from an Android manifest.
 // apkparser supplies already-decoded XML tokens and resolves string resources
-// when resources.arsc can be parsed.
+// when resources.arsc can be parsed. Numeric fields stay raw until result so
+// a missing value is told apart from a malformed one.
 type manifestCollector struct {
-	info manifestInfo
+	raw struct {
+		packageID, versionName, versionCode string
+		minSDK, targetSDK                   string
+		label, icon                         string
+	}
+	features []string
 }
 
 func (c *manifestCollector) EncodeToken(token xml.Token) error {
@@ -158,18 +211,18 @@ func (c *manifestCollector) EncodeToken(token xml.Token) error {
 
 	switch start.Name.Local {
 	case "manifest":
-		c.info.PackageID = attribute(start, "package")
-		c.info.VersionName = attribute(start, "versionName")
-		c.info.VersionCode = parseManifestInt(attribute(start, "versionCode"))
+		c.raw.packageID = attribute(start, "package")
+		c.raw.versionName = attribute(start, "versionName")
+		c.raw.versionCode = attribute(start, "versionCode")
 	case "uses-sdk":
-		c.info.MinSDK = int32(parseManifestInt(attribute(start, "minSdkVersion")))
-		c.info.TargetSDK = int32(parseManifestInt(attribute(start, "targetSdkVersion")))
+		c.raw.minSDK = attribute(start, "minSdkVersion")
+		c.raw.targetSDK = attribute(start, "targetSdkVersion")
 	case "application":
-		c.info.Label = attribute(start, "label")
-		c.info.Icon = attribute(start, "icon")
+		c.raw.label = attribute(start, "label")
+		c.raw.icon = attribute(start, "icon")
 	case "uses-feature":
 		if feature := attribute(start, "name"); feature != "" {
-			c.info.Features = append(c.info.Features, feature)
+			c.features = append(c.features, feature)
 		}
 	}
 
@@ -180,48 +233,186 @@ func (c *manifestCollector) Flush() error {
 	return nil
 }
 
-func parseManifest(path string) (manifestInfo, error) {
-	collector := &manifestCollector{}
-	zipErr, _, manifestErr := apkparser.ParseApk(path, collector)
-	if zipErr != nil {
-		return manifestInfo{}, fmt.Errorf("open APK: %w", zipErr)
+// result validates the collected fields. Label may still be an unresolved
+// resource reference.
+func (c *manifestCollector) result() (manifestInfo, error) {
+	if c.raw.packageID == "" {
+		return manifestInfo{}, errors.New("package is missing")
 	}
-	if manifestErr != nil {
-		return manifestInfo{}, fmt.Errorf("parse AndroidManifest.xml: %w", manifestErr)
+	versionCode, err := parseVersionCode(c.raw.versionCode)
+	if err != nil {
+		return manifestInfo{}, err
 	}
-	if collector.info.PackageID == "" {
-		return manifestInfo{}, fmt.Errorf("parse AndroidManifest.xml: package is missing")
+	minSDK, err := parseSDKLevel("minSdkVersion", c.raw.minSDK)
+	if err != nil {
+		return manifestInfo{}, err
 	}
-	if isResourceReference(collector.info.Label) {
-		if label, err := resolveResourceString(path, collector.info.Label); err == nil && label != "" {
-			collector.info.Label = label
+	targetSDK, err := parseSDKLevel("targetSdkVersion", c.raw.targetSDK)
+	if err != nil {
+		return manifestInfo{}, err
+	}
+	return manifestInfo{
+		PackageID:   c.raw.packageID,
+		VersionName: c.raw.versionName,
+		VersionCode: versionCode,
+		MinSDK:      minSDK,
+		TargetSDK:   targetSDK,
+		Label:       c.raw.label,
+		Icon:        c.raw.icon,
+		Features:    c.features,
+	}, nil
+}
+
+func parseVersionCode(value string) (int64, error) {
+	if value == "" {
+		return 0, errors.New("versionCode is missing")
+	}
+	code, err := strconv.ParseInt(value, 0, 64)
+	if err != nil {
+		return 0, fmt.Errorf("versionCode %q is not a number", value)
+	}
+	if code <= 0 {
+		return 0, fmt.Errorf("versionCode %d must be positive", code)
+	}
+	return code, nil
+}
+
+// parseSDKLevel returns 0 for an absent level. A level that is not a number,
+// such as a preview codename, is also 0: it names no usable API level.
+func parseSDKLevel(name, value string) (int32, error) {
+	if value == "" {
+		return 0, nil
+	}
+	level, err := strconv.ParseInt(value, 0, 64)
+	if errors.Is(err, strconv.ErrRange) {
+		return 0, fmt.Errorf("%s %q is out of range", name, value)
+	}
+	if err != nil {
+		return 0, nil
+	}
+	if level < 0 || level > math.MaxInt32 {
+		return 0, fmt.Errorf("%s %d is out of range", name, level)
+	}
+	return int32(level), nil
+}
+
+// apkArchive is an opened APK shared by the manifest and icon readers.
+type apkArchive struct {
+	files  []*zip.File
+	byName map[string]*zip.File
+	// table is nil when resources.arsc is missing or unreadable.
+	table *apkparser.ResourceTable
+	// tableData is resources.arsc as read, kept for the density lookup.
+	tableData []byte
+	// densityTable is parsed on first use by icon extraction; it stays nil
+	// when resources.arsc is missing or unreadable.
+	densityTable     *androidbinary.TableFile
+	densityTableDone bool
+}
+
+// newAPKArchive indexes entries by name. Names that could escape a directory
+// are left out, and the first entry wins for a duplicated name.
+func newAPKArchive(files []*zip.File) *apkArchive {
+	byName := make(map[string]*zip.File, len(files))
+	for _, f := range files {
+		if !isValidZipEntryPath(f.Name) {
+			continue
+		}
+		if _, duplicate := byName[f.Name]; !duplicate {
+			byName[f.Name] = f
 		}
 	}
-	return collector.info, nil
+	return &apkArchive{files: files, byName: byName}
+}
+
+func (a *apkArchive) readEntry(name string, limit int64) ([]byte, error) {
+	f := a.byName[name]
+	if f == nil {
+		return nil, fmt.Errorf("%s is missing", name)
+	}
+	return readZipFile(f, limit)
+}
+
+func (a *apkArchive) loadResourceTable() (*apkparser.ResourceTable, error) {
+	data, err := a.readEntry("resources.arsc", maxResourceTableSize)
+	if err != nil {
+		return nil, err
+	}
+	table, err := apkparser.ParseResourceTable(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("parse resources.arsc: %w", err)
+	}
+	a.tableData = data
+	return table, nil
+}
+
+func (a *apkArchive) parseManifest() (manifestInfo, error) {
+	data, err := a.readEntry("AndroidManifest.xml", maxAPKResourceSize)
+	if err != nil {
+		return manifestInfo{}, fmt.Errorf("read manifest: %w", err)
+	}
+	collector := &manifestCollector{}
+	if err := apkparser.ParseXml(bytes.NewReader(data), collector, a.table); err != nil {
+		return manifestInfo{}, fmt.Errorf("parse AndroidManifest.xml: %w", err)
+	}
+	info, err := collector.result()
+	if err != nil {
+		return manifestInfo{}, fmt.Errorf("parse AndroidManifest.xml: %w", err)
+	}
+	if isResourceReference(info.Label) {
+		label, err := a.resolveResourceString(info.Label)
+		if err != nil || isResourceReference(label) {
+			label = ""
+		}
+		info.Label = label
+	}
+	info.IconRef = a.iconReference(data)
+	return info, nil
+}
+
+// iconReference parses the manifest without the resource table, which leaves
+// the icon as an "@<id>" reference. The table resolves it to a single config,
+// so the ID is needed to ask for the others.
+func (a *apkArchive) iconReference(manifest []byte) string {
+	if a.table == nil {
+		return ""
+	}
+	collector := &manifestCollector{}
+	if err := apkparser.ParseXml(bytes.NewReader(manifest), collector, nil); err != nil {
+		return ""
+	}
+	if !isResourceReference(collector.raw.icon) {
+		return ""
+	}
+	return collector.raw.icon
 }
 
 // isResourceReference reports whether a manifest value looks like an Android
 // resource ID. apkparser may leave these unresolved when the resource table
 // uses a format it cannot decode.
 func isResourceReference(value string) bool {
-	return strings.HasPrefix(strings.ToLower(value), "@")
+	return strings.HasPrefix(value, "@")
 }
 
 // resolveResourceString resolves a resource reference through resources.arsc.
 // Resource aliases are common in current Android applications, for example
 // app_name -> app_name_release -> "Amber".
-func resolveResourceString(path, value string) (string, error) {
+func (a *apkArchive) resolveResourceString(value string) (string, error) {
 	resourceID, err := parseResourceID(value)
 	if err != nil {
 		return "", err
 	}
+	return a.resolveResource(resourceID, apkparser.ConfigFirst)
+}
 
-	table, err := loadResourceTable(path)
-	if err != nil {
-		return "", err
+// resolveResource follows a resource and its aliases to a string using the
+// given config of the first entry.
+func (a *apkArchive) resolveResource(resourceID uint32, config apkparser.ResourceConfigOption) (string, error) {
+	if a.table == nil {
+		return "", errors.New("resources.arsc is unavailable")
 	}
 	for range 16 {
-		entry, err := table.GetResourceEntry(resourceID)
+		entry, err := a.table.GetResourceEntryEx(resourceID, config)
 		if err != nil {
 			return "", fmt.Errorf("get resource %08x: %w", resourceID, err)
 		}
@@ -238,7 +429,7 @@ func resolveResourceString(path, value string) (string, error) {
 			return "", fmt.Errorf("resource %08x is not a string", resourceID)
 		}
 	}
-	return "", fmt.Errorf("resource reference chain is too deep")
+	return "", errors.New("resource reference chain is too deep")
 }
 
 func attribute(start xml.StartElement, name string) string {
@@ -259,56 +450,29 @@ func parseResourceID(value string) (uint32, error) {
 	return uint32(resourceID), nil
 }
 
-func loadResourceTable(path string) (*apkparser.ResourceTable, error) {
-	r, err := zip.OpenReader(path)
+// hashFile calculates the SHA256 hash of a file, checking ctx between chunks.
+func hashFile(ctx context.Context, name string) (string, error) {
+	f, err := os.Open(name)
 	if err != nil {
-		return nil, fmt.Errorf("open APK: %w", err)
-	}
-	defer r.Close()
-
-	for _, file := range r.File {
-		if file.Name != "resources.arsc" {
-			continue
-		}
-		rc, err := file.Open()
-		if err != nil {
-			return nil, fmt.Errorf("open resources.arsc: %w", err)
-		}
-		defer rc.Close()
-
-		table, err := apkparser.ParseResourceTable(rc)
-		if err != nil {
-			return nil, fmt.Errorf("parse resources.arsc: %w", err)
-		}
-		return table, nil
-	}
-	return nil, fmt.Errorf("resources.arsc is missing")
-}
-
-func parseManifestInt(value string) int64 {
-	if value == "" {
-		return 0
-	}
-	parsed, err := strconv.ParseInt(value, 0, 64)
-	if err != nil {
-		return 0
-	}
-	return parsed
-}
-
-// hashFile calculates SHA256 hash of a file.
-func hashFile(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
+		return "", fmt.Errorf("open: %w", err)
 	}
 	defer f.Close()
 
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
+	buf := make([]byte, hashChunkSize)
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		n, err := f.Read(buf)
+		h.Write(buf[:n])
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("read: %w", err)
+		}
 	}
-
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
@@ -331,17 +495,11 @@ const (
 // extractArchitectures returns the ABIs of native code in an APK.
 // Android installs libraries from lib/<abi>/. A .so stored elsewhere is
 // classified from its ELF header. Nil means no ABI could be detected,
-// including a pure Java/Kotlin APK or an unreadable archive.
-func extractArchitectures(path string) []string {
-	r, err := zip.OpenReader(path)
-	if err != nil {
-		return nil
-	}
-	defer r.Close()
-
+// including a pure Java/Kotlin APK.
+func extractArchitectures(files []*zip.File) []string {
 	archSet := make(map[string]struct{})
 	var elfCandidates []*zip.File
-	for _, f := range r.File {
+	for _, f := range files {
 		// Zip names must use slashes. Reject the normalized name so a
 		// backslash traversal cannot be treated as a library path.
 		name := strings.ReplaceAll(f.Name, "\\", "/")
@@ -477,20 +635,21 @@ func abiFromELF(f *zip.File) (string, bool) {
 
 // isValidZipEntryPath validates a zip entry path to prevent zip slip attacks.
 // Returns false if the path contains directory traversal sequences or is absolute.
-func isValidZipEntryPath(path string) bool {
+func isValidZipEntryPath(name string) bool {
 	// Reject paths with directory traversal
-	if strings.Contains(path, "..") {
+	if strings.Contains(name, "..") {
 		return false
 	}
 	// Reject absolute paths
-	if strings.HasPrefix(path, "/") {
+	if strings.HasPrefix(name, "/") {
 		return false
 	}
-	// Reject paths that clean to something different (indicates traversal)
-	cleaned := filepath.Clean(path)
-	if cleaned != path && cleaned+"/" != path {
+	// Reject paths that clean to something different (indicates traversal).
+	// Zip names use slashes on every OS, so path.Clean applies, not filepath.
+	cleaned := path.Clean(name)
+	if cleaned != name && cleaned+"/" != name {
 		// Allow trailing slash difference but nothing else
-		if !strings.HasSuffix(path, "/") || cleaned != strings.TrimSuffix(path, "/") {
+		if !strings.HasSuffix(name, "/") || cleaned != strings.TrimSuffix(name, "/") {
 			return false
 		}
 	}
@@ -516,28 +675,28 @@ func (s *verifiedSignature) fingerprint() string {
 // mismatches, and downgrade-attack detection) and rejects APKs with more than
 // one current signer, since zsp's identity model requires a single current
 // signing certificate.
-func verifySignature(path string) (*verifiedSignature, error) {
-	res, err := apkverifier.Verify(path, nil)
+func verifySignature(apkPath string) (*verifiedSignature, error) {
+	res, err := apkverifier.Verify(apkPath, nil)
 	if err != nil {
-		return nil, fmt.Errorf("APK verification failed: %w", err)
+		return nil, fmt.Errorf("verify signature: %w", err)
 	}
 
 	if len(res.SignerCerts) == 0 {
-		return nil, fmt.Errorf("APK verification failed: no valid certificate found")
+		return nil, errors.New("verify signature: no valid certificate found")
 	}
 	if len(res.SignerCerts) > 1 {
-		return nil, fmt.Errorf("APK verification failed: found %d current signers, expected exactly one", len(res.SignerCerts))
+		return nil, fmt.Errorf("verify signature: found %d current signers, expected exactly one", len(res.SignerCerts))
 	}
 
 	// Pick the best certificate from the (single) signer's chain.
 	_, cert := apkverifier.PickBestApkCert(res.SignerCerts)
 	if cert == nil {
-		return nil, fmt.Errorf("APK verification failed: no valid certificate found")
+		return nil, errors.New("verify signature: no valid certificate found")
 	}
 
 	ancestors, err := signingAncestors(res, cert)
 	if err != nil {
-		return nil, fmt.Errorf("APK verification failed: %w", err)
+		return nil, fmt.Errorf("verify signature: %w", err)
 	}
 
 	return &verifiedSignature{cert: cert, ancestors: ancestors}, nil
@@ -562,7 +721,7 @@ func signingAncestors(res apkverifier.Result, current *x509.Certificate) ([]stri
 
 	last := nodes[len(nodes)-1]
 	if last.SigningCert == nil || !last.SigningCert.Equal(current) {
-		return nil, fmt.Errorf("signing certificate lineage does not end at the current signing certificate")
+		return nil, errors.New("signing certificate lineage does not end at the current signing certificate")
 	}
 
 	if len(nodes) == 1 {
@@ -581,138 +740,228 @@ func signingAncestors(res apkverifier.Result, current *x509.Certificate) ([]stri
 // ExtractCertificate extracts the current signing certificate from an APK
 // file, applying the same robust v1/v2/v3 verification as Parse: malformed
 // signatures and multiple current signers are rejected.
-func ExtractCertificate(path string) (*x509.Certificate, error) {
-	sig, err := verifySignature(path)
+func ExtractCertificate(ctx context.Context, apkPath string) (cert *x509.Certificate, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			cert, err = nil, malformedInput(r)
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	sig, err := verifySignature(apkPath)
 	if err != nil {
 		return nil, err
 	}
 	return sig.cert, nil
 }
 
-// extractIcon extracts the app icon from the APK as PNG bytes.
-// It tries to get the highest resolution icon available by requesting different densities.
-func extractIcon(path, iconResource string) ([]byte, error) {
-	// Adaptive icons point to XML resources. androidbinary can return an
-	// unrelated bitmap for these, so resolve and render them before using its
-	// bitmap-only API.
-	if strings.EqualFold(filepath.Ext(iconResource), ".xml") {
-		if icon, err := extractIconFromResource(path, iconResource); err == nil {
-			return icon, nil
+// extractIcon extracts the app icon from the APK as PNG bytes. A malformed
+// icon fails only this call, never the APK, so a panic becomes an error.
+func (a *apkArchive) extractIcon(manifest manifestInfo) (icon []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			icon, err = nil, malformedInput(r)
 		}
-	}
-
-	pkg, err := apk.OpenFile(path)
-	if err != nil {
-		return extractIconFromResource(path, iconResource)
-	}
-	defer pkg.Close()
-
-	// Android density values from highest to lowest
-	// xxxhdpi=640, xxhdpi=480, xhdpi=320, hdpi=240, mdpi=160
-	densities := []uint16{640, 480, 320, 240, 160}
-
-	var bestIcon image.Image
-	var bestWidth int
-
-	for _, density := range densities {
-		config := &androidbinary.ResTableConfig{
-			Density: density,
-		}
-		icon, err := pkg.Icon(config)
-		if err != nil || icon == nil {
-			continue
-		}
-		width := icon.Bounds().Dx()
-		if width > bestWidth {
-			bestIcon = icon
-			bestWidth = width
-		}
-	}
-
-	// Also try with nil config in case it returns something different
-	if nilIcon, err := pkg.Icon(nil); err == nil && nilIcon != nil {
-		width := nilIcon.Bounds().Dx()
-		if width > bestWidth {
-			bestIcon = nilIcon
-			bestWidth = width
-		}
-	}
-
-	if bestIcon != nil {
-		return encodePNG(bestIcon)
-	}
-
-	if icon, err := extractIconFromResource(path, iconResource); err == nil {
+	}()
+	if icon, err := a.iconFromResource(manifest.Icon, manifest.IconRef); err == nil {
 		return icon, nil
 	}
-
-	// Fallback: manually search for icon in the APK
-	return extractIconManually(path)
+	return a.extractIconManually()
 }
 
-// extractIconFromResource handles adaptive icons whose manifest resource is an
-// XML document rather than a directly decodable bitmap.
-func extractIconFromResource(path, iconResource string) ([]byte, error) {
-	if iconResource == "" {
-		return nil, fmt.Errorf("application icon resource is missing")
+// iconFromResource reads the manifest's icon resource. apkparser resolves it
+// to a single config and cannot list the others, so the density table adds
+// the rest. The widest bitmap wins unless an adaptive icon renders wider.
+func (a *apkArchive) iconFromResource(icon, iconRef string) ([]byte, error) {
+	paths := a.iconPaths(icon, iconRef)
+	if len(paths) == 0 {
+		return nil, errors.New("application icon resource is missing")
 	}
-	if isResourceReference(iconResource) {
-		resolved, err := resolveResourceString(path, iconResource)
-		if err != nil {
-			return nil, fmt.Errorf("resolve application icon: %w", err)
+	var bitmaps, layers []string
+	for _, name := range paths {
+		if strings.EqualFold(path.Ext(name), ".xml") {
+			layers = append(layers, name)
+		} else {
+			bitmaps = append(bitmaps, name)
 		}
-		iconResource = resolved
 	}
-	if strings.EqualFold(filepath.Ext(iconResource), ".png") || strings.EqualFold(filepath.Ext(iconResource), ".webp") {
-		return readAPKResource(path, iconResource)
+	bitmap, bitmapWidth, bitmapErr := a.widestBitmap(bitmaps)
+	for _, name := range layers {
+		adaptive, err := a.renderAdaptiveIcon(name)
+		if err != nil {
+			continue
+		}
+		if config, _, err := media.ConfigBounded(adaptive); err == nil && config.Width > bitmapWidth {
+			return adaptive, nil
+		}
 	}
-	if !strings.EqualFold(filepath.Ext(iconResource), ".xml") {
-		return nil, fmt.Errorf("unsupported application icon resource %q", iconResource)
+	if bitmap == nil {
+		if bitmapErr == nil {
+			bitmapErr = errors.New("application icon has no bitmap")
+		}
+		return nil, bitmapErr
 	}
+	return toPNG(bitmap)
+}
 
-	table, err := loadResourceTable(path)
-	if err != nil {
-		return nil, err
+// iconPaths returns the resolved icon, the last and first configs of the icon
+// resource, and every density config of it, without duplicates.
+func (a *apkArchive) iconPaths(icon, iconRef string) []string {
+	var paths []string
+	add := func(name string, err error) {
+		if err == nil && name != "" && !slices.Contains(paths, name) {
+			paths = append(paths, name)
+		}
 	}
-	data, err := readAPKResource(path, iconResource)
-	if err != nil {
-		return nil, err
+	if isResourceReference(icon) {
+		add(a.resolveResourceString(icon))
+	} else {
+		add(icon, nil)
 	}
+	if resourceID, err := parseResourceID(iconRef); err == nil {
+		add(a.resolveResource(resourceID, apkparser.ConfigLast))
+		add(a.resolveResource(resourceID, apkparser.ConfigFirst))
+		for _, name := range a.densityPaths(resourceID) {
+			add(name, nil)
+		}
+	}
+	return paths
+}
 
+// densityPaths returns the file each density config of a resource points to,
+// then the default config's. Obfuscated names make these the only way to find
+// the sibling densities.
+func (a *apkArchive) densityPaths(resourceID uint32) []string {
+	table := a.loadDensityTable()
+	if table == nil {
+		return nil
+	}
+	configs := []*androidbinary.ResTableConfig{nil}
+	// xxxhdpi, xxhdpi, xhdpi, hdpi, mdpi
+	for _, density := range []uint16{640, 480, 320, 240, 160} {
+		configs = append(configs, &androidbinary.ResTableConfig{Density: density})
+	}
+	var paths []string
+	for _, config := range configs {
+		if name, ok := densityPath(table, resourceID, config); ok && !slices.Contains(paths, name) {
+			paths = append(paths, name)
+		}
+	}
+	return paths
+}
+
+// loadDensityTable parses resources.arsc once for densityPaths. It returns
+// nil when the table cannot be parsed.
+func (a *apkArchive) loadDensityTable() (table *androidbinary.TableFile) {
+	if a.densityTableDone {
+		return a.densityTable
+	}
+	a.densityTableDone = true
+	if a.tableData == nil {
+		return nil
+	}
+	defer func() {
+		if recover() != nil {
+			table = nil
+		}
+	}()
+	table, err := androidbinary.NewTableFile(bytes.NewReader(a.tableData))
+	if err != nil {
+		return nil
+	}
+	a.densityTable = table
+	return table
+}
+
+// densityPath follows resource references to a string value. A panic on a
+// malformed table skips this config only.
+func densityPath(table *androidbinary.TableFile, resourceID uint32, config *androidbinary.ResTableConfig) (name string, ok bool) {
+	defer func() {
+		if recover() != nil {
+			name, ok = "", false
+		}
+	}()
+	for range 8 {
+		value, err := table.GetResource(androidbinary.ResID(resourceID), config)
+		if err != nil {
+			return "", false
+		}
+		switch value := value.(type) {
+		case string:
+			return value, value != ""
+		case uint32:
+			resourceID = value
+		default:
+			return "", false
+		}
+	}
+	return "", false
+}
+
+func (a *apkArchive) renderAdaptiveIcon(name string) ([]byte, error) {
+	data, err := a.readEntry(name, maxAPKResourceSize)
+	if err != nil {
+		return nil, fmt.Errorf("read adaptive icon: %w", err)
+	}
 	adaptive := adaptiveIconCollector{}
-	if err := apkparser.ParseXml(bytes.NewReader(data), &adaptive, table); err != nil {
-		return nil, fmt.Errorf("parse adaptive icon %q: %w", iconResource, err)
+	if err := apkparser.ParseXml(bytes.NewReader(data), &adaptive, a.table); err != nil {
+		return nil, fmt.Errorf("parse adaptive icon %q: %w", name, err)
 	}
 	if adaptive.foreground == "" {
-		return nil, fmt.Errorf("adaptive icon %q has no foreground", iconResource)
+		return nil, fmt.Errorf("adaptive icon %q has no foreground", name)
 	}
-	return renderVectorResource(path, table, adaptive.foreground, adaptive.background)
+	return a.renderVectorResource(adaptive.foreground, adaptive.background)
 }
 
-func readAPKResource(path, resourcePath string) ([]byte, error) {
-	r, err := zip.OpenReader(path)
-	if err != nil {
-		return nil, fmt.Errorf("open APK: %w", err)
-	}
-	defer r.Close()
-
-	for _, file := range r.File {
-		if file.Name == resourcePath {
-			data, err := readZipFile(file)
-			if err != nil {
-				return nil, fmt.Errorf("read resource %q: %w", resourcePath, err)
+// widestBitmap returns the widest of the named bitmaps as stored, with its
+// width. Widths come from the header, so only the winner is read in full by
+// the caller. Names that fail to read or decode are skipped; the first error
+// is returned only when none works.
+func (a *apkArchive) widestBitmap(names []string) (best []byte, bestWidth int, err error) {
+	for _, name := range names {
+		data, readErr := a.readEntry(name, maxAPKResourceSize)
+		if readErr == nil {
+			var config image.Config
+			if config, _, readErr = media.ConfigBounded(data); readErr == nil && config.Width > bestWidth {
+				best, bestWidth = data, config.Width
 			}
-			if strings.EqualFold(filepath.Ext(resourcePath), ".webp") {
-				img, err := webp.Decode(bytes.NewReader(data))
-				if err != nil {
-					return nil, fmt.Errorf("decode WebP resource %q: %w", resourcePath, err)
-				}
-				return encodePNG(img)
-			}
-			return data, nil
+		}
+		if readErr != nil && err == nil {
+			err = fmt.Errorf("read icon %q: %w", name, readErr)
 		}
 	}
-	return nil, fmt.Errorf("resource %q is missing", resourcePath)
+	if best != nil {
+		err = nil
+	}
+	return best, bestWidth, err
+}
+
+// readBitmap returns the named bitmap as PNG.
+func (a *apkArchive) readBitmap(name string) ([]byte, error) {
+	data, _, err := a.widestBitmap([]string{name})
+	if err != nil {
+		return nil, err
+	}
+	if data == nil {
+		return nil, fmt.Errorf("icon %q has no bitmap", name)
+	}
+	return toPNG(data)
+}
+
+func toPNG(data []byte) ([]byte, error) {
+	_, format, err := media.ConfigBounded(data)
+	if err != nil {
+		return nil, err
+	}
+	if format == "png" {
+		return data, nil
+	}
+	img, _, err := media.DecodeBounded(data)
+	if err != nil {
+		return nil, err
+	}
+	return encodePNG(img)
 }
 
 type adaptiveIconCollector struct {
@@ -738,24 +987,24 @@ func (c *adaptiveIconCollector) Flush() error {
 	return nil
 }
 
-func renderVectorResource(path string, table *apkparser.ResourceTable, resourcePath, background string) ([]byte, error) {
+func (a *apkArchive) renderVectorResource(resourcePath, background string) ([]byte, error) {
 	if isResourceReference(resourcePath) {
-		resolved, err := resolveResourceString(path, resourcePath)
+		resolved, err := a.resolveResourceString(resourcePath)
 		if err != nil {
 			return nil, fmt.Errorf("resolve vector resource: %w", err)
 		}
 		resourcePath = resolved
 	}
-	if !strings.EqualFold(filepath.Ext(resourcePath), ".xml") {
-		return readAPKResource(path, resourcePath)
+	if !strings.EqualFold(path.Ext(resourcePath), ".xml") {
+		return a.readBitmap(resourcePath)
 	}
 
-	data, err := readAPKResource(path, resourcePath)
+	data, err := a.readEntry(resourcePath, maxAPKResourceSize)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read vector resource: %w", err)
 	}
 	collector := vectorSVGCollector{}
-	if err := apkparser.ParseXml(bytes.NewReader(data), &collector, table); err != nil {
+	if err := apkparser.ParseXml(bytes.NewReader(data), &collector, a.table); err != nil {
 		return nil, fmt.Errorf("parse vector resource %q: %w", resourcePath, err)
 	}
 	svg, err := collector.svg()
@@ -773,25 +1022,56 @@ func renderVectorResource(path string, table *apkparser.ResourceTable, resourceP
 	icon.SetTarget(0, 0, iconSize, iconSize)
 	scanner := rasterx.NewScannerGV(iconSize, iconSize, img, img.Bounds())
 	icon.Draw(rasterx.NewDasher(iconSize, iconSize, scanner), 1)
+	// Gradients and theme colors render as nothing, which would hide a usable
+	// bitmap icon behind a blank square.
+	if !hasForeground(img) {
+		return nil, errors.New("vector icon rendered blank")
+	}
 	return encodePNG(img)
 }
 
-func adaptiveIconBackground(value string) color.Color {
-	if !strings.HasPrefix(value, "#") {
-		return color.White
+// hasForeground reports whether any pixel differs from the top-left one.
+func hasForeground(img *image.RGBA) bool {
+	return !bytes.Equal(img.Pix, bytes.Repeat(img.Pix[:4], len(img.Pix)/4))
+}
+
+// parseColor parses an Android color literal: #RGB, #ARGB, #RRGGBB, or
+// #AARRGGBB.
+func parseColor(value string) (color.NRGBA, bool) {
+	digits, ok := strings.CutPrefix(value, "#")
+	if !ok {
+		return color.NRGBA{}, false
 	}
-	hexColor := strings.TrimPrefix(value, "#")
-	if len(hexColor) == 8 {
-		hexColor = hexColor[2:]
+	switch len(digits) {
+	case 3, 4:
+		var expanded strings.Builder
+		for _, digit := range digits {
+			expanded.WriteRune(digit)
+			expanded.WriteRune(digit)
+		}
+		digits = expanded.String()
+	case 6, 8:
+	default:
+		return color.NRGBA{}, false
 	}
-	if len(hexColor) != 6 {
-		return color.White
+	if len(digits) == 6 {
+		digits = "ff" + digits
 	}
-	parsed, err := strconv.ParseUint(hexColor, 16, 32)
+	parsed, err := strconv.ParseUint(digits, 16, 32)
 	if err != nil {
+		return color.NRGBA{}, false
+	}
+	return color.NRGBA{R: uint8(parsed >> 16), G: uint8(parsed >> 8), B: uint8(parsed), A: uint8(parsed >> 24)}, true
+}
+
+// adaptiveIconBackground returns the opaque background color, white when the
+// value is not a color literal.
+func adaptiveIconBackground(value string) color.Color {
+	parsed, ok := parseColor(value)
+	if !ok {
 		return color.White
 	}
-	return color.RGBA{R: uint8(parsed >> 16), G: uint8(parsed >> 8), B: uint8(parsed), A: 0xff}
+	return color.RGBA{R: parsed.R, G: parsed.G, B: parsed.B, A: 0xff}
 }
 
 type vectorSVGCollector struct {
@@ -816,9 +1096,9 @@ func (c *vectorSVGCollector) EncodeToken(token xml.Token) error {
 				svgAttribute(attribute(token, "scaleY"), "1"))
 			c.depth++
 		case "path":
-			fmt.Fprintf(&c.body, `<path d="%s" fill="%s"/>`,
+			fmt.Fprintf(&c.body, `<path d="%s" %s/>`,
 				svgAttribute(attribute(token, "pathData"), ""),
-				svgColor(attribute(token, "fillColor")))
+				svgFill(attribute(token, "fillColor")))
 		}
 	case xml.EndElement:
 		if token.Name.Local == "group" && c.depth > 0 {
@@ -835,7 +1115,7 @@ func (c *vectorSVGCollector) Flush() error {
 
 func (c *vectorSVGCollector) svg() (string, error) {
 	if c.viewportWidth == "" || c.viewportHeight == "" {
-		return "", fmt.Errorf("vector viewport is missing")
+		return "", errors.New("vector viewport is missing")
 	}
 	return fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %s %s">%s</svg>`,
 		svgAttribute(c.viewportWidth, ""),
@@ -852,36 +1132,27 @@ func svgAttribute(value, fallback string) string {
 	return escaped.String()
 }
 
-func svgColor(value string) string {
-	if strings.HasPrefix(value, "#") {
-		return svgAttribute(value, "none")
+// svgFill renders an Android fillColor as SVG fill attributes. SVG 1.1 has no
+// #AARRGGBB, so alpha becomes fill-opacity. A decimal value is an opaque
+// color: apkparser prints integer-typed colors without their alpha.
+func svgFill(value string) string {
+	if parsed, ok := parseColor(value); ok {
+		fill := fmt.Sprintf(`fill="#%02x%02x%02x"`, parsed.R, parsed.G, parsed.B)
+		if parsed.A != 0xff {
+			fill += fmt.Sprintf(` fill-opacity="%.3f"`, float64(parsed.A)/255)
+		}
+		return fill
 	}
-	parsed, err := strconv.ParseInt(value, 10, 32)
+	decimal, err := strconv.ParseInt(value, 10, 32)
 	if err != nil {
-		return "none"
+		return `fill="none"`
 	}
-	return fmt.Sprintf("#%06x", uint32(parsed)&0x00ffffff)
+	return fmt.Sprintf(`fill="#%06x"`, uint32(decimal)&0x00ffffff)
 }
 
 // extractIconManually searches for the icon in common locations within the APK.
 // It handles both traditional PNG icons and modern adaptive icons.
-func extractIconManually(path string) ([]byte, error) {
-	r, err := zip.OpenReader(path)
-	if err != nil {
-		return nil, err
-	}
-	defer r.Close()
-
-	// Build a map of files for faster lookups
-	// Security: Validate zip entry paths to prevent zip slip attacks
-	files := make(map[string]*zip.File)
-	for _, f := range r.File {
-		if !isValidZipEntryPath(f.Name) {
-			continue
-		}
-		files[f.Name] = f
-	}
-
+func (a *apkArchive) extractIconManually() ([]byte, error) {
 	// Priority order for icon paths (highest density first)
 	var iconPaths []string
 	densities := []string{"xxxhdpi", "xxhdpi", "xhdpi", "hdpi", "mdpi"}
@@ -900,8 +1171,8 @@ func extractIconManually(path string) ([]byte, error) {
 
 	// Try exact paths first
 	for _, iconPath := range iconPaths {
-		if f, ok := files[iconPath]; ok {
-			return readZipIcon(f)
+		if f, ok := a.byName[iconPath]; ok {
+			return a.readIcon(f)
 		}
 	}
 
@@ -918,8 +1189,8 @@ func extractIconManually(path string) ([]byte, error) {
 	}
 
 	for _, iconPath := range foregroundPaths {
-		if f, ok := files[iconPath]; ok {
-			return readZipIcon(f)
+		if f, ok := a.byName[iconPath]; ok {
+			return a.readIcon(f)
 		}
 	}
 
@@ -928,8 +1199,8 @@ func extractIconManually(path string) ([]byte, error) {
 	var bestIcon *zip.File
 	var bestSize uint64
 
-	for _, f := range r.File {
-		name := filepath.Base(f.Name)
+	for _, f := range a.files {
+		name := path.Base(f.Name)
 		if strings.HasPrefix(f.Name, "res/") &&
 			(strings.Contains(name, "ic_launcher") || strings.Contains(name, "launcher") ||
 				(strings.Contains(name, "icon") && !strings.Contains(name, "notification"))) &&
@@ -943,12 +1214,12 @@ func extractIconManually(path string) ([]byte, error) {
 	}
 
 	if bestIcon != nil {
-		return readZipIcon(bestIcon)
+		return a.readIcon(bestIcon)
 	}
 
 	// Last resort: look for any reasonably sized PNG in res/ that might be an icon
 	// (larger than 1KB, suggesting it's not a tiny UI element)
-	for _, f := range r.File {
+	for _, f := range a.files {
 		if strings.HasPrefix(f.Name, "res/") &&
 			(strings.HasSuffix(f.Name, ".png") || strings.HasSuffix(f.Name, ".webp")) &&
 			!strings.HasSuffix(f.Name, ".9.png") &&
@@ -960,49 +1231,39 @@ func extractIconManually(path string) ([]byte, error) {
 	}
 
 	if bestIcon != nil {
-		return readZipIcon(bestIcon)
+		return a.readIcon(bestIcon)
 	}
 
-	return nil, fmt.Errorf("no icon found")
+	return nil, errors.New("no icon found")
 }
 
-// readZipIcon reads a potential icon and converts WebP to PNG.
-func readZipIcon(f *zip.File) ([]byte, error) {
-	data, err := readZipFile(f)
+func (a *apkArchive) readIcon(f *zip.File) ([]byte, error) {
+	data, err := readZipFile(f, maxAPKResourceSize)
 	if err != nil {
 		return nil, err
 	}
-
-	if strings.EqualFold(filepath.Ext(f.Name), ".webp") {
-		img, err := webp.Decode(bytes.NewReader(data))
-		if err != nil {
-			return nil, err
-		}
-		return encodePNG(img)
-	}
-
-	return data, nil
+	return toPNG(data)
 }
 
-// readZipFile reads a bounded manifest resource or icon from an APK archive.
-func readZipFile(f *zip.File) ([]byte, error) {
-	if f.UncompressedSize64 > maxAPKResourceSize {
-		return nil, fmt.Errorf("file %s too large: %d bytes (max %d)", f.Name, f.UncompressedSize64, maxAPKResourceSize)
+// readZipFile reads at most limit bytes of an archive entry. The declared size
+// is checked first and the read is capped again because ZIP metadata can lie.
+func readZipFile(f *zip.File, limit int64) ([]byte, error) {
+	if f.UncompressedSize64 > uint64(limit) {
+		return nil, fmt.Errorf("file %s too large: %d bytes (max %d)", f.Name, f.UncompressedSize64, limit)
 	}
 
 	rc, err := f.Open()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open %s: %w", f.Name, err)
 	}
 	defer rc.Close()
 
-	// Read one byte past the declared cap so forged ZIP metadata cannot bypass it.
-	data, err := io.ReadAll(io.LimitReader(rc, int64(maxAPKResourceSize)+1))
+	data, err := io.ReadAll(io.LimitReader(rc, limit+1))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read %s: %w", f.Name, err)
 	}
-	if len(data) > maxAPKResourceSize {
-		return nil, fmt.Errorf("file %s exceeds maximum size of %d bytes", f.Name, maxAPKResourceSize)
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("file %s exceeds maximum size of %d bytes", f.Name, limit)
 	}
 	return data, nil
 }
@@ -1011,7 +1272,7 @@ func readZipFile(f *zip.File) ([]byte, error) {
 func encodePNG(img image.Image) ([]byte, error) {
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("encode PNG: %w", err)
 	}
 	return buf.Bytes(), nil
 }
@@ -1038,15 +1299,6 @@ func (a *APKInfo) IsWatch() bool {
 	return false
 }
 
-// HasGoogleDependency checks if the APK might have Google Play dependencies
-// based on the package ID patterns.
-func (a *APKInfo) HasGoogleDependency() bool {
-	lower := strings.ToLower(a.PackageID)
-	return strings.Contains(lower, "gms") ||
-		strings.Contains(lower, "google") ||
-		strings.Contains(lower, "play")
-}
-
 // String returns a human-readable summary of the APK.
 func (a *APKInfo) String() string {
 	var buf bytes.Buffer
@@ -1066,6 +1318,3 @@ func (a *APKInfo) String() string {
 	}
 	return buf.String()
 }
-
-// ResConfig represents a resource configuration for localization.
-type ResConfig = androidbinary.ResTableConfig

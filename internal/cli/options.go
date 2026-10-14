@@ -172,9 +172,6 @@ func parseCommandFlags(opts *Options, args []string, publish bool) {
 	fs.BoolVar(&opts.Global.Verbose, "verbose", opts.Global.Verbose, "Debug output")
 	fs.BoolVar(&opts.Global.NoColor, "no-color", opts.Global.NoColor, "Disable colored output")
 	fs.BoolVar(&opts.Global.JSON, "json", opts.Global.JSON, "JSON output")
-	valued := map[string]bool{
-		"-r": true, "-s": true, "--match": true, "--release-filter": true, "--apk-hash": true, "--channel": true, "--prerelease-channel": true,
-	}
 
 	var metadataFlags stringSliceFlag
 	if publish {
@@ -190,13 +187,12 @@ func parseCommandFlags(opts *Options, args []string, publish bool) {
 		fs.BoolVar(&opts.Publish.SkipMetadata, "skip-metadata", false, "Skip fetching metadata from external sources")
 		fs.BoolVar(&opts.Publish.SkipAppEvent, "skip-app-event", false, "Publish only release events, skip app metadata (kind 32267)")
 		fs.BoolVar(&opts.Publish.NoCompress, "no-compress", false, "Preserve original icon and screenshot bytes")
-		valued["-m"], valued["--commit"], valued["--port"] = true, true, true
 	}
 	var showHelp bool
 	fs.BoolVar(&showHelp, "h", false, "Show help")
 	fs.BoolVar(&showHelp, "help", false, "Show help")
 
-	if err := fs.Parse(reorderArgsForFlagSet(args, valued)); err != nil {
+	if err := fs.Parse(reorderArgsForFlagSet(args, fs)); err != nil {
 		opts.FlagParseError = err
 		return
 	}
@@ -208,25 +204,51 @@ func parseCommandFlags(opts *Options, args []string, publish bool) {
 	opts.Args = fs.Args()
 }
 
-// reorderArgsForFlagSet moves flags before positional arguments.
-func reorderArgsForFlagSet(args []string, valuedFlags map[string]bool) []string {
+// reorderArgsForFlagSet moves flags before positional arguments so flags may
+// follow them, as in `zsp publish app.yaml -r URL`. A flag that takes a value
+// always consumes the next argument, even one starting with '-', matching the
+// flag package. Arguments after "--" stay positional.
+func reorderArgsForFlagSet(args []string, fs *flag.FlagSet) []string {
+	valued := valuedFlags(fs)
 	var flags, positional []string
+	endOfFlags := false
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		if strings.HasPrefix(arg, "-") {
-			flags = append(flags, arg)
-			// Check if this flag takes a value
-			if valuedFlags[arg] && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				i++
-				flags = append(flags, args[i])
-			}
-		} else {
+		if arg == "--" {
+			endOfFlags = true
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
 			positional = append(positional, arg)
+			continue
+		}
+		flags = append(flags, arg)
+		name := strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-")
+		if !strings.Contains(name, "=") && valued[name] && i+1 < len(args) {
+			i++
+			flags = append(flags, args[i])
 		}
 	}
 
+	if endOfFlags {
+		flags = append(flags, "--")
+	}
 	return append(flags, positional...)
+}
+
+// valuedFlags names the flags in fs that take a value. The flag package
+// accepts each flag with one or two dashes, so names are kept without them.
+func valuedFlags(fs *flag.FlagSet) map[string]bool {
+	valued := make(map[string]bool)
+	fs.VisitAll(func(f *flag.Flag) {
+		if boolean, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && boolean.IsBoolFlag() {
+			return
+		}
+		valued[f.Name] = true
+	})
+	return valued
 }
 
 // ShouldShowSpinners returns true if spinners/progress should be shown.

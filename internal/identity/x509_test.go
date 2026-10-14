@@ -10,6 +10,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"math/big"
@@ -20,6 +21,7 @@ import (
 
 	gonostr "github.com/nbd-wtf/go-nostr"
 	keystore "github.com/pavlo-v-chernykh/keystore-go/v4"
+	"software.sslmate.com/src/go-pkcs12"
 )
 
 func TestValidateKeyCertPair(t *testing.T) {
@@ -193,6 +195,78 @@ func TestLoadPEM_RejectsMismatchedKey(t *testing.T) {
 	}
 	if err := ValidateKeyCertPair(gotKey, gotCert); err != nil {
 		t.Fatalf("loaded pair invalid: %v", err)
+	}
+}
+
+func TestLoadPKCS12(t *testing.T) {
+	key, cert := mustGenerateECDSA(t)
+	_, caCert := mustGenerateRSA(t)
+	const password = "store-password"
+
+	tests := []struct {
+		name  string
+		chain []*x509.Certificate
+	}{
+		{name: "single certificate"},
+		{name: "certificate chain", chain: []*x509.Certificate{caCert}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := pkcs12.Modern.Encode(key, cert, tt.chain, password)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotKey, gotCert, err := LoadPKCS12(data, password)
+			if err != nil {
+				t.Fatalf("LoadPKCS12() error = %v", err)
+			}
+			if !gotCert.Equal(cert) {
+				t.Fatal("LoadPKCS12() returned a different leaf certificate")
+			}
+			if err := ValidateKeyCertPair(gotKey, gotCert); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	data, err := pkcs12.Modern.Encode(key, cert, nil, password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadPKCS12(data, "wrong"); !errors.Is(err, ErrInvalidPassword) {
+		t.Fatalf("LoadPKCS12(wrong password) error = %v, want ErrInvalidPassword", err)
+	}
+}
+
+func TestVerifyIdentityProofWithCertRejectsExpiredAndRevoked(t *testing.T) {
+	pubkeyHex := "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+	key, cert := mustGenerateECDSA(t)
+	createdAt := time.Now().Add(-2 * time.Hour).Unix()
+	expiry := time.Now().Add(-time.Hour).Unix()
+	signature, err := SignProofMessage(key, pubkeyHex, createdAt, expiry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := &IdentityProof{
+		CertHash:  ComputeCertHash(cert),
+		Signature: base64.StdEncoding.EncodeToString(signature),
+		CreatedAt: createdAt,
+		Expiry:    expiry,
+	}
+	result := VerifyIdentityProofWithCert(proof, nil, pubkeyHex, cert)
+	if !result.SignatureOK || !result.Expired || result.Valid {
+		t.Fatalf("expired proof: SignatureOK=%v Expired=%v Valid=%v", result.SignatureOK, result.Expired, result.Valid)
+	}
+
+	proof.Expiry = time.Now().Add(time.Hour).Unix()
+	if signature, err = SignProofMessage(key, pubkeyHex, createdAt, proof.Expiry); err != nil {
+		t.Fatal(err)
+	}
+	proof.Signature = base64.StdEncoding.EncodeToString(signature)
+	revoked := &gonostr.Event{Kind: 30509, CreatedAt: gonostr.Timestamp(createdAt), Tags: gonostr.Tags{{"revoked", "lost key"}}}
+	result = VerifyIdentityProofWithCert(proof, revoked, pubkeyHex, cert)
+	if !result.SignatureOK || !result.Revoked || result.Valid {
+		t.Fatalf("revoked proof: SignatureOK=%v Revoked=%v Valid=%v", result.SignatureOK, result.Revoked, result.Valid)
 	}
 }
 

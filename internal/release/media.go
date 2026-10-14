@@ -1,4 +1,4 @@
-package zsp
+package release
 
 import (
 	"context"
@@ -6,16 +6,16 @@ import (
 	"fmt"
 	"io"
 	"mime"
-	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/zapstore/zsp/internal/apk"
+	"github.com/zapstore/zsp/internal/localpath"
 	"github.com/zapstore/zsp/internal/media"
+	"github.com/zapstore/zsp/internal/netpolicy"
 	"github.com/zapstore/zsp/internal/sanitize"
 	"github.com/zapstore/zsp/internal/source"
 )
@@ -49,11 +49,11 @@ func prepareMedia(ctx context.Context, config PublishConfig, apkInfo *apk.APKInf
 	if err != nil {
 		return mediaPlan{}, nil, err
 	}
-	sets := config.imageSets
-	if len(sets) == 0 && len(config.Images) > 0 {
-		sets = [][]string{config.Images}
+	sets, explicit := config.imageSets, false
+	if len(config.Images) > 0 {
+		sets, explicit = [][]string{config.Images}, true
 	}
-	screenshotWarnings, err := plan.addScreenshots(ctx, sets, blossomURL, compress)
+	screenshotWarnings, err := plan.addScreenshots(ctx, config.baseDir, sets, explicit, blossomURL, compress)
 	if err != nil {
 		return mediaPlan{}, nil, err
 	}
@@ -61,11 +61,11 @@ func prepareMedia(ctx context.Context, config PublishConfig, apkInfo *apk.APKInf
 }
 
 // addIcon uses an explicit icon when one is set. Otherwise it uses the APK
-// icon, then each metadata icon URL. A remote icon that cannot be used is
-// skipped. An explicit local path that cannot be read fails the publish.
+// icon, then each metadata icon location. A metadata icon that cannot be used
+// is skipped. An explicit local path that cannot be read fails the publish.
 func (plan *mediaPlan) addIcon(ctx context.Context, config PublishConfig, apkInfo *apk.APKInfo, blossomURL string, compress bool) ([]string, error) {
 	if config.Icon != "" {
-		blob, err := prepareMediaBlob(ctx, "icon", config.Icon, media.IconMaxWidth, blossomURL, compress)
+		blob, err := prepareMediaBlob(ctx, "icon", config.baseDir, config.Icon, media.IconMaxWidth, blossomURL, compress)
 		if err != nil {
 			return nil, err
 		}
@@ -75,7 +75,7 @@ func (plan *mediaPlan) addIcon(ctx context.Context, config PublishConfig, apkInf
 
 	var warnings []string
 	if apkInfo != nil && len(apkInfo.Icon) > 0 {
-		processed, err := media.Process(apkInfo.Icon, "image/png", media.IconMaxWidth, compress)
+		processed, err := media.Process(apkInfo.Icon, media.IconMaxWidth, compress)
 		if err == nil {
 			plan.useIcon(newPreparedBlob("icon", processed.Data, processed.Hash, processed.MimeType, blossomURL))
 			return nil, nil
@@ -91,16 +91,13 @@ func (plan *mediaPlan) addIcon(ctx context.Context, config PublishConfig, apkInf
 				return nil, contextErr
 			}
 		}
-		blob, err := loadPreparedMedia(ctx, "icon", location, media.IconMaxWidth, blossomURL, compress)
+		blob, err := loadPreparedMedia(ctx, "icon", config.baseDir, location, media.IconMaxWidth, blossomURL, compress)
 		if err == nil {
 			plan.useIcon(blob)
 			return warnings, nil
 		}
 		if contextErr := contextOperationError(ctx.Err(), "load icon"); contextErr != nil {
 			return nil, contextErr
-		}
-		if !skippableScreenshot(location, err) {
-			return nil, wrapMediaError("icon", err)
 		}
 		warnings = append(warnings, skippedScreenshotWarning("icon", location, err))
 	}
@@ -112,11 +109,12 @@ func (plan *mediaPlan) useIcon(blob preparedBlob) {
 	plan.blobs = append(plan.blobs, blob)
 }
 
-// addScreenshots tries each source's screenshots in order. A remote screenshot
-// that is missing, not an image, or too slow is skipped. The first source that
-// yields a usable screenshot is kept. A local path that cannot be read fails
-// the publish: that path was set by the caller.
-func (plan *mediaPlan) addScreenshots(ctx context.Context, sets [][]string, blossomURL string, compress bool) ([]string, error) {
+// addScreenshots tries each set of screenshots in order. A remote screenshot
+// that is missing, not an image, or too slow is skipped, and so is any
+// screenshot a metadata source discovered. The first set that yields a usable
+// screenshot is kept. An explicit local path that cannot be read fails the
+// publish: the caller wrote that path.
+func (plan *mediaPlan) addScreenshots(ctx context.Context, baseDir string, sets [][]string, explicit bool, blossomURL string, compress bool) ([]string, error) {
 	var warnings []string
 	for _, set := range sets {
 		var blobs []preparedBlob
@@ -129,12 +127,12 @@ func (plan *mediaPlan) addScreenshots(ctx context.Context, sets [][]string, blos
 				}
 			}
 			label := fmt.Sprintf("image %d", index+1)
-			blob, err := loadPreparedMedia(ctx, label, location, media.ScreenshotMaxWidth, blossomURL, compress)
+			blob, err := loadPreparedMedia(ctx, label, baseDir, location, media.ScreenshotMaxWidth, blossomURL, compress)
 			if err != nil {
 				if contextErr := contextOperationError(ctx.Err(), "load "+label); contextErr != nil {
 					return nil, contextErr
 				}
-				if !skippableScreenshot(location, err) {
+				if explicit && !skippableScreenshot(location, err) {
 					return nil, wrapMediaError(label, err)
 				}
 				setWarnings = append(setWarnings, skippedScreenshotWarning(label, location, err))
@@ -161,11 +159,7 @@ func skippableScreenshot(location string, err error) bool {
 }
 
 func mediaProcessError(err error) bool {
-	message := err.Error()
-	return strings.Contains(message, "detecting image format") ||
-		strings.Contains(message, "decoding ") ||
-		strings.Contains(message, "encoding ") ||
-		strings.Contains(message, "exceed processing limit")
+	return errors.Is(err, media.ErrInvalidImage)
 }
 
 func skippedScreenshotWarning(label, location string, err error) string {
@@ -181,6 +175,9 @@ func skippedScreenshotWarning(label, location string, err error) string {
 }
 
 func wrapMediaError(label string, err error) error {
+	if errors.Is(err, localpath.ErrRejected) {
+		return wrapOperationError(ErrInvalidConfig, err, false, "load "+label+causeDetail(err))
+	}
 	if mediaProcessError(err) {
 		return wrapOperationError(ErrInvalidConfig, err, false, "process "+label+causeDetail(err))
 	}
@@ -188,8 +185,8 @@ func wrapMediaError(label string, err error) error {
 	return wrapOperationError(sentinel, err, retryable, "load "+label+causeDetail(err))
 }
 
-func prepareMediaBlob(ctx context.Context, label, location string, maxWidth int, blossomURL string, compress bool) (preparedBlob, error) {
-	blob, err := loadPreparedMedia(ctx, label, location, maxWidth, blossomURL, compress)
+func prepareMediaBlob(ctx context.Context, label, baseDir, location string, maxWidth int, blossomURL string, compress bool) (preparedBlob, error) {
+	blob, err := loadPreparedMedia(ctx, label, baseDir, location, maxWidth, blossomURL, compress)
 	if err != nil {
 		if contextErr := contextOperationError(ctx.Err(), "load "+label); contextErr != nil {
 			return preparedBlob{}, contextErr
@@ -199,12 +196,12 @@ func prepareMediaBlob(ctx context.Context, label, location string, maxWidth int,
 	return blob, nil
 }
 
-func loadPreparedMedia(ctx context.Context, label, location string, maxWidth int, blossomURL string, compress bool) (preparedBlob, error) {
-	data, contentType, err := readMedia(ctx, location)
+func loadPreparedMedia(ctx context.Context, label, baseDir, location string, maxWidth int, blossomURL string, compress bool) (preparedBlob, error) {
+	data, _, err := readMedia(ctx, baseDir, location)
 	if err != nil {
 		return preparedBlob{}, err
 	}
-	processed, err := media.Process(data, contentType, maxWidth, compress)
+	processed, err := media.Process(data, maxWidth, compress)
 	if err != nil {
 		return preparedBlob{}, err
 	}
@@ -218,22 +215,14 @@ func newPreparedBlob(label string, data []byte, hash, mimeType, blossomURL strin
 	}
 }
 
-func readMedia(ctx context.Context, location string) ([]byte, string, error) {
+func readMedia(ctx context.Context, baseDir, location string) ([]byte, string, error) {
 	if !strings.Contains(location, "://") {
 		if !filepath.IsAbs(location) {
 			return nil, "", fmt.Errorf("local media path must be absolute")
 		}
-		file, err := os.Open(location)
+		data, err := localpath.ReadFile(baseDir, location, maxMediaSize)
 		if err != nil {
 			return nil, "", err
-		}
-		defer file.Close()
-		data, err := io.ReadAll(io.LimitReader(file, maxMediaSize+1))
-		if err != nil {
-			return nil, "", err
-		}
-		if len(data) > maxMediaSize {
-			return nil, "", fmt.Errorf("media exceeds %d bytes", maxMediaSize)
 		}
 		return data, mime.TypeByExtension(strings.ToLower(filepath.Ext(location))), nil
 	}
@@ -244,13 +233,10 @@ func readMedia(ctx context.Context, location string) ([]byte, string, error) {
 	fetchCtx, cancel := context.WithTimeout(ctx, mediaFetchTimeout)
 	defer cancel()
 	client := &http.Client{
-		CheckRedirect: func(request *http.Request, via []*http.Request) error {
-			if len(via) >= 10 || !allowedRemoteURL(request.URL) {
-				return fmt.Errorf("unsafe media redirect")
-			}
-			return nil
-		},
+		Transport:     netpolicy.NewTransport(),
+		CheckRedirect: netpolicy.CheckRedirect,
 	}
+	defer client.CloseIdleConnections()
 	request, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return nil, "", err
@@ -279,7 +265,7 @@ func readMedia(ctx context.Context, location string) ([]byte, string, error) {
 	return data, response.Header.Get("Content-Type"), nil
 }
 
-func loadReleaseNotes(ctx context.Context, location string) (string, error) {
+func loadReleaseNotes(ctx context.Context, baseDir, location string) (string, error) {
 	if location == "" {
 		return "", nil
 	}
@@ -287,17 +273,12 @@ func loadReleaseNotes(ctx context.Context, location string) (string, error) {
 		if !filepath.IsAbs(location) {
 			return "", operationErr(ErrInvalidConfig, false, "local release notes path must be absolute")
 		}
-		file, err := os.Open(location)
-		if err != nil {
-			return "", wrapOperationError(ErrInvalidConfig, err, false, "read release notes"+causeDetail(err))
-		}
-		defer file.Close()
-		data, err := io.ReadAll(io.LimitReader(file, maxReleaseNotesSize+1))
-		if err != nil {
-			return "", wrapOperationError(ErrInvalidConfig, err, false, "read release notes"+causeDetail(err))
-		}
-		if len(data) > maxReleaseNotesSize {
+		data, err := localpath.ReadFile(baseDir, location, maxReleaseNotesSize)
+		if errors.Is(err, localpath.ErrTooLarge) {
 			return "", operationErr(ErrInvalidConfig, false, "release notes exceed %d bytes", maxReleaseNotesSize)
+		}
+		if err != nil {
+			return "", wrapOperationError(ErrInvalidConfig, err, false, "read release notes"+causeDetail(err))
 		}
 		return string(data), nil
 	}
@@ -306,14 +287,11 @@ func loadReleaseNotes(ctx context.Context, location string) (string, error) {
 		return "", operationErr(ErrInvalidConfig, false, "release notes URL must use HTTPS outside loopback")
 	}
 	client := &http.Client{
-		Timeout: 30 * time.Second,
-		CheckRedirect: func(request *http.Request, via []*http.Request) error {
-			if len(via) >= 10 || !allowedRemoteURL(request.URL) {
-				return fmt.Errorf("unsafe release notes redirect")
-			}
-			return nil
-		},
+		Timeout:       30 * time.Second,
+		Transport:     netpolicy.NewTransport(),
+		CheckRedirect: netpolicy.CheckRedirect,
 	}
+	defer client.CloseIdleConnections()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return "", wrapOperationError(ErrInvalidConfig, err, false, "create release notes request"+causeDetail(err))
@@ -350,14 +328,7 @@ func loadReleaseNotes(ctx context.Context, location string) (string, error) {
 }
 
 func allowedRemoteURL(value *url.URL) bool {
-	if value == nil || value.Hostname() == "" || value.User != nil || value.Fragment != "" {
-		return false
-	}
-	if value.Scheme == "https" {
-		return true
-	}
-	ip := net.ParseIP(value.Hostname())
-	return value.Scheme == "http" && (value.Hostname() == "localhost" || ip != nil && ip.IsLoopback())
+	return value != nil && netpolicy.ValidateParsedURL(value) == nil
 }
 
 func normalizedExtension(mimeType string) string {

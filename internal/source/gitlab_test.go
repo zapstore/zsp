@@ -2,6 +2,9 @@ package source
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -43,7 +46,6 @@ func TestGitLabFetchUsesMaxReleases(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	gitlab := &GitLab{
-		cfg:              &config.Config{},
 		baseURL:          srv.URL,
 		projectID:        "app",
 		numericProjectID: 1,
@@ -164,9 +166,7 @@ func TestGitLabDownloadFollowsExternalInterstitial(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	g := &GitLab{
-		cfg: &config.Config{},
-	}
+	g := &GitLab{}
 	destDir := t.TempDir()
 	asset := &Asset{
 		Name: "app.apk",
@@ -199,7 +199,7 @@ func TestGitLabDownloadFollowsExternalInterstitial(t *testing.T) {
 // point applies the same HTTPS-outside-loopback validation as the shared
 // DownloadHTTP pipeline, before attempting interstitial resolution.
 func TestGitLabDownloadRejectsInsecureURL(t *testing.T) {
-	g := &GitLab{cfg: &config.Config{}}
+	g := &GitLab{}
 	asset := &Asset{Name: "app.apk", URL: "http://evil.example.com/app.apk"}
 
 	if _, err := g.Download(context.Background(), asset, t.TempDir(), nil); err == nil {
@@ -228,7 +228,7 @@ func TestGitLabDownloadRetriesTransientFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	g := &GitLab{cfg: &config.Config{}}
+	g := &GitLab{}
 	asset := &Asset{Name: "app.apk", URL: srv.URL + "/app.apk"}
 
 	path, err := g.Download(context.Background(), asset, t.TempDir(), nil)
@@ -248,7 +248,7 @@ func TestGitLabDownloadRetriesTransientFailure(t *testing.T) {
 }
 
 func TestConvertReleasePrefersExternalURL(t *testing.T) {
-	g := &GitLab{cfg: &config.Config{}}
+	g := &GitLab{}
 	release := g.convertRelease(&gitlabRelease{
 		TagName: "v1.2.3",
 		Assets: struct {
@@ -336,7 +336,6 @@ func TestResolveGitLabDescriptionURL(t *testing.T) {
 
 func TestConvertReleaseDescriptionUploads(t *testing.T) {
 	g := &GitLab{
-		cfg:              &config.Config{},
 		baseURL:          "https://gitlab.com",
 		projectID:        "AuroraOSS%2FAuroraStore",
 		numericProjectID: 6922885,
@@ -377,7 +376,6 @@ func TestConvertReleaseDescriptionUploads(t *testing.T) {
 
 func TestConvertReleaseDescriptionUploadsDoNotDuplicateLinks(t *testing.T) {
 	g := &GitLab{
-		cfg:              &config.Config{},
 		baseURL:          "https://gitlab.com",
 		projectID:        "AuroraOSS%2FAuroraStore",
 		numericProjectID: 6922885,
@@ -453,7 +451,6 @@ func TestFetchLatestReleaseUsesDescriptionUploads(t *testing.T) {
 	defer srv.Close()
 
 	g := &GitLab{
-		cfg:       &config.Config{},
 		baseURL:   srv.URL,
 		projectID: "AuroraOSS%2FAuroraStore",
 		client:    srv.Client(),
@@ -534,7 +531,6 @@ func TestGitLabFetchLatestReleaseSkipsPreReleases(t *testing.T) {
 		srv := httptest.NewServer(mux)
 		t.Cleanup(srv.Close)
 		g := &GitLab{
-			cfg:                &config.Config{},
 			baseURL:            srv.URL,
 			projectID:          "app",
 			numericProjectID:   1,
@@ -576,7 +572,6 @@ func TestGitLabFetchLatestReleaseSkipsPreReleases(t *testing.T) {
 		srv := httptest.NewServer(mux)
 		t.Cleanup(srv.Close)
 		g := &GitLab{
-			cfg:              &config.Config{},
 			baseURL:          srv.URL,
 			projectID:        "app",
 			numericProjectID: 1,
@@ -593,4 +588,161 @@ func TestGitLabFetchLatestReleaseSkipsPreReleases(t *testing.T) {
 			t.Fatal("edition suffix marked pre-release")
 		}
 	})
+}
+
+// TestGitLabInterstitialPeekKeepsLargeHTMLDownload confirms a download that
+// is HTML but not GitLab's interstitial arrives whole, past the peek window.
+func TestGitLabInterstitialPeekKeepsLargeHTMLDownload(t *testing.T) {
+	payload := []byte("<html>" + strings.Repeat("x", 200*1024) + "</html>")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	g := &GitLab{}
+	asset := &Asset{Name: "page.html", URL: srv.URL + "/page.html"}
+	path, err := g.Download(context.Background(), asset, t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("Download() error = %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(payload) || string(got) != string(payload) {
+		t.Fatalf("downloaded %d bytes, want %d", len(got), len(payload))
+	}
+}
+
+func TestMaybeGitLabExternalRedirectClosesOriginalBody(t *testing.T) {
+	body := &closeTracker{Reader: strings.NewReader("<html>plain page</html>")}
+	resp := &http.Response{
+		Header: http.Header{"Content-Type": {"text/html"}},
+		Body:   body,
+	}
+	if _, ok, err := maybeGitLabExternalRedirect(resp); ok || err != nil {
+		t.Fatalf("maybeGitLabExternalRedirect() = _, %v, %v; want no redirect", ok, err)
+	}
+	got, err := io.ReadAll(resp.Body)
+	if err != nil || string(got) != "<html>plain page</html>" {
+		t.Fatalf("restored body = %q, %v", got, err)
+	}
+	if err := resp.Body.Close(); err != nil || !body.closed {
+		t.Fatalf("Close() = %v, original closed = %v", err, body.closed)
+	}
+}
+
+type closeTracker struct {
+	io.Reader
+	closed bool
+}
+
+func (c *closeTracker) Close() error {
+	c.closed = true
+	return nil
+}
+
+func TestGitLabDownloadTokenScope(t *testing.T) {
+	tests := []struct {
+		name   string
+		host   func(srvHost string) string
+		want   string
+		unsafe bool
+	}{
+		{"configured host gets PRIVATE-TOKEN", func(h string) string { return h }, "glpat-test", false},
+		{"other host gets no token", func(string) string { return "gitlab.com" }, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			var gotToken, gotAuth string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotToken = r.Header.Get("PRIVATE-TOKEN")
+				gotAuth = r.Header.Get("Authorization")
+				_, _ = w.Write([]byte("apk"))
+			}))
+			defer srv.Close()
+			t.Setenv("GITLAB_TOKEN", "glpat-test")
+			t.Setenv("GITHUB_TOKEN", "gh-test")
+			t.Setenv("GITLAB_HOST", tt.host(strings.TrimPrefix(srv.URL, "http://")))
+
+			g := &GitLab{}
+			asset := &Asset{Name: "app.apk", URL: srv.URL + "/app.apk"}
+			if _, err := g.Download(context.Background(), asset, t.TempDir(), nil); err != nil {
+				t.Fatalf("Download() error = %v", err)
+			}
+			if gotToken != tt.want {
+				t.Errorf("PRIVATE-TOKEN = %q, want %q", gotToken, tt.want)
+			}
+			if gotAuth != "" {
+				t.Errorf("Authorization = %q, want none for GitLab", gotAuth)
+			}
+		})
+	}
+}
+
+func TestGitLabAPIRequestsSendPrivateToken(t *testing.T) {
+	t.Chdir(t.TempDir())
+	var gotToken string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotToken = r.Header.Get("PRIVATE-TOKEN")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id": 7}`))
+	}))
+	defer srv.Close()
+	t.Setenv("GITLAB_TOKEN", "glpat-test")
+	t.Setenv("GITLAB_HOST", strings.TrimPrefix(srv.URL, "http://"))
+
+	g := &GitLab{baseURL: srv.URL, projectID: "owner%2Fapp", repoPath: "owner/app", client: srv.Client()}
+	if err := g.ensureNumericProjectID(t.Context()); err != nil {
+		t.Fatalf("ensureNumericProjectID() = %v", err)
+	}
+	if gotToken != "glpat-test" {
+		t.Errorf("PRIVATE-TOKEN = %q, want glpat-test", gotToken)
+	}
+}
+
+func TestGitLabNotFoundNamesProject(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	tests := []struct {
+		name string
+		call func(g *GitLab) error
+	}{
+		{"project lookup", func(g *GitLab) error { return g.ensureNumericProjectID(t.Context()) }},
+		{"release listing", func(g *GitLab) error {
+			g.numericProjectID = 7
+			_, err := g.FetchLatestRelease(t.Context())
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := &GitLab{baseURL: srv.URL, projectID: "owner%2Fapp", repoPath: "owner/app", client: srv.Client(), maxReleases: 5}
+			err := tt.call(g)
+			if err == nil || !strings.Contains(err.Error(), "owner/app") {
+				t.Fatalf("error = %v, want it to name owner/app", err)
+			}
+			var statusErr *HTTPStatusError
+			if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusNotFound {
+				t.Errorf("error = %v, want a 404 *HTTPStatusError", err)
+			}
+		})
+	}
+}
+
+func TestGitLabDownloadRejectsDigestMismatch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, "tampered")
+	}))
+	defer srv.Close()
+	g := &GitLab{}
+	asset := &Asset{Name: "app.apk", URL: srv.URL + "/app.apk", SHA256: strings.Repeat("0", 64)}
+	if _, err := g.Download(context.Background(), asset, t.TempDir(), nil); !errors.Is(err, ErrChecksumMismatch) {
+		t.Fatalf("Download() error = %v, want ErrChecksumMismatch", err)
+	}
 }

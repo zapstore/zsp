@@ -2,18 +2,18 @@ package source
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
-	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/internal/localpath"
 )
 
 const fastlaneMetadataPath = "fastlane/metadata/android"
@@ -22,14 +22,14 @@ func hasLocalFastlane(baseDir string) bool {
 	if baseDir == "" {
 		return false
 	}
-	info, err := os.Stat(filepath.Join(baseDir, fastlaneMetadataPath))
-	return err == nil && info.IsDir()
+	_, err := localpath.ReadDir(baseDir, fastlaneMetadataPath)
+	return err == nil
 }
 
 // errFastlaneUnavailable indicates that a repository does not contain Fastlane
 // metadata. It is distinct from a failed request so callers can safely select
 // the native repository metadata fallback only when Fastlane is absent.
-var errFastlaneUnavailable = errors.New("Fastlane metadata not found")
+var errFastlaneUnavailable = errors.New("fastlane metadata not found")
 
 type fastlaneEntry struct {
 	Name        string `json:"name"`
@@ -61,14 +61,20 @@ func (f *MetadataFetcher) fetchFastlaneMetadata(ctx context.Context) (*AppMetada
 	}
 }
 
+// fetchLocalFastlaneMetadata reads the Fastlane tree under the base directory.
+// Symlinked directories and files are not followed: a symlinked entry is
+// treated as absent, so a repository cannot point Fastlane at other files.
 func (f *MetadataFetcher) fetchLocalFastlaneMetadata() (*AppMetadata, error) {
-	root := filepath.Join(f.cfg.BaseDir, fastlaneMetadataPath)
-	locales, err := os.ReadDir(root)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("%w: %s", errFastlaneUnavailable, root)
+	baseDir, err := filepath.Abs(f.cfg.BaseDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve base directory: %w", err)
+	}
+	locales, err := localpath.ReadDir(baseDir, fastlaneMetadataPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("%w: %s", errFastlaneUnavailable, fastlaneMetadataPath)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read local Fastlane metadata: %w", err)
+		return nil, fmt.Errorf("read local fastlane metadata: %w", err)
 	}
 	var names []string
 	for _, locale := range locales {
@@ -80,7 +86,7 @@ func (f *MetadataFetcher) fetchLocalFastlaneMetadata() (*AppMetadata, error) {
 	if err != nil {
 		return nil, err
 	}
-	base := filepath.Join(root, locale)
+	localeDir := path.Join(fastlaneMetadataPath, locale)
 	meta := &AppMetadata{}
 	for _, field := range []struct {
 		name string
@@ -90,26 +96,34 @@ func (f *MetadataFetcher) fetchLocalFastlaneMetadata() (*AppMetadata, error) {
 		{"short_description.txt", func(value string) { meta.Summary = value }},
 		{"full_description.txt", func(value string) { meta.Description = value }},
 	} {
-		data, readErr := os.ReadFile(filepath.Join(base, field.name))
-		if errors.Is(readErr, os.ErrNotExist) {
+		data, readErr := localpath.ReadFile(baseDir, path.Join(localeDir, field.name), MaxRemoteDownloadSize)
+		if errors.Is(readErr, fs.ErrNotExist) || errors.Is(readErr, localpath.ErrRejected) {
 			continue
 		}
 		if readErr != nil {
-			return nil, fmt.Errorf("read local Fastlane %s: %w", field.name, readErr)
+			return nil, fmt.Errorf("read local fastlane %s: %w", field.name, readErr)
 		}
 		field.set(strings.TrimSpace(string(data)))
 	}
-	icon := filepath.Join(base, "images", "icon.png")
-	if info, statErr := os.Stat(icon); statErr == nil && !info.IsDir() {
-		meta.IconURL = icon
+
+	imagesDir := path.Join(localeDir, "images")
+	images, err := localpath.ReadDir(baseDir, imagesDir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, localpath.ErrRejected) {
+		return nil, fmt.Errorf("read local fastlane images: %w", err)
 	}
-	screenshots, globErr := filepath.Glob(filepath.Join(base, "images", "phoneScreenshots", "*"))
-	if globErr != nil {
-		return nil, fmt.Errorf("find local Fastlane screenshots: %w", globErr)
+	for _, entry := range images {
+		if entry.Name() == "icon.png" && entry.Type().IsRegular() {
+			meta.LocalIcon = filepath.Join(baseDir, filepath.FromSlash(imagesDir), entry.Name())
+		}
 	}
-	for _, screenshot := range screenshots {
-		if info, statErr := os.Stat(screenshot); statErr == nil && !info.IsDir() {
-			meta.ImageURLs = append(meta.ImageURLs, screenshot)
+	screenshotsDir := path.Join(imagesDir, "phoneScreenshots")
+	screenshots, err := localpath.ReadDir(baseDir, screenshotsDir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, localpath.ErrRejected) {
+		return nil, fmt.Errorf("read local fastlane screenshots: %w", err)
+	}
+	for _, entry := range screenshots {
+		if entry.Type().IsRegular() {
+			meta.LocalImages = append(meta.LocalImages, filepath.Join(baseDir, filepath.FromSlash(screenshotsDir), entry.Name()))
 		}
 	}
 	return meta, nil
@@ -148,36 +162,41 @@ func (f *MetadataFetcher) fetchGitHubFastlaneMetadata(ctx context.Context) (*App
 	}
 	mediaURL := func(entry fastlaneEntry) string { return entry.DownloadURL }
 
-	return f.buildFastlaneMetadata(ctx, basePath, textURL, listDirectory, mediaURL)
+	return f.buildFastlaneMetadata(ctx, config.SourceGitHub, basePath, textURL, listDirectory, mediaURL)
 }
 
 func (f *MetadataFetcher) githubContents(ctx context.Context, repoPath, path string) ([]fastlaneEntry, error) {
 	requestURL := fmt.Sprintf("https://api.github.com/repos/%s/contents/%s", repoPath, path)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	return f.fastlaneEntries(ctx, config.SourceGitHub, "GitHub Fastlane API", requestURL, path, "application/vnd.github+json")
+}
+
+// fastlaneEntries lists one Fastlane directory through a forge API. A 404 is
+// errFastlaneUnavailable; any other failure is a failed request.
+func (f *MetadataFetcher) fastlaneEntries(ctx context.Context, kind config.SourceType, service, requestURL, path, accept string) ([]fastlaneEntry, error) {
+	req, err := newForgeRequest(ctx, kind, requestURL)
 	if err != nil {
-		return nil, fmt.Errorf("creating GitHub Fastlane request: %w", err)
+		return nil, fmt.Errorf("create %s request: %w", service, err)
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	if token := config.GetEnv("GITHUB_TOKEN"); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	if accept != "" {
+		req.Header.Set("Accept", accept)
 	}
 
 	resp, err := f.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetching GitHub Fastlane directory: %w", err)
+		return nil, fmt.Errorf("fetch %s directory: %w", service, err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("%w: %s", errFastlaneUnavailable, path)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitHub Fastlane API error: %d", resp.StatusCode)
+	if err := checkHTTPStatus(resp, service); err != nil {
+		if isStatus(err, http.StatusNotFound) {
+			return nil, fmt.Errorf("%w: %s", errFastlaneUnavailable, path)
+		}
+		return nil, err
 	}
 
 	var entries []fastlaneEntry
-	if err := json.NewDecoder(io.LimitReader(resp.Body, MaxRemoteDownloadSize)).Decode(&entries); err != nil {
-		return nil, fmt.Errorf("parsing GitHub Fastlane directory: %w", err)
+	if err := decodeJSONResponse(resp, MaxJSONResponseSize, &entries); err != nil {
+		return nil, fmt.Errorf("parse %s directory: %w", service, err)
 	}
 	return entries, nil
 }
@@ -220,40 +239,14 @@ func (f *MetadataFetcher) fetchGiteaFastlaneMetadata(ctx context.Context) (*AppM
 	}
 	mediaURL := func(entry fastlaneEntry) string { return entry.DownloadURL }
 
-	return f.buildFastlaneMetadata(ctx, basePath, textURL, listDirectory, mediaURL)
+	return f.buildFastlaneMetadata(ctx, config.SourceGitea, basePath, textURL, listDirectory, mediaURL)
 }
 
 // giteaContents lists a directory via the Gitea/Forgejo contents API.
 // The response shape matches GitHub's contents API (name, path, type, download_url).
 func (f *MetadataFetcher) giteaContents(ctx context.Context, baseURL, owner, repo, path string) ([]fastlaneEntry, error) {
 	requestURL := fmt.Sprintf("%s/api/v1/repos/%s/%s/contents/%s", baseURL, owner, repo, path)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("creating Gitea Fastlane request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-	if token := config.GetEnv("GITEA_TOKEN"); token != "" {
-		req.Header.Set("Authorization", "token "+token)
-	}
-
-	resp, err := f.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetching Gitea Fastlane directory: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("%w: %s", errFastlaneUnavailable, path)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Gitea Fastlane API error: %d", resp.StatusCode)
-	}
-
-	var entries []fastlaneEntry
-	if err := json.NewDecoder(io.LimitReader(resp.Body, MaxRemoteDownloadSize)).Decode(&entries); err != nil {
-		return nil, fmt.Errorf("parsing Gitea Fastlane directory: %w", err)
-	}
-	return entries, nil
+	return f.fastlaneEntries(ctx, config.SourceGitea, "Gitea Fastlane API", requestURL, path, "application/json")
 }
 
 func (f *MetadataFetcher) fetchGitLabFastlaneMetadata(ctx context.Context) (*AppMetadata, error) {
@@ -292,35 +285,13 @@ func (f *MetadataFetcher) fetchGitLabFastlaneMetadata(ctx context.Context) (*App
 		return f.gitLabRawURL(baseURL, projectPath, entry.Path)
 	}
 
-	return f.buildFastlaneMetadata(ctx, basePath, textURL, listDirectory, mediaURL)
+	return f.buildFastlaneMetadata(ctx, config.SourceGitLab, basePath, textURL, listDirectory, mediaURL)
 }
 
 func (f *MetadataFetcher) gitLabTree(ctx context.Context, baseURL, projectPath, path string) ([]fastlaneEntry, error) {
 	requestURL := fmt.Sprintf("%s/api/v4/projects/%s/repository/tree?path=%s&per_page=100&ref=HEAD",
 		baseURL, projectPath, url.QueryEscape(path))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("creating GitLab Fastlane request: %w", err)
-	}
-
-	resp, err := f.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetching GitLab Fastlane directory: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("%w: %s", errFastlaneUnavailable, path)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitLab Fastlane API error: %d", resp.StatusCode)
-	}
-
-	var entries []fastlaneEntry
-	if err := json.NewDecoder(io.LimitReader(resp.Body, MaxRemoteDownloadSize)).Decode(&entries); err != nil {
-		return nil, fmt.Errorf("parsing GitLab Fastlane directory: %w", err)
-	}
-	return entries, nil
+	return f.fastlaneEntries(ctx, config.SourceGitLab, "GitLab Fastlane API", requestURL, path, "")
 }
 
 func (f *MetadataFetcher) gitLabRawURL(baseURL, projectPath, path string) string {
@@ -330,6 +301,7 @@ func (f *MetadataFetcher) gitLabRawURL(baseURL, projectPath, path string) string
 
 func (f *MetadataFetcher) buildFastlaneMetadata(
 	ctx context.Context,
+	kind config.SourceType,
 	basePath string,
 	textURL func(string) string,
 	listDirectory func(string) ([]fastlaneEntry, error),
@@ -346,7 +318,7 @@ func (f *MetadataFetcher) buildFastlaneMetadata(
 	}
 	for _, field := range fields {
 		if rawURL := textURL(field.name); rawURL != "" {
-			content, err := f.fetchFastlaneText(ctx, rawURL)
+			content, err := f.fetchFastlaneText(ctx, kind, rawURL)
 			if err != nil {
 				return nil, fmt.Errorf("fetching Fastlane %s: %w", field.name, err)
 			}
@@ -387,22 +359,25 @@ func (f *MetadataFetcher) buildFastlaneMetadata(
 	return meta, nil
 }
 
-func (f *MetadataFetcher) fetchFastlaneText(ctx context.Context, rawURL string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+// fetchFastlaneText fetches one metadata file. rawURL comes from the forge's
+// API response, so it is validated first; the forge token goes along only when
+// the file is served by that forge's own host.
+func (f *MetadataFetcher) fetchFastlaneText(ctx context.Context, kind config.SourceType, rawURL string) (string, error) {
+	req, err := newForgeRequest(ctx, kind, rawURL)
 	if err != nil {
-		return "", fmt.Errorf("creating Fastlane text request: %w", err)
+		return "", fmt.Errorf("create Fastlane text request: %w", err)
 	}
 	resp, err := f.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("fetching Fastlane text: %w", err)
+		return "", fmt.Errorf("fetch Fastlane text: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("Fastlane text request returned %d", resp.StatusCode)
+	if err := checkHTTPStatus(resp, "Fastlane text"); err != nil {
+		return "", err
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxRemoteDownloadSize))
+	body, err := readBounded(resp.Body, MaxRemoteDownloadSize)
 	if err != nil {
-		return "", fmt.Errorf("reading Fastlane text: %w", err)
+		return "", fmt.Errorf("read Fastlane text: %w", err)
 	}
 	return string(body), nil
 }

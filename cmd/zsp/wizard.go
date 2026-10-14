@@ -18,6 +18,7 @@ import (
 	gonostr "github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
 	"github.com/zapstore/zsp"
+	"github.com/zapstore/zsp/internal/apk"
 	"github.com/zapstore/zsp/internal/config"
 	"github.com/zapstore/zsp/internal/identity"
 	nostrpkg "github.com/zapstore/zsp/internal/nostr"
@@ -109,6 +110,11 @@ func runWizard(ctx context.Context) int {
 	listed := len(locations.ApplicationRelays) > 0
 	wizardRelayStatus(appName, locations)
 
+	certificate, err := selectedCertificate(ctx, selected)
+	if err != nil {
+		return wizardError("Identity setup stopped", err)
+	}
+
 	steps.StartStep("🔐 Prove it's yours")
 	spinner = ui.NewSpinner("Checking who has claimed " + appName + "...")
 	spinner.Start()
@@ -117,11 +123,11 @@ func runWizard(ctx context.Context) int {
 	if err != nil {
 		return wizardError("Identity setup stopped", fmt.Errorf("look up C1 proof: %w", err))
 	}
-	state := wizardExistingIdentity(proofs, selected.CertificateHash, appName)
+	state := wizardExistingIdentity(proofs, certificate, appName)
 	if state != nil {
 		ui.WritePanel(os.Stdout, "success", state.summary, state.details, nil)
 	} else {
-		state, err = wizardClaim(ctx, selected.CertificateHash, appName, proofs, listed)
+		state, err = wizardClaim(ctx, certificate, appName, proofs, listed)
 		if err != nil {
 			return wizardError("Identity setup stopped", err)
 		}
@@ -145,7 +151,7 @@ func runWizard(ctx context.Context) int {
 }
 
 func isWizardCancel(err error) bool {
-	return err == ui.ErrInterrupted || errors.Is(err, context.Canceled) || errors.Is(err, huh.ErrUserAborted)
+	return errors.Is(err, context.Canceled) || errors.Is(err, huh.ErrUserAborted)
 }
 
 // wizardContinuingNotes names the relays the wizard keeps using.
@@ -341,9 +347,9 @@ func wizardError(title string, err error) int {
 		ui.WritePanel(os.Stdout, "info", "Use your nsec from .env", nil, wizardNsecNotes())
 		return 0
 	}
-	if err == ui.ErrInterrupted || errors.Is(err, context.Canceled) || errors.Is(err, huh.ErrUserAborted) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, huh.ErrUserAborted) {
 		ui.PrintInfo(wizardCancellationSummary(title))
-		if err == ui.ErrInterrupted || errors.Is(err, context.Canceled) {
+		if errors.Is(err, context.Canceled) {
 			return 130
 		}
 		return 0
@@ -498,13 +504,13 @@ func (s *wizardIdentityState) certificateSigner() zsp.ProofSigner {
 
 // wizardCertificateKey uses hotbox when it is configured, else asks for the
 // keystore. With back, Esc on the keystore prompt returns ui.ErrBack.
-func wizardCertificateKey(state *wizardIdentityState, description string, back bool) error {
+func wizardCertificateKey(ctx context.Context, state *wizardIdentityState, description string, back bool) error {
 	if hotbox := hotboxProofSigner(); hotbox != nil {
 		state.hotbox = hotbox
 		ui.PrintInfo("Hotbox signs the proof; no keystore needed.")
 		return nil
 	}
-	privateKey, certificate, err := wizardKeystore(state.certificateHash, description, back)
+	privateKey, certificate, err := wizardKeystore(ctx, state.certificateHash, description, back)
 	if err != nil {
 		return err
 	}
@@ -515,10 +521,10 @@ func wizardCertificateKey(state *wizardIdentityState, description string, back b
 // wizardClaim gets the certificate key and a signer, then creates or renews
 // the proof. A listed app gets the proof now; for an app not yet listed it
 // goes with the first release.
-func wizardClaim(ctx context.Context, certificateHash, appName string, proofs []*gonostr.Event, listed bool) (*wizardIdentityState, error) {
-	state := &wizardIdentityState{certificateHash: certificateHash}
+func wizardClaim(ctx context.Context, certificate *x509.Certificate, appName string, proofs []*gonostr.Event, listed bool) (*wizardIdentityState, error) {
+	state := &wizardIdentityState{certificateHash: identity.ComputeCertHash(certificate)}
 	description := "Zapstore checks that the key that signed " + appName + " belongs to you.\nNot the developer? Press Ctrl-C to quit. Nothing was changed."
-	if err := wizardCertificateKey(state, description, false); err != nil {
+	if err := wizardCertificateKey(ctx, state, description, false); err != nil {
 		return nil, err
 	}
 	signer, err := wizardSigner(ctx)
@@ -530,7 +536,7 @@ func wizardClaim(ctx context.Context, certificateHash, appName string, proofs []
 		state.proofPending = true
 		return state, nil
 	}
-	event, _ := activeProofForCertificateHash(proofs, certificateHash)
+	event, _ := activeProofForCertificate(proofs, certificate, time.Now())
 	delegate := proofDelegate(event)
 	spinner := ui.NewSpinner("Publishing your proof...")
 	spinner.Start()
@@ -586,12 +592,14 @@ func publishWizardProof(ctx context.Context, state *wizardIdentityState, delegat
 
 // wizardKeystore asks for the signing keystore and returns its key and
 // certificate once the pair is valid and matches the APK certificate.
-func wizardKeystore(expectedCertificateHash, description string, back bool) (crypto.PrivateKey, *x509.Certificate, error) {
-	prompt := ui.PromptPath
+func wizardKeystore(ctx context.Context, expectedCertificateHash, description string, back bool) (crypto.PrivateKey, *x509.Certificate, error) {
+	var keystore string
+	var err error
 	if back {
-		prompt = ui.PromptPathBack
+		keystore, err = ui.PromptPathBack(ctx, "Signing keystore", description, true)
+	} else {
+		keystore, err = ui.PromptPath("Signing keystore", description, true)
 	}
-	keystore, err := prompt("Signing keystore", description, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -613,13 +621,13 @@ func wizardKeystore(expectedCertificateHash, description string, back bool) (cry
 	return privateKey, certificate, nil
 }
 
-func wizardExistingIdentity(proofs []*gonostr.Event, certificateHash, appName string) *wizardIdentityState {
-	event, proof := activeProofForCertificateHash(proofs, certificateHash)
+func wizardExistingIdentity(proofs []*gonostr.Event, certificate *x509.Certificate, appName string) *wizardIdentityState {
+	event, proof := activeProofForCertificate(proofs, certificate, time.Now())
 	if event == nil || time.Until(proof.ExpiryTime()) < c1RenewalWindow {
 		return nil
 	}
 	return &wizardIdentityState{
-		certificateHash: certificateHash,
+		certificateHash: identity.ComputeCertHash(certificate),
 		owner:           event.PubKey,
 		delegate:        proofDelegate(event),
 		summary:         appName + " is claimed by " + abbreviateHash(npubFromHex(event.PubKey)),
@@ -669,28 +677,36 @@ func npubFromHex(owner string) string {
 	return npub
 }
 
-// activeProofForCertificateHash finds a current, signed C1 proof whose d tag
-// matches the APK certificate hash.
-func activeProofForCertificateHash(events []*gonostr.Event, certificateHash string) (*gonostr.Event, *identity.IdentityProof) {
-	now := time.Now()
+// activeProofForCertificate returns the newest C1 proof that is active at now
+// for the APK's signing certificate: signed by its Nostr key, certificate
+// signature verified, neither expired nor revoked.
+func activeProofForCertificate(events []*gonostr.Event, certificate *x509.Certificate, now time.Time) (*gonostr.Event, *identity.IdentityProof) {
+	var active *gonostr.Event
+	var activeProof *identity.IdentityProof
 	for _, event := range events {
-		if event == nil || event.Content != "" {
+		proof, err := identity.ValidateActiveProofEvent(event, certificate, now)
+		if err != nil {
 			continue
 		}
-		signed, err := event.CheckSignature()
-		if err != nil || !signed {
-			continue
+		if active == nil || event.CreatedAt > active.CreatedAt ||
+			(event.CreatedAt == active.CreatedAt && event.ID < active.ID) {
+			active, activeProof = event, proof
 		}
-		proof, err := identity.ParseIdentityProofFromEvent(event)
-		if err != nil || proof.CertHash != certificateHash || proof.Expiry <= int64(event.CreatedAt) || !proof.ExpiryTime().After(now) {
-			continue
-		}
-		if revoked, _ := identity.IsRevoked(event); revoked {
-			continue
-		}
-		return event, proof
 	}
-	return nil, nil
+	return active, activeProof
+}
+
+// selectedCertificate returns the signing certificate of the chosen APK.
+func selectedCertificate(ctx context.Context, selected *zsp.APK) (*x509.Certificate, error) {
+	path, err := selected.Path()
+	if err != nil {
+		return nil, fmt.Errorf("locate APK: %w", err)
+	}
+	certificate, err := apk.ExtractCertificate(ctx, path)
+	if err != nil {
+		return nil, fmt.Errorf("read APK signing certificate: %w", err)
+	}
+	return certificate, nil
 }
 
 func proofDelegate(event *gonostr.Event) string {
@@ -712,7 +728,10 @@ const (
 // wizardSigner returns the SIGN_WITH signer, else asks for a bunker. It never
 // takes a pasted nsec: choosing nsec returns errNsecSetup.
 func wizardSigner(ctx context.Context) (nostrpkg.Signer, error) {
-	signWith := config.GetSignWith()
+	signWith, err := config.GetSignWith()
+	if err != nil {
+		return nil, err
+	}
 	for signWith == "" {
 		kind, err := ui.SelectField("Nostr signer", "Your listing is signed with your Nostr key. A remote signer (bunker) keeps that key off this machine.", []string{signerBunker, signerNsec})
 		if err != nil {
@@ -722,7 +741,7 @@ func wizardSigner(ctx context.Context) (nostrpkg.Signer, error) {
 			return nil, errNsecSetup
 		}
 		// The bunker URL carries a NIP-46 secret; never echo it to the terminal.
-		value, err := ui.PromptFieldBack("Bunker URL", "Paste the bunker:// connection from your signer app. Esc goes back.", true, true)
+		value, err := ui.PromptFieldBack(ctx, "Bunker URL", "Paste the bunker:// connection from your signer app. Esc goes back.", true, true)
 		if errors.Is(err, ui.ErrBack) {
 			continue
 		}
@@ -733,7 +752,7 @@ func wizardSigner(ctx context.Context) (nostrpkg.Signer, error) {
 			ui.PrintInfo("That isn't a bunker:// URL. Try again.")
 			continue
 		}
-		save, err := ui.ConfirmBack("Save this bunker URL to .env?", "So zsp doesn't ask next time. .env stays owner-readable and out of Git.", true)
+		save, err := ui.ConfirmBack(ctx, "Save this bunker URL to .env?", "So zsp doesn't ask next time. .env stays owner-readable and out of Git.", true)
 		if errors.Is(err, ui.ErrBack) {
 			continue
 		}
@@ -852,7 +871,7 @@ func wizardNextReleaseChoices(zapstore bool) []string {
 // reports back when the developer pressed Esc on its first prompt.
 func wizardDelegation(ctx context.Context, state *wizardIdentityState, appName string) (int, bool) {
 	for {
-		value, err := ui.PromptFieldBack("CI public key (npub)", "Create a separate Nostr key for your CI and paste its npub here. The nsec never leaves your CI: store it there as the SIGN_WITH secret. Your proof names this key as your delegate, so it can publish releases of "+appName+" but can't change who owns it. To rotate it, run zsp again and name a new key: the new proof replaces the old one. Esc goes back.", false, true)
+		value, err := ui.PromptFieldBack(ctx, "CI public key (npub)", "Create a separate Nostr key for your CI and paste its npub here. The nsec never leaves your CI: store it there as the SIGN_WITH secret. Your proof names this key as your delegate, so it can publish releases of "+appName+" but can't change who owns it. To rotate it, run zsp again and name a new key: the new proof replaces the old one. Esc goes back.", false, true)
 		if errors.Is(err, ui.ErrBack) {
 			return 0, true
 		}
@@ -865,7 +884,7 @@ func wizardDelegation(ctx context.Context, state *wizardIdentityState, appName s
 			continue
 		}
 		if !state.hasCertificateKey() {
-			err := wizardCertificateKey(state, "Choose the keystore that signed "+appName+". Esc goes back.", true)
+			err := wizardCertificateKey(ctx, state, "Choose the keystore that signed "+appName+". Esc goes back.", true)
 			if errors.Is(err, ui.ErrBack) {
 				continue
 			}

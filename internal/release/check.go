@@ -1,4 +1,4 @@
-package zsp
+package release
 
 import (
 	"context"
@@ -55,13 +55,17 @@ func Check(ctx context.Context, config PublishConfig, candidate *APK, options Ch
 		return nil, err
 	}
 	verified := candidate.verified
-	certificate, err := apk.ExtractCertificate(path)
+	certificate, err := apk.ExtractCertificate(ctx, path)
 	if err != nil {
 		return nil, wrapOperationError(ErrInvalidAPK, err, false, "extract signing certificate"+causeDetail(err))
 	}
 	result := &CheckResult{AppID: verified.appID, CertificateHash: verified.certificateHash}
 
-	if signWith := internalconfig.GetSignWith(); signWith != "" {
+	signWith, err := internalconfig.GetSignWith()
+	if err != nil {
+		return nil, wrapOperationError(ErrInvalidConfig, err, false, "read SIGN_WITH"+causeDetail(err))
+	}
+	if signWith != "" {
 		signer, signerErr := internalnostr.NewSigner(ctx, signWith)
 		if signerErr != nil {
 			if contextErr := contextOperationError(signerErr, "create signer"); contextErr != nil {

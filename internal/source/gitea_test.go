@@ -5,39 +5,53 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
-
-	"github.com/zapstore/zsp/internal/config"
 )
 
 // TestGiteaDownloadSendsTokenHeader confirms Gitea's Download method routes
-// through the shared DownloadHTTP pipeline while still attaching the
-// configured token as a Gitea-style Authorization header.
+// through the shared download pipeline while attaching the configured token
+// as a Gitea-style Authorization header, but only to GITEA_HOST.
 func TestGiteaDownloadSendsTokenHeader(t *testing.T) {
-	var gotAuth string
 	payload := []byte("apk-bytes-ok")
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		_, _ = w.Write(payload)
-	}))
-	defer srv.Close()
+	tests := []struct {
+		name      string
+		giteaHost func(srvHost string) string
+		wantAuth  string
+	}{
+		{"configured host gets the token", func(host string) string { return host }, "token test-token"},
+		{"other host gets no token", func(string) string { return "codeberg.org" }, ""},
+		{"host with a matching name hint gets no token", func(string) string { return "gitea.example.com" }, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			var gotAuth string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotAuth = r.Header.Get("Authorization")
+				_, _ = w.Write(payload)
+			}))
+			defer srv.Close()
+			t.Setenv("GITEA_TOKEN", "test-token")
+			t.Setenv("GITEA_HOST", tt.giteaHost(strings.TrimPrefix(srv.URL, "http://")))
 
-	g := &Gitea{token: "test-token"}
-	asset := &Asset{Name: "app.apk", URL: srv.URL + "/app.apk"}
-
-	path, err := g.Download(context.Background(), asset, t.TempDir(), nil)
-	if err != nil {
-		t.Fatalf("Download() error = %v", err)
-	}
-	if gotAuth != "token test-token" {
-		t.Fatalf("Authorization header = %q, want %q", gotAuth, "token test-token")
-	}
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	if string(got) != string(payload) {
-		t.Fatalf("downloaded %q, want %q", got, payload)
+			g := &Gitea{}
+			asset := &Asset{Name: "app.apk", URL: srv.URL + "/app.apk"}
+			path, err := g.Download(context.Background(), asset, t.TempDir(), nil)
+			if err != nil {
+				t.Fatalf("Download() error = %v", err)
+			}
+			if gotAuth != tt.wantAuth {
+				t.Fatalf("Authorization header = %q, want %q", gotAuth, tt.wantAuth)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("ReadFile: %v", err)
+			}
+			if string(got) != string(payload) {
+				t.Fatalf("downloaded %q, want %q", got, payload)
+			}
+		})
 	}
 }
 
@@ -51,7 +65,6 @@ func TestGiteaFetchUsesMaxReleases(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	gitea := &Gitea{
-		cfg:         &config.Config{},
 		baseURL:     srv.URL,
 		owner:       "owner",
 		repo:        "repo",

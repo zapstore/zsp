@@ -1,8 +1,10 @@
 package ui
 
 import (
+	"context"
 	"errors"
 	"os"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
@@ -39,16 +41,13 @@ func (m *escForm) View() string {
 	return m.form.View()
 }
 
-// runForm runs form. With back, Esc ends it with ErrBack; without, Esc does
-// nothing, as in Huh.
-func runForm(form *huh.Form, back bool) error {
-	if !back {
-		return form.Run()
-	}
+// runBackForm runs form with Esc ending it with ErrBack. Cancelling ctx ends
+// the form.
+func runBackForm(ctx context.Context, form *huh.Form) error {
 	form.SubmitCmd = tea.Quit
 	form.CancelCmd = tea.Interrupt
 	model := &escForm{form: form}
-	_, err := tea.NewProgram(model, tea.WithOutput(os.Stderr), tea.WithReportFocus(), tea.WithContext(GetContext())).Run()
+	_, err := tea.NewProgram(model, tea.WithOutput(os.Stderr), tea.WithReportFocus(), tea.WithContext(ctx)).Run()
 	if model.back {
 		return ErrBack
 	}
@@ -58,30 +57,44 @@ func runForm(form *huh.Form, back bool) error {
 	return err
 }
 
-// SelectFieldBack is SelectField where Esc returns ErrBack.
-func SelectFieldBack(title, description string, values []string) (string, error) {
-	var selected string
-	options := make([]huh.Option[string], len(values))
-	for i, value := range values {
-		options[i] = huh.NewOption(value, value)
+// PromptFieldBack is PromptField where Esc returns ErrBack. Cancelling ctx
+// ends the prompt.
+func PromptFieldBack(ctx context.Context, title, description string, secret, required bool) (string, error) {
+	form, value := fieldForm(title, description, secret, required)
+	if err := runBackForm(ctx, form); err != nil {
+		return "", err
 	}
-	err := runForm(huh.NewForm(huh.NewGroup(
-		huh.NewSelect[string]().Title(title).Description(description).Options(options...).Value(&selected),
-	)), true)
-	return selected, err
+	return strings.TrimSpace(*value), nil
 }
 
-// PromptFieldBack is PromptField where Esc returns ErrBack.
-func PromptFieldBack(title, description string, secret, required bool) (string, error) {
-	return promptField(title, description, "", secret, required, true)
+// PromptPathBack is PromptPath where Esc returns ErrBack. Cancelling ctx ends
+// the prompt.
+func PromptPathBack(ctx context.Context, title, description string, required bool) (string, error) {
+	form, value := pathForm(title, description, "", required)
+	if err := runBackForm(ctx, form); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(*value), nil
 }
 
-// PromptPathBack is PromptPath where Esc returns ErrBack.
-func PromptPathBack(title, description string, required bool) (string, error) {
-	return promptPath(title, description, "", required, true)
-}
-
-// ConfirmBack is Confirm where Esc returns ErrBack.
-func ConfirmBack(title, description string, defaultYes bool) (bool, error) {
-	return confirm(title, description, defaultYes, true)
+// ConfirmBack asks a yes/no question where Esc returns ErrBack. Cancelling ctx
+// ends the prompt.
+func ConfirmBack(ctx context.Context, title, description string, defaultYes bool) (bool, error) {
+	value := defaultYes
+	input := huh.NewSelect[bool]().
+		Title(title).
+		Options(
+			huh.NewOption("Yes", true),
+			huh.NewOption("No", false),
+		).
+		Value(&value)
+	if description != "" {
+		input = input.Description(description)
+	}
+	keymap := huh.NewDefaultKeyMap()
+	keymap.Select.Filter.SetEnabled(false)
+	if err := runBackForm(ctx, huh.NewForm(huh.NewGroup(input)).WithKeyMap(keymap)); err != nil {
+		return false, err
+	}
+	return value, nil
 }

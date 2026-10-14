@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -28,11 +27,11 @@ type githubCache struct {
 
 // GitHub implements Source for GitHub releases.
 type GitHub struct {
-	cfg                *config.Config
 	owner              string
 	repo               string
-	token              string
 	client             *http.Client
+	downloadClient     *http.Client
+	filter             *releaseFilter
 	cacheDir           string
 	apiBase            string
 	SkipHTTPCache      bool // Set to true to bypass ETag checks
@@ -43,6 +42,10 @@ type GitHub struct {
 
 // NewGitHub creates a new GitHub source.
 func NewGitHub(cfg *config.Config) (*GitHub, error) {
+	return newGitHub(cfg, Options{})
+}
+
+func newGitHub(cfg *config.Config, opts Options) (*GitHub, error) {
 	url := cfg.GetAPKSourceURL()
 	repoPath := config.GetGitHubRepo(url)
 	if repoPath == "" {
@@ -53,14 +56,19 @@ func NewGitHub(cfg *config.Config) (*GitHub, error) {
 	if len(parts) != 2 {
 		return nil, fmt.Errorf("invalid GitHub repo path: %s", repoPath)
 	}
+	filter, err := newReleaseFilter(cfg.ReleaseFilter)
+	if err != nil {
+		return nil, err
+	}
 
+	tor := opts.tor()
 	return &GitHub{
-		cfg:      cfg,
-		owner:    parts[0],
-		repo:     parts[1],
-		token:    config.GetEnv("GITHUB_TOKEN"),
-		client:   newSecureHTTPClient(30 * time.Second),
-		cacheDir: sourceCacheDir("github"),
+		owner:          parts[0],
+		repo:           parts[1],
+		client:         newSecureHTTPClient(30*time.Second, tor),
+		downloadClient: newDownloadHTTPClient(tor),
+		filter:         filter,
+		cacheDir:       sourceCacheDir(opts.CacheDir, "github"),
 	}, nil
 }
 
@@ -87,6 +95,7 @@ type githubAsset struct {
 	Size               int64  `json:"size"`
 	BrowserDownloadURL string `json:"browser_download_url"`
 	ContentType        string `json:"content_type"`
+	Digest             string `json:"digest"` // "sha256:<hex>" when GitHub computed one
 }
 
 func (g *GitHub) cacheFilePath() string {
@@ -146,12 +155,26 @@ func (g *GitHub) apiURL(format string, args ...any) string {
 	return base + fmt.Sprintf(format, args...)
 }
 
-func (g *GitHub) setGitHubHeaders(req *http.Request) {
+// newAPIRequest builds a GitHub API request with GitHub's headers and, when
+// the target is a GitHub host, the token.
+func (g *GitHub) newAPIRequest(ctx context.Context, rawURL string) (*http.Request, error) {
+	req, err := newForgeRequest(ctx, config.SourceGitHub, rawURL)
+	if err != nil {
+		return nil, err
+	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	if g.token != "" {
-		req.Header.Set("Authorization", "Bearer "+g.token)
+	return req, nil
+}
+
+// checkStatus turns a non-200 API response into an error that names the
+// repository on 404 and says how to raise a rate limit when unauthenticated.
+func (g *GitHub) checkStatus(resp *http.Response) error {
+	err := checkHTTPStatus(resp, "GitHub API")
+	if resp.Request != nil && resp.Request.Header.Get("Authorization") == "" {
+		err = withHint(err, "set GITHUB_TOKEN to raise the limit")
 	}
+	return describeNotFound(err, fmt.Sprintf("no releases found for %s/%s", g.owner, g.repo))
 }
 
 // FetchLatestRelease fetches the latest release from GitHub that contains valid APKs.
@@ -173,11 +196,10 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		return g.fetchLatestFromList(ctx)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", g.apiURL("/repos/%s/%s/releases/latest", g.owner, g.repo), nil)
+	req, err := g.newAPIRequest(ctx, g.apiURL("/repos/%s/%s/releases/latest", g.owner, g.repo))
 	if err != nil {
 		return nil, err
 	}
-	g.setGitHubHeaders(req)
 	var cache *githubCache
 	if !g.SkipHTTPCache {
 		cache = g.loadCache()
@@ -188,34 +210,25 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 
 	resp, err := g.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch latest release: %w", err)
+		return nil, fmt.Errorf("fetch latest release: %w", err)
 	}
 	defer resp.Body.Close()
 
-	switch resp.StatusCode {
-	case http.StatusNotModified:
+	if resp.StatusCode == http.StatusNotModified {
 		return nil, ErrNotModified
-	case http.StatusNotFound:
-		return nil, fmt.Errorf("no releases found for %s/%s", g.owner, g.repo)
-	case http.StatusForbidden:
-		if resp.Header.Get("X-RateLimit-Remaining") == "0" {
-			return nil, fmt.Errorf("GitHub API rate limit exceeded. Set GITHUB_TOKEN environment variable to increase limits")
-		}
-		return nil, fmt.Errorf("GitHub API access forbidden")
-	case http.StatusOK:
-		// handled below
-	default:
-		return nil, fmt.Errorf("GitHub API error (status %d)", resp.StatusCode)
+	}
+	if err := g.checkStatus(resp); err != nil {
+		return nil, err
 	}
 
 	var ghRelease githubRelease
 	if err := decodeJSONResponse(resp, MaxJSONResponseSize, &ghRelease); err != nil {
-		return nil, fmt.Errorf("failed to parse latest release: %w", err)
+		return nil, fmt.Errorf("parse latest release: %w", err)
 	}
 
 	// Use the fast-path result if it qualifies: not a draft, not an unwanted pre-release,
 	// matches release filter, and actually contains a valid APK.
-	if !ghRelease.Draft && !(ghRelease.Prerelease && !g.IncludePreReleases) && g.matchesReleaseFilter(ghRelease.TagName, ghRelease.Name) {
+	if !ghRelease.Draft && !(ghRelease.Prerelease && !g.IncludePreReleases) && g.filter.matches(ghRelease.TagName, ghRelease.Name) {
 		release := g.convertRelease(&ghRelease)
 		if HasValidAPKs(release.Assets) {
 			fingerprint := releaseFingerprint(&ghRelease)
@@ -242,34 +255,24 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 // (e.g. repos that publish separate desktop and mobile releases).
 func (g *GitHub) fetchLatestFromList(ctx context.Context) (*Release, error) {
 	limit := releaseScanLimit(g.maxReleases)
-	req, err := http.NewRequestWithContext(ctx, "GET", g.apiURL("/repos/%s/%s/releases?per_page=%d", g.owner, g.repo, limit), nil)
+	req, err := g.newAPIRequest(ctx, g.apiURL("/repos/%s/%s/releases?per_page=%d", g.owner, g.repo, limit))
 	if err != nil {
 		return nil, err
 	}
-	g.setGitHubHeaders(req)
 
 	resp, err := g.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch releases: %w", err)
+		return nil, fmt.Errorf("fetch releases: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("no releases found for %s/%s", g.owner, g.repo)
-	}
-	if resp.StatusCode == http.StatusForbidden {
-		if resp.Header.Get("X-RateLimit-Remaining") == "0" {
-			return nil, fmt.Errorf("GitHub API rate limit exceeded. Set GITHUB_TOKEN environment variable to increase limits")
-		}
-		return nil, fmt.Errorf("GitHub API access forbidden")
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitHub API error (status %d)", resp.StatusCode)
+	if err := g.checkStatus(resp); err != nil {
+		return nil, err
 	}
 
 	var releases []githubRelease
 	if err := decodeJSONResponse(resp, MaxJSONResponseSize, &releases); err != nil {
-		return nil, fmt.Errorf("failed to parse releases: %w", err)
+		return nil, fmt.Errorf("parse releases: %w", err)
 	}
 
 	if len(releases) == 0 {
@@ -281,7 +284,7 @@ func (g *GitHub) fetchLatestFromList(ctx context.Context) (*Release, error) {
 		if ghRelease.Draft || (ghRelease.Prerelease && !g.IncludePreReleases) {
 			continue
 		}
-		if !g.matchesReleaseFilter(ghRelease.TagName, ghRelease.Name) {
+		if !g.filter.matches(ghRelease.TagName, ghRelease.Name) {
 			continue
 		}
 		release := g.convertRelease(ghRelease)
@@ -295,8 +298,8 @@ func (g *GitHub) fetchLatestFromList(ctx context.Context) (*Release, error) {
 
 // releaseFingerprint hashes the release fields zsp consumes, so an ETag that
 // moved only because of volatile fields still detects as unchanged. An asset
-// replaced in place with identical metadata is not detectable; SkipHTTPCache
-// covers that case.
+// replaced in place with identical metadata and no digest is not detectable;
+// SkipHTTPCache covers that case.
 func releaseFingerprint(release *githubRelease) string {
 	assets := slices.Clone(release.Assets)
 	slices.SortFunc(assets, func(a, b githubAsset) int {
@@ -330,39 +333,27 @@ func (g *GitHub) convertRelease(ghRelease *githubRelease) *Release {
 			Name:        a.Name,
 			URL:         a.BrowserDownloadURL,
 			Size:        a.Size,
+			SHA256:      normalizeSHA256(a.Digest),
 			ContentType: a.ContentType,
 		})
 	}
 
-	// Extract version from tag name (strip leading 'v' if present)
-	version := ghRelease.TagName
-	if strings.HasPrefix(version, "v") {
-		version = version[1:]
-	}
-
-	// Parse release date from published_at (RFC 3339 format)
-	var createdAt time.Time
-	if ghRelease.PublishedAt != "" {
-		if t, err := time.Parse(time.RFC3339, ghRelease.PublishedAt); err == nil {
-			createdAt = t
-		}
-	}
-
 	return &Release{
-		Version:    version,
+		Version:    versionFromTag(ghRelease.TagName),
 		TagName:    ghRelease.TagName,
 		Name:       ghRelease.Name,
 		Changelog:  ghRelease.Body,
 		Assets:     assets,
 		PreRelease: ghRelease.Prerelease,
 		URL:        ghRelease.HTMLURL,
-		CreatedAt:  createdAt,
+		CreatedAt:  parseReleaseTime(ghRelease.PublishedAt),
 	}
 }
 
 // Download downloads an asset from GitHub, using the shared DownloadHTTP
 // pipeline (size limit, redirect validation, stall detection, bounded
-// retries) with GitHub's bearer token attached when configured.
+// retries, digest check) with GitHub's bearer token attached when the asset
+// is hosted on a GitHub host.
 func (g *GitHub) Download(ctx context.Context, asset *Asset, destDir string, progress DownloadProgress) (string, error) {
 	if asset.URL == "" {
 		return "", fmt.Errorf("asset has no download URL")
@@ -373,35 +364,11 @@ func (g *GitHub) Download(ctx context.Context, asset *Asset, destDir string, pro
 		return "", err
 	}
 
-	var headers map[string]string
-	if g.token != "" {
-		headers = map[string]string{"Authorization": "Bearer " + g.token}
-	}
-
-	if err := DownloadHTTP(ctx, asset.URL, destPath, asset.Size, headers, progress); err != nil {
+	headers := forgeAuthHeaders(config.SourceGitHub, asset.URL)
+	if err := downloadHTTP(ctx, g.downloadClient, asset.URL, destPath, asset.Size, asset.SHA256, headers, progress); err != nil {
 		return "", err
 	}
 
 	asset.LocalPath = destPath
 	return destPath, nil
-}
-
-// matchesReleaseFilter checks whether a release tag or name matches the filter.
-func (g *GitHub) matchesReleaseFilter(tagName string, names ...string) bool {
-	if g.cfg.ReleaseFilter == "" {
-		return true
-	}
-	re, err := regexp.Compile(g.cfg.ReleaseFilter)
-	if err != nil {
-		return false
-	}
-	if re.MatchString(tagName) {
-		return true
-	}
-	for _, name := range names {
-		if re.MatchString(name) {
-			return true
-		}
-	}
-	return false
 }

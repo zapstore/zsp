@@ -2,32 +2,42 @@
 package source
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"os"
-	"path/filepath"
+	neturl "net/url"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/zapstore/zsp/internal/config"
 	"github.com/zapstore/zsp/internal/sanitize"
+	"github.com/zapstore/zsp/internal/spdx"
 	"gopkg.in/yaml.v3"
 )
 
-// AppMetadata contains enriched app metadata from external sources.
+// AppMetadata contains enriched app metadata from one external source.
 type AppMetadata struct {
+	// Source is the name of the metadata source that produced this value.
+	Source      string
 	Name        string
 	Description string
 	Summary     string
 	Website     string
 	License     string
 	Tags        []string
-	ImageURLs   []string
-	IconURL     string // URL to app icon (from Play Store or F-Droid)
+	// ImageURLs and IconURL are remote locations. A remote source is untrusted,
+	// so whoever consumes them must apply the URL policy.
+	ImageURLs []string
+	IconURL   string
+	// LocalIcon and LocalImages are absolute paths inside the config's base
+	// directory. Only the local Fastlane loader sets them; they are paths to
+	// open with the localpath package, never to trust.
+	LocalIcon   string
+	LocalImages []string
 }
 
 // MetadataFetcher fetches metadata from external sources.
@@ -35,20 +45,13 @@ type MetadataFetcher struct {
 	cfg       *config.Config
 	client    *http.Client
 	PackageID string // App package ID (e.g., "com.example.app") - set from APK parsing
-	APKName   string // App name from APK - takes priority over metadata sources
-
-	// iconCandidates and imageSets keep every metadata source's media, in source
-	// order. The publish icon tries the APK first, then these URLs. Screenshots
-	// use the first set that yields a usable image.
-	iconCandidates []string
-	imageSets      [][]string
 }
 
 // NewMetadataFetcher creates a new metadata fetcher.
 func NewMetadataFetcher(cfg *config.Config) *MetadataFetcher {
 	return &MetadataFetcher{
 		cfg:    cfg,
-		client: newSecureHTTPClient(30 * time.Second),
+		client: newSecureHTTPClient(30*time.Second, nil),
 	}
 }
 
@@ -56,7 +59,7 @@ func NewMetadataFetcher(cfg *config.Config) *MetadataFetcher {
 func NewMetadataFetcherWithPackageID(cfg *config.Config, packageID string) *MetadataFetcher {
 	return &MetadataFetcher{
 		cfg:       cfg,
-		client:    newSecureHTTPClient(30 * time.Second),
+		client:    newSecureHTTPClient(30*time.Second, nil),
 		PackageID: packageID,
 	}
 }
@@ -77,41 +80,44 @@ func repositoryMetadataHost(cfg *config.Config) config.SourceType {
 	return config.SourceUnknown
 }
 
-// DefaultMetadataSources returns explicitly configured sources, or the
-// Fastlane-first fallback chain for a supported repository. Automatic metadata
-// does not infer F-Droid or Play Store sources.
-func DefaultMetadataSources(cfg *config.Config) []string {
-	var sources []string
-	seen := make(map[string]bool)
+// MetadataPlan lists the metadata sources to query. It is explicit unless
+// Automatic is set; an automatic plan starts with Fastlane and queries the
+// sources after it only when Fastlane is missing, has no description, or
+// could not be read.
+type MetadataPlan struct {
+	Sources   []string
+	Automatic bool
+}
 
-	// Helper to add source without duplicates
-	addSource := func(s string) {
-		if s != "" && !seen[s] {
-			seen[s] = true
-			sources = append(sources, s)
+// PlanMetadata returns the sources cfg selects. A non-nil MetadataSources
+// is an explicit list, and an empty one disables metadata. A nil one is
+// automatic: Fastlane first, then the native source of a GitHub or GitLab
+// repository. Gitea uses Fastlane only, and a local Fastlane tree is used
+// without a repository. Automatic metadata never infers F-Droid or Play Store.
+func PlanMetadata(cfg *config.Config) MetadataPlan {
+	if cfg.MetadataSources != nil {
+		var sources []string
+		for _, name := range cfg.MetadataSources {
+			name = strings.ToLower(strings.TrimSpace(name))
+			if name != "" && !slices.Contains(sources, name) {
+				sources = append(sources, name)
+			}
 		}
-	}
-
-	if len(cfg.MetadataSources) > 0 {
-		for _, s := range cfg.MetadataSources {
-			addSource(strings.ToLower(strings.TrimSpace(s)))
-		}
-		return sources
+		return MetadataPlan{Sources: sources}
 	}
 
 	switch repositoryMetadataHost(cfg) {
 	case config.SourceGitHub:
-		return []string{"fastlane", "github"}
+		return MetadataPlan{Sources: []string{"fastlane", "github"}, Automatic: true}
 	case config.SourceGitLab:
-		return []string{"fastlane", "gitlab"}
+		return MetadataPlan{Sources: []string{"fastlane", "gitlab"}, Automatic: true}
 	case config.SourceGitea:
-		// No native Gitea repo-metadata source yet — Fastlane only.
-		return []string{"fastlane"}
+		return MetadataPlan{Sources: []string{"fastlane"}, Automatic: true}
 	default:
 		if hasLocalFastlane(cfg.BaseDir) {
-			return []string{"fastlane"}
+			return MetadataPlan{Sources: []string{"fastlane"}, Automatic: true}
 		}
-		return nil
+		return MetadataPlan{}
 	}
 }
 
@@ -123,13 +129,17 @@ type MetadataError struct {
 
 func (e *MetadataError) Error() string {
 	if e.Err == nil {
-		return fmt.Sprintf("failed to fetch %s metadata", e.Source)
+		return fmt.Sprintf("fetch %s metadata", e.Source)
 	}
-	return fmt.Sprintf("failed to fetch %s metadata: %s", e.Source, sanitize.Text(e.Err.Error()))
+	return fmt.Sprintf("fetch %s metadata: %s", e.Source, sanitize.Text(e.Err.Error()))
 }
 
-// MetadataResult contains the result of fetching metadata from multiple sources.
+func (e *MetadataError) Unwrap() error { return e.Err }
+
+// MetadataResult contains what a metadata plan produced.
 type MetadataResult struct {
+	// Metadata holds one entry per source that answered, in plan order.
+	Metadata []*AppMetadata
 	// Errors contains non-fatal errors from individual sources.
 	// The fetch continues even if some sources fail.
 	Errors []*MetadataError
@@ -140,80 +150,69 @@ func (r *MetadataResult) HasErrors() bool {
 	return len(r.Errors) > 0
 }
 
-// FetchMetadata fetches metadata from the specified sources and merges into config.
-// Sources can be: "fastlane", "github", "gitlab", "fdroid", "playstore".
-// Fastlane works for GitHub, GitLab, and Gitea-compatible repositories.
-// Only empty fields in config are populated (existing values are preserved).
-// Returns a MetadataResult containing any non-fatal errors from individual sources.
-func (f *MetadataFetcher) FetchMetadata(ctx context.Context, sources []string) error {
-	return f.FetchMetadataWithResult(ctx, sources).firstFatalError()
-}
-
-// FetchMetadataWithResult fetches metadata and returns detailed results including partial failures.
-func (f *MetadataFetcher) FetchMetadataWithResult(ctx context.Context, sources []string) *MetadataResult {
+// Fetch queries the sources of plan and returns every answer in order. It
+// changes nothing: choosing among the answers is the caller's job. A failing
+// source is recorded and the next one is tried; cancellation stops the plan.
+func (f *MetadataFetcher) Fetch(ctx context.Context, plan MetadataPlan) *MetadataResult {
 	result := &MetadataResult{}
-
-	for _, source := range sources {
-		if err := ctx.Err(); err != nil {
-			result.Errors = append(result.Errors, &MetadataError{Source: source, Err: err})
-			break
-		}
-		source = strings.TrimSpace(strings.ToLower(source))
-		meta, err := f.fetchMetadataSource(ctx, source)
-		if err != nil {
-			result.Errors = append(result.Errors, &MetadataError{
-				Source: source,
-				Err:    err,
-			})
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				break
-			}
-			continue
-		}
-
-		// Merge metadata into config (only fill empty fields)
-		f.mergeMetadata(meta)
+	if !plan.Automatic {
+		f.fetchInto(ctx, result, plan.Sources)
+		return result
+	}
+	if len(plan.Sources) == 0 {
+		return result
 	}
 
-	return result
-}
-
-// FetchAutomaticMetadata uses Fastlane metadata when present. It fetches the
-// native repository source when Fastlane is absent, has no description, or
-// the Fastlane lookup fails.
-func (f *MetadataFetcher) FetchAutomaticMetadata(ctx context.Context, fallback string) error {
-	f.FetchAutomaticMetadataWithResult(ctx, fallback)
-	return nil
-}
-
-// FetchAutomaticMetadataWithResult uses Fastlane metadata when it includes a
-// description. Otherwise it fills the remaining empty fields from the native
-// repository source. Fastlane failures other than "not found" (for example a
-// GitHub contents API 403) are recorded and do not skip that fallback.
-// A cancelled context stops the lookup.
-func (f *MetadataFetcher) FetchAutomaticMetadataWithResult(ctx context.Context, fallback string) *MetadataResult {
-	result := &MetadataResult{}
-	meta, err := f.fetchMetadataSource(ctx, "fastlane")
+	first := plan.Sources[0]
+	meta, err := f.fetchMetadataSource(ctx, first)
 	switch {
 	case err == nil:
-		f.mergeMetadata(meta)
+		result.add(first, meta)
 		if strings.TrimSpace(meta.Description) != "" {
 			return result
 		}
-	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
-		result.Errors = append(result.Errors, &MetadataError{Source: "fastlane", Err: err})
+	case isCancellation(err):
+		result.fail(first, err)
 		return result
 	case !errors.Is(err, errFastlaneUnavailable):
-		result.Errors = append(result.Errors, &MetadataError{Source: "fastlane", Err: err})
+		result.fail(first, err)
 	}
-
-	native, err := f.fetchMetadataSource(ctx, fallback)
-	if err != nil {
-		result.Errors = append(result.Errors, &MetadataError{Source: fallback, Err: err})
-		return result
-	}
-	f.mergeMetadata(native)
+	f.fetchInto(ctx, result, plan.Sources[1:])
 	return result
+}
+
+func (f *MetadataFetcher) fetchInto(ctx context.Context, result *MetadataResult, sources []string) {
+	for _, name := range sources {
+		if err := ctx.Err(); err != nil {
+			result.fail(name, err)
+			return
+		}
+		meta, err := f.fetchMetadataSource(ctx, name)
+		if err != nil {
+			result.fail(name, err)
+			if isCancellation(err) {
+				return
+			}
+			continue
+		}
+		result.add(name, meta)
+	}
+}
+
+func (r *MetadataResult) add(source string, meta *AppMetadata) {
+	if meta == nil {
+		return
+	}
+	meta.Source = source
+	r.Metadata = append(r.Metadata, meta)
+}
+
+func (r *MetadataResult) fail(source string, err error) {
+	r.Errors = append(r.Errors, &MetadataError{Source: source, Err: err})
+}
+
+func isCancellation(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func (f *MetadataFetcher) fetchMetadataSource(ctx context.Context, source string) (*AppMetadata, error) {
@@ -235,12 +234,6 @@ func (f *MetadataFetcher) fetchMetadataSource(ctx context.Context, source string
 	}
 }
 
-// firstFatalError returns nil - all metadata errors are non-fatal.
-// This maintains backward compatibility with the original error return.
-func (r *MetadataResult) firstFatalError() error {
-	return nil
-}
-
 // fetchGitHubMetadata fetches metadata from GitHub repository.
 func (f *MetadataFetcher) fetchGitHubMetadata(ctx context.Context) (*AppMetadata, error) {
 	repoPath := config.GetGitHubRepo(f.cfg.Repository)
@@ -257,24 +250,21 @@ func (f *MetadataFetcher) fetchGitHubMetadata(ctx context.Context) (*AppMetadata
 
 	// Fetch repository info
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s", owner, repo)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := newForgeRequest(ctx, config.SourceGitHub, url)
 	if err != nil {
 		return nil, err
 	}
 
 	req.Header.Set("Accept", "application/vnd.github+json")
-	if token := config.GetEnv("GITHUB_TOKEN"); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
 
 	resp, err := f.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch repo info: %w", err)
+		return nil, fmt.Errorf("fetch repo info: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitHub API error: %d", resp.StatusCode)
+	if err := checkHTTPStatus(resp, "GitHub API"); err != nil {
+		return nil, err
 	}
 
 	var repoInfo struct {
@@ -288,7 +278,7 @@ func (f *MetadataFetcher) fetchGitHubMetadata(ctx context.Context) (*AppMetadata
 	}
 
 	if err := decodeJSONResponse(resp, MaxJSONResponseSize, &repoInfo); err != nil {
-		return nil, fmt.Errorf("failed to parse repo info: %w", err)
+		return nil, fmt.Errorf("parse repo info: %w", err)
 	}
 
 	meta := &AppMetadata{
@@ -298,8 +288,8 @@ func (f *MetadataFetcher) fetchGitHubMetadata(ctx context.Context) (*AppMetadata
 		Tags:        repoInfo.Topics,
 	}
 
-	if repoInfo.License != nil && repoInfo.License.SPDXID != "" && repoInfo.License.SPDXID != "NOASSERTION" {
-		meta.License = repoInfo.License.SPDXID
+	if repoInfo.License != nil {
+		meta.License = spdx.ID(repoInfo.License.SPDXID)
 	}
 
 	// Try to fetch README for a longer description if the repo description is short
@@ -320,16 +310,13 @@ func (f *MetadataFetcher) fetchGitHubMetadata(ctx context.Context) (*AppMetadata
 // fetchGitHubReadme fetches the README content from GitHub.
 func (f *MetadataFetcher) fetchGitHubReadme(ctx context.Context, owner, repo string) (string, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/readme", owner, repo)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := newForgeRequest(ctx, config.SourceGitHub, url)
 	if err != nil {
 		return "", err
 	}
 
 	// Request raw content
 	req.Header.Set("Accept", "application/vnd.github.raw")
-	if token := config.GetEnv("GITHUB_TOKEN"); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
 
 	resp, err := f.client.Do(req)
 	if err != nil {
@@ -337,12 +324,12 @@ func (f *MetadataFetcher) fetchGitHubReadme(ctx context.Context, owner, repo str
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("failed to fetch readme: %d", resp.StatusCode)
+	if err := checkHTTPStatus(resp, "GitHub readme"); err != nil {
+		return "", err
 	}
 
-	// Security: Limit response size to prevent memory exhaustion
-	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxRemoteDownloadSize))
+	// Security: bound the response to prevent memory exhaustion
+	body, err := readBounded(resp.Body, MaxRemoteDownloadSize)
 	if err != nil {
 		return "", err
 	}
@@ -368,25 +355,24 @@ func (f *MetadataFetcher) fetchGitLabMetadata(ctx context.Context) (*AppMetadata
 
 	// Fetch project info
 	url := fmt.Sprintf("%s/api/v4/projects/%s", baseURL, encodedPath)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := newForgeRequest(ctx, config.SourceGitLab, url)
 	if err != nil {
 		return nil, err
 	}
 
 	resp, err := f.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch project info: %w", err)
+		return nil, fmt.Errorf("fetch project info: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitLab API error: %d", resp.StatusCode)
+	if err := checkHTTPStatus(resp, "GitLab API"); err != nil {
+		return nil, describeNotFound(err, fmt.Sprintf("GitLab project %s not found or not accessible", repoPath))
 	}
 
 	var projectInfo struct {
 		Name          string   `json:"name"`
 		Description   string   `json:"description"`
-		WebURL        string   `json:"web_url"`
 		Topics        []string `json:"topics"`
 		DefaultBranch string   `json:"default_branch"`
 		ReadmeURL     string   `json:"readme_url"`
@@ -400,19 +386,21 @@ func (f *MetadataFetcher) fetchGitLabMetadata(ctx context.Context) (*AppMetadata
 	}
 
 	if err := decodeJSONResponse(resp, MaxJSONResponseSize, &projectInfo); err != nil {
-		return nil, fmt.Errorf("failed to parse project info: %w", err)
+		return nil, fmt.Errorf("parse project info: %w", err)
 	}
 
+	// Website stays empty: web_url is the GitLab project page, not a homepage.
 	meta := &AppMetadata{
 		Name:        projectInfo.Name,
 		Description: projectInfo.Description,
-		Website:     projectInfo.WebURL,
 		Tags:        projectInfo.Topics,
 	}
 
-	if projectInfo.License != nil && projectInfo.License.Key != "" {
-		// Convert license key to SPDX-like format (GitLab uses lowercase keys)
-		meta.License = strings.ToUpper(projectInfo.License.Key)
+	if projectInfo.License != nil {
+		meta.License = spdx.ID(projectInfo.License.Key)
+		if meta.License == "" {
+			meta.License = spdx.ID(projectInfo.License.Name)
+		}
 	}
 
 	// Try to fetch README for a longer description if the project description is short
@@ -438,30 +426,39 @@ func (f *MetadataFetcher) fetchGitLabReadme(ctx context.Context, baseURL, encode
 	for _, name := range readmeNames {
 		encodedName := strings.ReplaceAll(name, ".", "%2E")
 		url := fmt.Sprintf("%s/api/v4/projects/%s/repository/files/%s/raw?ref=%s",
-			baseURL, encodedPath, encodedName, branch)
+			baseURL, encodedPath, encodedName, neturl.QueryEscape(branch))
 
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
-			continue
-		}
-
-		resp, err := f.client.Do(req)
-		if err != nil {
-			continue
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode == http.StatusOK {
-			// Security: Limit response size to prevent memory exhaustion
-			body, err := io.ReadAll(io.LimitReader(resp.Body, MaxRemoteDownloadSize))
-			if err != nil {
-				continue
-			}
-			return string(body), nil
+		body, ok := f.fetchGitLabReadmeFile(ctx, url)
+		if ok {
+			return body, nil
 		}
 	}
 
-	return "", fmt.Errorf("no README found")
+	return "", errors.New("no README found")
+}
+
+// fetchGitLabReadmeFile reads one README candidate. It reports false for
+// anything but a complete 200 response, so the caller tries the next name.
+func (f *MetadataFetcher) fetchGitLabReadmeFile(ctx context.Context, url string) (string, bool) {
+	req, err := newForgeRequest(ctx, config.SourceGitLab, url)
+	if err != nil {
+		return "", false
+	}
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", false
+	}
+	// Security: bound the response to prevent memory exhaustion
+	body, err := readBounded(resp.Body, MaxRemoteDownloadSize)
+	if err != nil {
+		return "", false
+	}
+	return string(body), true
 }
 
 // fetchGiteaMetadata fetches native repository metadata from a
@@ -477,22 +474,19 @@ func (f *MetadataFetcher) fetchGiteaMetadata(ctx context.Context) (*AppMetadata,
 	}
 
 	apiURL := fmt.Sprintf("%s/api/v1/repos/%s/%s", baseURL, parts[0], parts[1])
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	req, err := newForgeRequest(ctx, config.SourceGitea, apiURL)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	if token := config.GetEnv("GITEA_TOKEN"); token != "" {
-		req.Header.Set("Authorization", "token "+token)
-	}
 
 	resp, err := f.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch repository info: %w", err)
+		return nil, fmt.Errorf("fetch repository info: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Gitea API error: %d", resp.StatusCode)
+	if err := checkHTTPStatus(resp, "Gitea API"); err != nil {
+		return nil, err
 	}
 
 	var repoInfo struct {
@@ -502,7 +496,7 @@ func (f *MetadataFetcher) fetchGiteaMetadata(ctx context.Context) (*AppMetadata,
 		Topics      []string `json:"topics"`
 	}
 	if err := decodeJSONResponse(resp, MaxJSONResponseSize, &repoInfo); err != nil {
-		return nil, fmt.Errorf("failed to parse repository info: %w", err)
+		return nil, fmt.Errorf("parse repository info: %w", err)
 	}
 	return &AppMetadata{
 		Name:        repoInfo.Name,
@@ -559,7 +553,7 @@ func (f *MetadataFetcher) fetchFDroidMetadata(ctx context.Context) (*AppMetadata
 			meta.Description = fdMeta.Description
 		}
 		meta.Website = fdMeta.WebSite
-		meta.License = fdMeta.License
+		meta.License = spdx.ID(fdMeta.License)
 
 		if fdMeta.Name != "" {
 			meta.Name = fdMeta.Name
@@ -587,7 +581,7 @@ type fdroidWebMeta struct {
 func (f *MetadataFetcher) scrapeFDroidWebsite(ctx context.Context, packageID string) (*fdroidWebMeta, error) {
 	url := fmt.Sprintf("https://f-droid.org/en/packages/%s/", packageID)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := newRequest(ctx, http.MethodGet, url)
 	if err != nil {
 		return nil, err
 	}
@@ -598,24 +592,23 @@ func (f *MetadataFetcher) scrapeFDroidWebsite(ctx context.Context, packageID str
 
 	resp, err := f.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch F-Droid page: %w", err)
+		return nil, fmt.Errorf("fetch F-Droid page: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Special case: 404 with package-specific message
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("package %s not found on F-Droid", packageID)
-	}
-
-	// Validate HTTP status
+	// Validate HTTP status; a 404 names the package.
 	if err := checkHTTPStatus(resp, "F-Droid website"); err != nil {
-		return nil, err
+		return nil, describeNotFound(err, fmt.Sprintf("package %s not found on F-Droid", packageID))
 	}
 
-	// Security: Limit response size to prevent memory exhaustion
-	doc, err := goquery.NewDocumentFromReader(io.LimitReader(resp.Body, MaxRemoteDownloadSize))
+	// Security: bound the response to prevent memory exhaustion
+	page, err := readBounded(resp.Body, MaxRemoteDownloadSize)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse HTML: %w", err)
+		return nil, fmt.Errorf("read F-Droid page: %w", err)
+	}
+	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(page))
+	if err != nil {
+		return nil, fmt.Errorf("parse HTML: %w", err)
 	}
 
 	meta := &fdroidWebMeta{}
@@ -694,14 +687,14 @@ func (f *MetadataFetcher) normalizeURL(urlStr, baseURL string) string {
 
 // fetchFDroidYAML fetches metadata from the fdroiddata YAML file.
 func (f *MetadataFetcher) fetchFDroidYAML(ctx context.Context, metadataURL string) (*fdroidMetadata, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", metadataURL, nil)
+	req, err := newRequest(ctx, http.MethodGet, metadataURL)
 	if err != nil {
 		return nil, err
 	}
 
 	resp, err := f.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch metadata: %w", err)
+		return nil, fmt.Errorf("fetch metadata: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -710,15 +703,15 @@ func (f *MetadataFetcher) fetchFDroidYAML(ctx context.Context, metadataURL strin
 		return nil, err
 	}
 
-	// Security: Limit response size to prevent memory exhaustion
-	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxRemoteDownloadSize))
+	// Security: bound the response to prevent memory exhaustion
+	data, err := readBounded(resp.Body, MaxRemoteDownloadSize)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read metadata: %w", err)
+		return nil, fmt.Errorf("read metadata: %w", err)
 	}
 
 	var meta fdroidMetadata
 	if err := yaml.Unmarshal(data, &meta); err != nil {
-		return nil, fmt.Errorf("failed to parse metadata: %w", err)
+		return nil, fmt.Errorf("parse metadata: %w", err)
 	}
 
 	return &meta, nil
@@ -758,82 +751,6 @@ func (f *MetadataFetcher) fetchPlayStoreMetadata(ctx context.Context) (*AppMetad
 	}
 
 	return meta, nil
-}
-
-// mergeMetadata merges fetched metadata into config, only filling empty fields.
-// Name priority: YAML config > APK name > metadata sources. Icon URLs are kept
-// as fallbacks and are not copied onto the config: the APK icon is tried first.
-func (f *MetadataFetcher) mergeMetadata(meta *AppMetadata) {
-	if meta == nil {
-		return
-	}
-
-	// Name priority: YAML > APK > metadata sources
-	if f.cfg.Name == "" {
-		if f.APKName != "" {
-			f.cfg.Name = f.APKName
-		} else if meta.Name != "" {
-			f.cfg.Name = meta.Name
-		}
-	}
-	if f.cfg.Description == "" && meta.Description != "" {
-		f.cfg.Description = meta.Description
-	}
-	if f.cfg.Summary == "" && meta.Summary != "" {
-		f.cfg.Summary = meta.Summary
-	}
-	if f.cfg.Website == "" && meta.Website != "" {
-		if config.ValidateURL(meta.Website) == nil {
-			f.cfg.Website = meta.Website
-		}
-	}
-	if f.cfg.License == "" && meta.License != "" {
-		f.cfg.License = meta.License
-	}
-	if len(f.cfg.Tags) == 0 && len(meta.Tags) > 0 {
-		f.cfg.Tags = meta.Tags
-	}
-	if locations := acceptedMediaLocations(meta.ImageURLs); len(locations) > 0 {
-		f.imageSets = append(f.imageSets, locations)
-		if len(f.cfg.Images) == 0 {
-			f.cfg.Images = append(f.cfg.Images, locations...)
-		}
-	}
-	if locations := acceptedMediaLocations([]string{meta.IconURL}); len(locations) == 1 {
-		f.iconCandidates = append(f.iconCandidates, locations[0])
-	}
-}
-
-// IconCandidates returns icon URLs from each metadata source, in source order.
-func (f *MetadataFetcher) IconCandidates() []string {
-	return append([]string(nil), f.iconCandidates...)
-}
-
-// ImageSets returns screenshot URLs from each metadata source, in source order.
-func (f *MetadataFetcher) ImageSets() [][]string {
-	if len(f.imageSets) == 0 {
-		return nil
-	}
-	sets := make([][]string, len(f.imageSets))
-	for i, set := range f.imageSets {
-		sets[i] = append([]string(nil), set...)
-	}
-	return sets
-}
-
-func acceptedMediaLocations(values []string) []string {
-	var accepted []string
-	for _, value := range values {
-		if config.ValidateURL(value) == nil || isLocalMetadataFile(value) {
-			accepted = append(accepted, value)
-		}
-	}
-	return accepted
-}
-
-func isLocalMetadataFile(value string) bool {
-	info, err := os.Stat(value)
-	return err == nil && !info.IsDir()
 }
 
 // extractFirstParagraph extracts the first meaningful paragraph from markdown.
@@ -876,121 +793,4 @@ func extractFirstParagraph(markdown string) string {
 	}
 
 	return result
-}
-
-// FetchReleaseNotes fetches release notes from a URL or local file.
-// If the content follows the Keep a Changelog format and a version is provided,
-// only the section for that version is extracted.
-func FetchReleaseNotes(ctx context.Context, pathOrURL string, version string, baseDir string) (string, error) {
-	var content string
-
-	if strings.HasPrefix(pathOrURL, "http://") || strings.HasPrefix(pathOrURL, "https://") {
-		// Fetch from URL
-		req, err := http.NewRequestWithContext(ctx, "GET", pathOrURL, nil)
-		if err != nil {
-			return "", fmt.Errorf("failed to create request: %w", err)
-		}
-
-		resp, err := DoWithTorFallback(ctx, newSecureHTTPClient(30*time.Second), req)
-		if err != nil {
-			return "", fmt.Errorf("failed to fetch release notes: %w", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return "", fmt.Errorf("failed to fetch release notes: status %d", resp.StatusCode)
-		}
-
-		// Limit to 10MB to prevent memory exhaustion
-		data, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
-		if err != nil {
-			return "", fmt.Errorf("failed to read release notes: %w", err)
-		}
-		content = string(data)
-	} else {
-		// Read from local file - resolve relative to config directory.
-		// No traversal check needed: this is a local CLI tool where the user
-		// authors their own config file. All other local paths (icon, images,
-		// release_source) use the same resolution without restriction.
-		path := pathOrURL
-		if baseDir != "" && !filepath.IsAbs(path) {
-			path = filepath.Join(baseDir, path)
-		}
-		path = filepath.Clean(path)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return "", fmt.Errorf("failed to read release notes file: %w", err)
-		}
-		content = string(data)
-	}
-
-	// If version is provided, try to extract just that section from Keep a Changelog format
-	if version != "" {
-		extracted := extractChangelogSection(content, version)
-		if extracted != "" {
-			return extracted, nil
-		}
-	}
-
-	return content, nil
-}
-
-// extractChangelogSection extracts a specific version's section from Keep a Changelog format.
-// Returns empty string if the version is not found or the format doesn't match.
-func extractChangelogSection(content string, version string) string {
-	lines := strings.Split(content, "\n")
-
-	// Normalize version (remove leading 'v' if present)
-	normalizedVersion := strings.TrimPrefix(version, "v")
-
-	var inSection bool
-	var sectionLines []string
-
-	for _, line := range lines {
-		// Check for version header: ## [1.2.3] or ## [v1.2.3] or ## 1.2.3
-		if strings.HasPrefix(line, "## ") {
-			headerVersion := extractVersionFromHeader(line)
-			if headerVersion == normalizedVersion || headerVersion == "v"+normalizedVersion {
-				inSection = true
-				continue // Skip the header line itself
-			} else if inSection {
-				// Hit the next version section, stop
-				break
-			}
-		} else if inSection {
-			sectionLines = append(sectionLines, line)
-		}
-	}
-
-	if len(sectionLines) == 0 {
-		return ""
-	}
-
-	// Trim leading/trailing empty lines
-	result := strings.TrimSpace(strings.Join(sectionLines, "\n"))
-	return result
-}
-
-// extractVersionFromHeader extracts the version from a Keep a Changelog header.
-// Handles formats like: "## [1.2.3]", "## [v1.2.3] - 2024-01-15", "## 1.2.3"
-func extractVersionFromHeader(header string) string {
-	// Remove "## " prefix
-	header = strings.TrimPrefix(header, "## ")
-
-	// Handle [version] format
-	if strings.HasPrefix(header, "[") {
-		end := strings.Index(header, "]")
-		if end > 1 {
-			version := header[1:end]
-			return strings.TrimPrefix(version, "v")
-		}
-	}
-
-	// Handle plain version format (## 1.2.3 - date)
-	parts := strings.Fields(header)
-	if len(parts) > 0 {
-		return strings.TrimPrefix(parts[0], "v")
-	}
-
-	return ""
 }
