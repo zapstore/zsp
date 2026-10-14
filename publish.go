@@ -6,10 +6,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -31,6 +33,13 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 	verified := candidate.verified
 	published := false
 	defer func() {
+		if copyErr := candidate.retainPublished(published, err); copyErr != nil {
+			if published && result != nil {
+				result.Warnings = append(result.Warnings, "APK cache copy failed")
+			} else {
+				err = operationErr(nil, false, "copy APK to cache%s", causeDetail(copyErr))
+			}
+		}
 		if shouldClearHTTPCache(err) {
 			candidate.clearHTTPCache()
 		}
@@ -378,6 +387,84 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 	result.Status = "published"
 	published = true
 	return result, nil
+}
+
+// retainPublished copies the verified APK to APK_CACHE/<sha256> when that
+// directory is set and this publish accepted the release, or the release was
+// already published. An unset variable copies nothing. Any other outcome
+// writes nothing. The copy is a new file: the fetch temp may sit on another
+// filesystem.
+func (apk *APK) retainPublished(published bool, publishErr error) error {
+	if apk == nil || (!published && !errors.Is(publishErr, ErrAlreadyPublished)) {
+		return nil
+	}
+	dir := strings.TrimSpace(internalconfig.GetEnv("APK_CACHE"))
+	if dir == "" {
+		return nil
+	}
+	hash := apk.verified.hash
+	if !sha256Hex(hash) {
+		return fmt.Errorf("APK hash is not sha256")
+	}
+	src, err := apk.Path()
+	if err != nil {
+		return err
+	}
+	return copyFileAs(src, filepath.Join(dir, hash))
+}
+
+func sha256Hex(hash string) bool {
+	if len(hash) != 64 {
+		return false
+	}
+	for _, c := range hash {
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// copyFileAs copies src to dest, replacing dest. The write lands in dest's
+// directory first so the rename stays on one filesystem.
+func copyFileAs(src, dest string) error {
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	tmp, err := os.CreateTemp(filepath.Dir(dest), ".partial-")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	done := false
+	defer func() {
+		if !done {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := io.Copy(tmp, in); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, dest); err != nil {
+		return err
+	}
+	done = true
+	return nil
 }
 
 // shouldClearHTTPCache reports whether a Publish error means the next Fetch

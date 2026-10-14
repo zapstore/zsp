@@ -62,6 +62,7 @@ func RootHelp() string {
 	b.WriteString("  " + renderAccent("GITHUB_TOKEN") + "    " + renderWhite("GitHub API token (optional, avoids rate limits)") + "\n")
 	b.WriteString("  " + renderAccent("RELAYS") + "          " + renderWhite("WebSocket URLs or a Unix socket path (default: wss://relay.zapstore.dev)") + "\n")
 	b.WriteString("  " + renderAccent("BLOSSOM_URL") + "     " + renderWhite("Custom CDN server (default: https://cdn.zapstore.dev)") + "\n")
+	b.WriteString("  " + renderAccent("APK_CACHE") + "      " + renderWhite("Copy each accepted APK here, named by its SHA-256") + "\n")
 	b.WriteString("  " + renderAccent("HOTBOX_SOCKET") + "   " + renderWhite("Hotbox socket; with HOTBOX_PIN, publish creates the C1 proof") + "\n\n")
 
 	b.WriteString(renderBold("GLOBAL FLAGS") + "\n")
