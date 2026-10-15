@@ -55,7 +55,7 @@ func Check(ctx context.Context, config PublishConfig, candidate *APK, options Ch
 		return nil, err
 	}
 	verified := candidate.verified
-	certificate, err := apk.ExtractCertificate(ctx, path)
+	certificates, err := apk.SigningCertificates(ctx, path)
 	if err != nil {
 		return nil, wrapOperationError(ErrInvalidAPK, err, false, "extract signing certificate"+causeDetail(err))
 	}
@@ -85,12 +85,16 @@ func Check(ctx context.Context, config PublishConfig, candidate *APK, options Ch
 	result.Listed = len(locations.ApplicationRelays) > 0
 	result.Warnings = append(result.Warnings, safeRelayQueryWarnings("application event", appWarnings)...)
 
-	proofs, proofWarnings, err := publisher.FetchIdentityProofsByCertificate(ctx, verified.certificateHash)
+	if len(certificates) == 0 {
+		return nil, operationErr(ErrInvalidAPK, false, "extract signing certificate")
+	}
+	current := certificates[len(certificates)-1]
+	proofs, proofWarnings, err := publisher.FetchIdentityProofs(ctx, []string{identity.ComputeCertHash(current)})
 	if err != nil {
 		return nil, checkQueryError(ctx, err, "check C1 proof")
 	}
 	result.Warnings = append(result.Warnings, safeRelayQueryWarnings("C1 proof", proofWarnings)...)
-	active := activeC1Proof(proofs, verified.certificateHash, certificate, time.Now())
+	active := activeC1Proof(proofs, current, time.Now())
 	if active == nil {
 		return result, nil
 	}
@@ -106,7 +110,7 @@ func Check(ctx context.Context, config PublishConfig, candidate *APK, options Ch
 	_, result.Authorized = publishers[result.Signer]
 
 	channel := selectedChannel(PublishOptions{Channel: options.Channel}, config)
-	versionCode, _, releaseWarnings, err := publisher.HighestReleaseVersionCode(ctx, publishers, verified.appID, verified.certificateHash, channel)
+	versionCode, _, releaseWarnings, err := publisher.HighestReleaseVersionCode(ctx, publishers, verified.appID, verified.certificateHashes(), channel)
 	if err != nil {
 		return nil, checkQueryError(ctx, err, "check published releases")
 	}

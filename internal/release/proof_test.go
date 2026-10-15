@@ -84,7 +84,7 @@ func TestBuildC1ProofCreatesActiveProof(t *testing.T) {
 	if fake.createdAt != now.Unix() || fake.expiry != now.Add(identity.DefaultExpiry).Unix() {
 		t.Fatalf("window %d..%d", fake.createdAt, fake.expiry)
 	}
-	if active := activeC1Proof([]*gonostr.Event{event}, identity.ComputeCertHash(certificate), certificate, now); active != event {
+	if active := activeC1Proof([]*gonostr.Event{event}, certificate, now); active != event {
 		t.Fatal("built proof is not active")
 	}
 	if event.Tags.GetFirst([]string{"delegation"}) != nil {

@@ -4,6 +4,7 @@ package release
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"sync"
 	"time"
@@ -116,10 +117,20 @@ type verifiedAPK struct {
 	versionCode     int64
 	certificateHash string
 	lineageHashes   []string
+	certificates    []*x509.Certificate // oldest first, ending at the signer
 	originalURL     string
 	releaseNotes    string
 	releaseVersion  string
 	releasedAt      time.Time
+}
+
+// certificateHashes is the signer and its ancestors.
+func (v verifiedAPK) certificateHashes() []string {
+	out := make([]string, 0, 1+len(v.lineageHashes))
+	if v.certificateHash != "" {
+		out = append(out, v.certificateHash)
+	}
+	return append(out, v.lineageHashes...)
 }
 
 // apkOwnership is shared by all copies of an APK value. In particular, it

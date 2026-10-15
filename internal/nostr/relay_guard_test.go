@@ -68,7 +68,7 @@ func TestHighestLinkedReleaseVersionUsesMainLinkedAssetsOnly(t *testing.T) {
 		malformedRelease.ID: malformedRelease,
 	}
 
-	versionCode, publishedAt := highestLinkedReleaseVersion(events, "certificate-hash", "main")
+	versionCode, publishedAt := highestLinkedReleaseVersion(events, []string{"certificate-hash"}, "main")
 	if versionCode != 42 {
 		t.Fatalf("versionCode = %d, want 42", versionCode)
 	}
@@ -76,7 +76,7 @@ func TestHighestLinkedReleaseVersionUsesMainLinkedAssetsOnly(t *testing.T) {
 		t.Fatalf("publishedAt = %v, want %v", publishedAt, want)
 	}
 
-	versionCode, publishedAt = highestLinkedReleaseVersion(events, "certificate-hash", "beta")
+	versionCode, publishedAt = highestLinkedReleaseVersion(events, []string{"certificate-hash"}, "beta")
 	if versionCode != 1000 {
 		t.Fatalf("beta versionCode = %d, want 1000", versionCode)
 	}

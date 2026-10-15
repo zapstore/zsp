@@ -2,6 +2,7 @@ package release
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"net/url"
 	"os"
@@ -181,6 +182,7 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 				versionCode:     parsed.VersionCode,
 				certificateHash: parsed.CertFingerprint,
 				lineageHashes:   append([]string(nil), parsed.SigningAncestors...),
+				certificates:    append([]*x509.Certificate(nil), parsed.Certificates()...),
 				originalURL:     eventSourceURL,
 				releaseNotes:    release.Changelog,
 				releaseVersion:  release.Version,

@@ -110,15 +110,20 @@ func runWizard(ctx context.Context) int {
 	listed := len(locations.ApplicationRelays) > 0
 	wizardRelayStatus(appName, locations)
 
-	certificate, err := selectedCertificate(ctx, selected)
+	path, err := selected.Path()
 	if err != nil {
 		return wizardError("Identity setup stopped", err)
 	}
+	chain, err := apk.SigningCertificates(ctx, path)
+	if err != nil || len(chain) == 0 {
+		return wizardError("Identity setup stopped", err)
+	}
+	certificate := chain[len(chain)-1]
 
 	steps.StartStep("🔐 Prove it's yours")
 	spinner = ui.NewSpinner("Checking who has claimed " + appName + "...")
 	spinner.Start()
-	proofs, _, err := publisher.FetchIdentityProofsByCertificate(ctx, selected.CertificateHash)
+	proofs, _, err := publisher.FetchIdentityProofs(ctx, []string{selected.CertificateHash})
 	spinner.Stop()
 	if err != nil {
 		return wizardError("Identity setup stopped", fmt.Errorf("look up C1 proof: %w", err))
@@ -678,12 +683,22 @@ func npubFromHex(owner string) string {
 }
 
 // activeProofForCertificate returns the newest C1 proof that is active at now
-// for the APK's signing certificate: signed by its Nostr key, certificate
-// signature verified, neither expired nor revoked.
+// for one certificate.
 func activeProofForCertificate(events []*gonostr.Event, certificate *x509.Certificate, now time.Time) (*gonostr.Event, *identity.IdentityProof) {
+	if certificate == nil {
+		return nil, nil
+	}
+	want := identity.ComputeCertHash(certificate)
 	var active *gonostr.Event
 	var activeProof *identity.IdentityProof
 	for _, event := range events {
+		if event == nil {
+			continue
+		}
+		tag := event.Tags.GetFirst([]string{"d"})
+		if tag == nil || len(*tag) < 2 || strings.ToLower((*tag)[1]) != want {
+			continue
+		}
 		proof, err := identity.ValidateActiveProofEvent(event, certificate, now)
 		if err != nil {
 			continue
@@ -694,19 +709,6 @@ func activeProofForCertificate(events []*gonostr.Event, certificate *x509.Certif
 		}
 	}
 	return active, activeProof
-}
-
-// selectedCertificate returns the signing certificate of the chosen APK.
-func selectedCertificate(ctx context.Context, selected *zsp.APK) (*x509.Certificate, error) {
-	path, err := selected.Path()
-	if err != nil {
-		return nil, fmt.Errorf("locate APK: %w", err)
-	}
-	certificate, err := apk.ExtractCertificate(ctx, path)
-	if err != nil {
-		return nil, fmt.Errorf("read APK signing certificate: %w", err)
-	}
-	return certificate, nil
 }
 
 func proofDelegate(event *gonostr.Event) string {

@@ -118,7 +118,7 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 	var proofCertificate *x509.Certificate
 	if !options.SkipProofCheck {
 		reportPublish(options, "publish", "proof", "C1 ownership proof", 0, 0)
-		proofs, proofWarnings, proofErr := publisher.FetchIdentityProofsByCertificate(ctx, parsed.CertFingerprint)
+		proofs, proofWarnings, proofErr := publisher.FetchIdentityProofs(ctx, []string{parsed.CertificateHashes()[0]})
 		if proofErr != nil {
 			if contextErr := contextOperationError(ctx.Err(), "check C1 proof"); contextErr != nil {
 				return nil, contextErr
@@ -128,7 +128,7 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 		}
 		result.Warnings = append(result.Warnings, safeRelayQueryWarnings("C1 proof", proofWarnings)...)
 		certificate := parsed.Certificate
-		active := activeC1Proof(proofs, parsed.CertFingerprint, certificate, time.Now())
+		active := activeC1Proof(proofs, certificate, time.Now())
 		c1Status = "active"
 		authorizedPublishers = c1Publishers(active)
 		if options.ProofSigner != nil && c1ProofNeedsRenewal(active, signer.PublicKey(), time.Now()) {
@@ -148,7 +148,7 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 		var publishedVersionCode int64
 		reportPublish(options, "publish", "release", "published releases", 0, 0)
 		versionCode, publishedAt, warnings, checkErr := publisher.HighestReleaseVersionCode(
-			ctx, authorizedPublishers, parsed.PackageID, parsed.CertFingerprint, publishChannel,
+			ctx, authorizedPublishers, parsed.PackageID, parsed.CertificateHashes(), publishChannel,
 		)
 		if checkErr != nil {
 			if contextErr := contextOperationError(ctx.Err(), "check published releases"); contextErr != nil {
@@ -631,16 +631,27 @@ func safeRelayQueryWarnings(operation string, warnings []error) []string {
 	return result
 }
 
-func activeC1Publishers(proofs []*gonostr.Event, certHash string, certificate *x509.Certificate) map[string]struct{} {
-	return c1Publishers(activeC1Proof(proofs, certHash, certificate, time.Now()))
+func activeC1Publishers(proofs []*gonostr.Event, certificate *x509.Certificate) map[string]struct{} {
+	return c1Publishers(activeC1Proof(proofs, certificate, time.Now()))
 }
 
-// activeC1Proof returns the newest valid proof across all authors.
-func activeC1Proof(proofs []*gonostr.Event, certHash string, certificate *x509.Certificate, now time.Time) *gonostr.Event {
+// activeC1Proof returns the newest valid proof for certificate. A proof for
+// an ancestor does not count.
+func activeC1Proof(proofs []*gonostr.Event, certificate *x509.Certificate, now time.Time) *gonostr.Event {
+	if certificate == nil {
+		return nil
+	}
+	want := identity.ComputeCertHash(certificate)
 	var activeProof *gonostr.Event
 	for _, proof := range proofs {
-		decodedProof, validationErr := identity.ValidateActiveProofEvent(proof, certificate, now)
-		if validationErr != nil || decodedProof.CertHash != certHash {
+		if proof == nil {
+			continue
+		}
+		tag := proof.Tags.GetFirst([]string{"d"})
+		if tag == nil || len(*tag) < 2 || strings.ToLower((*tag)[1]) != want {
+			continue
+		}
+		if _, validationErr := identity.ValidateActiveProofEvent(proof, certificate, now); validationErr != nil {
 			continue
 		}
 		if activeProof == nil || proof.CreatedAt > activeProof.CreatedAt ||

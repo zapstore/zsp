@@ -945,7 +945,7 @@ func TestActiveC1PublishersIncludesOwnerAndDelegate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	authorized := activeC1Publishers([]*gonostr.Event{event}, proof.CertHash, certificate)
+	authorized := activeC1Publishers([]*gonostr.Event{event}, certificate)
 	for _, pubkey := range []string{owner, delegate} {
 		if _, ok := authorized[pubkey]; !ok {
 			t.Errorf("authorized publishers missing %s", pubkey)

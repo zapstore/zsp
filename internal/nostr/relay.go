@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -236,9 +237,17 @@ const identityProofLimit = 500
 // wrapping ErrIncompleteResults, because the proof sought may be beyond it. The
 // events it did return are still included.
 func (p *Publisher) FetchIdentityProofsByCertificate(ctx context.Context, certHash string) ([]*nostr.Event, []error, error) {
+	return p.FetchIdentityProofs(ctx, []string{certHash})
+}
+
+// FetchIdentityProofs returns proofs whose d tag is any certificate in certHashes.
+func (p *Publisher) FetchIdentityProofs(ctx context.Context, certHashes []string) ([]*nostr.Event, []error, error) {
+	if len(certHashes) == 0 {
+		return nil, nil, nil
+	}
 	filter := nostr.Filter{
 		Kinds: []int{KindIdentityProof},
-		Tags:  nostr.TagMap{"d": []string{certHash}},
+		Tags:  nostr.TagMap{"d": certHashes},
 		// Kind 30509 is parameterized replaceable by author and d tag. Fetch
 		// enough current author variants to select the latest valid proof
 		// locally; limiting this query to one lets one malformed event hide a
@@ -468,7 +477,7 @@ func compactStrings(values []string) []string {
 // linked by valid main-channel releases from authorized publishers for appID.
 // Releases and assets are queried independently for each publisher so a
 // delegate's release can link an owner's asset.
-func (p *Publisher) HighestReleaseVersionCode(ctx context.Context, publishers map[string]struct{}, appID, certificateHash, channel string) (int64, time.Time, []error, error) {
+func (p *Publisher) HighestReleaseVersionCode(ctx context.Context, publishers map[string]struct{}, appID string, certificateHashes []string, channel string) (int64, time.Time, []error, error) {
 	if channel == "" {
 		channel = "main"
 	}
@@ -519,11 +528,15 @@ func (p *Publisher) HighestReleaseVersionCode(ctx context.Context, publishers ma
 	if completed == 0 && len(p.relayURLs) > 0 {
 		return 0, time.Time{}, warnings, relayQueryError("release", warnings)
 	}
-	maximum, latestTimestamp := highestLinkedReleaseVersion(eventsByID, certificateHash, channel)
+	maximum, latestTimestamp := highestLinkedReleaseVersion(eventsByID, certificateHashes, channel)
 	return maximum, latestTimestamp, warnings, nil
 }
 
-func highestLinkedReleaseVersion(eventsByID map[string]*nostr.Event, certificateHash, channel string) (int64, time.Time) {
+func highestLinkedReleaseVersion(eventsByID map[string]*nostr.Event, certificateHashes []string, channel string) (int64, time.Time) {
+	allowed := make(map[string]struct{}, len(certificateHashes))
+	for _, hash := range certificateHashes {
+		allowed[strings.ToLower(hash)] = struct{}{}
+	}
 	if channel == "" {
 		channel = "main"
 	}
@@ -543,7 +556,10 @@ func highestLinkedReleaseVersion(eventsByID map[string]*nostr.Event, certificate
 				continue
 			}
 			assetCertificate, validCertificate := singleTagValue(asset.Tags, "apk_certificate_hash")
-			if !validCertificate || assetCertificate != certificateHash {
+			if !validCertificate {
+				continue
+			}
+			if _, ok := allowed[strings.ToLower(assetCertificate)]; !ok {
 				continue
 			}
 			versionValue, validVersion := singleTagValue(asset.Tags, "version_code")

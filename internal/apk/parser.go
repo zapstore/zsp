@@ -84,6 +84,9 @@ type APKInfo struct {
 	// verified rotation lineage.
 	SigningAncestors []string
 
+	// certificates is the verified chain, oldest first, ending at Certificate.
+	certificates []*x509.Certificate
+
 	// Icon PNG bytes (nil if not found or extraction failed)
 	Icon []byte
 
@@ -160,6 +163,7 @@ func Parse(ctx context.Context, apkPath string) (info *APKInfo, err error) {
 	info.Certificate = sig.cert
 	info.CertFingerprint = sig.fingerprint()
 	info.SigningAncestors = sig.ancestors
+	info.certificates = sig.chain
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -661,7 +665,8 @@ func isValidZipEntryPath(name string) bool {
 // v3 signing-certificate-rotation lineage ending at that certificate.
 type verifiedSignature struct {
 	cert      *x509.Certificate
-	ancestors []string // SHA-256 hex fingerprints, oldest to newest, excluding cert
+	ancestors []string            // SHA-256 hex fingerprints, oldest to newest, excluding cert
+	chain     []*x509.Certificate // oldest first, ending at cert
 }
 
 func (s *verifiedSignature) fingerprint() string {
@@ -699,7 +704,29 @@ func verifySignature(apkPath string) (*verifiedSignature, error) {
 		return nil, fmt.Errorf("verify signature: %w", err)
 	}
 
-	return &verifiedSignature{cert: cert, ancestors: ancestors}, nil
+	return &verifiedSignature{cert: cert, ancestors: ancestors, chain: signingChain(res, cert)}, nil
+}
+
+// signingChain is the verified lineage, oldest first, ending at current.
+// A file with no rotation is a chain of one.
+func signingChain(res apkverifier.Result, current *x509.Certificate) []*x509.Certificate {
+	if res.SigningBlockResult == nil || res.SigningBlockResult.SigningLineage == nil {
+		return []*x509.Certificate{current}
+	}
+	nodes := res.SigningBlockResult.SigningLineage.Nodes
+	if len(nodes) <= 1 {
+		return []*x509.Certificate{current}
+	}
+	chain := make([]*x509.Certificate, 0, len(nodes))
+	for _, node := range nodes {
+		if node.SigningCert != nil {
+			chain = append(chain, node.SigningCert)
+		}
+	}
+	if len(chain) == 0 {
+		return []*x509.Certificate{current}
+	}
+	return chain
 }
 
 // signingAncestors returns the validated v3 signing-certificate-rotation
@@ -735,6 +762,48 @@ func signingAncestors(res apkverifier.Result, current *x509.Certificate) ([]stri
 		ancestors = append(ancestors, hex.EncodeToString(sum[:]))
 	}
 	return ancestors, nil
+}
+
+// Certificates returns the verified signing chain, oldest first, ending at
+// the current signer.
+// CertificateHashes is the current signer and its ancestors, signer first.
+func (info *APKInfo) CertificateHashes() []string {
+	if info == nil {
+		return nil
+	}
+	out := make([]string, 0, 1+len(info.SigningAncestors))
+	if info.CertFingerprint != "" {
+		out = append(out, info.CertFingerprint)
+	}
+	return append(out, info.SigningAncestors...)
+}
+
+func (info *APKInfo) Certificates() []*x509.Certificate {
+	if info == nil {
+		return nil
+	}
+	if len(info.certificates) == 0 && info.Certificate != nil {
+		return []*x509.Certificate{info.Certificate}
+	}
+	return info.certificates
+}
+
+// SigningCertificates verifies path and returns its signing chain, oldest
+// first, ending at the current signer.
+func SigningCertificates(ctx context.Context, apkPath string) (chain []*x509.Certificate, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			chain, err = nil, malformedInput(r)
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	sig, err := verifySignature(apkPath)
+	if err != nil {
+		return nil, err
+	}
+	return sig.chain, nil
 }
 
 // ExtractCertificate extracts the current signing certificate from an APK
