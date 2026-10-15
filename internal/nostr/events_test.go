@@ -243,17 +243,18 @@ func TestBuildReleaseEventEmptyVersionFallsBackToVersionCode(t *testing.T) {
 
 func TestBuildSoftwareAssetEvent(t *testing.T) {
 	meta := &AssetMetadata{
-		Identifier:      "com.example.app",
-		Version:         "1.2.3",
-		VersionCode:     123,
-		SHA256:          "abc123def456",
-		Size:            1024000,
-		URLs:            []string{"https://cdn.example.com/abc123def456"},
-		CertFingerprint: "cert123",
-		MinSDK:          21,
-		TargetSDK:       34,
-		Platforms:       []string{"android-arm64-v8a", "android-armeabi-v7a"},
-		Filename:        "example-v1.2.3-arm64.apk",
+		Identifier:       "com.example.app",
+		Version:          "1.2.3",
+		VersionCode:      123,
+		SHA256:           "abc123def456",
+		Size:             1024000,
+		URLs:             []string{"https://cdn.example.com/abc123def456"},
+		CertFingerprint:  "cert123",
+		SigningAncestors: []string{"oldest", "newer"},
+		MinSDK:           21,
+		TargetSDK:        34,
+		Platforms:        []string{"android-arm64-v8a", "android-armeabi-v7a"},
+		Filename:         "example-v1.2.3-arm64.apk",
 	}
 
 	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -291,6 +292,10 @@ func TestBuildSoftwareAssetEvent(t *testing.T) {
 	certTag := event.Tags.GetFirst([]string{"apk_certificate_hash"})
 	if certTag == nil || (*certTag)[1] != "cert123" {
 		t.Error("missing or incorrect apk_certificate_hash tag")
+	}
+	ancestors := filterExactTag(event.Tags, "apk_certificate_ancestor")
+	if len(ancestors) != 2 || ancestors[0][1] != "oldest" || ancestors[1][1] != "newer" {
+		t.Errorf("apk_certificate_ancestor = %v, want oldest then newer", ancestors)
 	}
 
 	// Check platform tags (f tags per NIP-82)

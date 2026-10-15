@@ -61,7 +61,8 @@ type AssetMetadata struct {
 	SHA256                string
 	Size                  int64
 	URLs                  []string // Download URLs (Blossom)
-	CertFingerprint       string   // APK signing certificate SHA256
+	CertFingerprint       string   // Current APK signing certificate SHA256
+	SigningAncestors      []string // Older certificates, oldest first, excluding CertFingerprint
 	MinSDK                int32
 	TargetSDK             int32
 	Platforms             []string // Full platform identifiers (e.g., "android-arm64-v8a")
@@ -281,9 +282,12 @@ func BuildSoftwareAssetEvent(meta *AssetMetadata, pubkey string) *nostr.Event {
 		tags = append(tags, nostr.Tag{"min_allowed_version_code", strconv.FormatInt(meta.MinAllowedVersionCode, 10)})
 	}
 
-	// APK certificate hash - REQUIRED for Android per NIP-82
+	// Current signer. One tag. Ancestors are the older certificates, oldest first.
 	if meta.CertFingerprint != "" {
 		tags = append(tags, nostr.Tag{"apk_certificate_hash", meta.CertFingerprint})
+	}
+	for _, ancestor := range meta.SigningAncestors {
+		tags = append(tags, nostr.Tag{"apk_certificate_ancestor", ancestor})
 	}
 
 	return &nostr.Event{
@@ -495,6 +499,7 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		Size:                  apkInfo.FileSize,
 		URLs:                  apkURLs,
 		CertFingerprint:       apkInfo.CertFingerprint,
+		SigningAncestors:      apkInfo.SigningAncestors,
 		MinSDK:                apkInfo.MinSDK,
 		TargetSDK:             apkInfo.TargetSDK,
 		Platforms:             platforms,
