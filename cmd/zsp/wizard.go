@@ -33,10 +33,18 @@ const c1RenewalWindow = 30 * 24 * time.Hour
 var errNsecSetup = errors.New("nsec setup required")
 
 // wizardRun is the configuration the wizard resolved for one run. configLabel
-// names the zapstore.yaml in use, empty when the run has none.
+// names the zapstore.yaml in use, empty when the run has none. yamlBytes is
+// the file text the run started from. hadYAML is true when a local or
+// committed file was already in use. sourceChanged is true when the developer
+// replaced the source in a local file.
 type wizardRun struct {
-	config      zsp.Config
-	configLabel string
+	config        zsp.Config
+	configLabel   string
+	yamlBytes     []byte
+	localYAML     bool
+	hadYAML       bool
+	sourceChanged bool
+	wroteYAML     bool
 }
 
 // runWizard is the interactive entry point for `zsp`.
@@ -56,7 +64,7 @@ func runWizard(ctx context.Context) int {
 	if len(unreachableRelays) > 0 {
 		ui.WritePanel(os.Stderr, "warning", "Some configured relays couldn't be reached", wizardRelayTargets(unreachableRelays), wizardContinuingNotes(relayURLs, unreachableRelays))
 	}
-	local, localPath, err := loadWizardConfig("zapstore.yaml")
+	local, localPath, err := loadWizardConfig(wizardConfigName)
 	if err != nil {
 		return wizardError("Configuration setup stopped", err)
 	}
@@ -64,33 +72,48 @@ func runWizard(ctx context.Context) int {
 	steps := ui.NewStepTracker(3)
 	steps.StartStep("📦 Add your app")
 	defaultSource := wizardSourceDefault(local)
-	answer, err := ui.PromptPathDefault("Where is your APK?", "Paste a releases page (GitHub, GitLab, Codeberg, F-Droid…) or the path to an APK file.", defaultSource, true)
-	if err != nil {
-		return wizardError("App discovery stopped", err)
-	}
-	run, err := wizardResolveRun(ctx, strings.TrimSpace(answer), defaultSource, local, localPath)
-	if err != nil {
-		return wizardError("App discovery stopped", err)
-	}
+	var run wizardRun
+	var candidates []*zsp.APK
+	var selected *zsp.APK
+	defer func() { closeCandidates(candidates) }()
+	for {
+		answer, err := ui.PromptPathDefault("Where is your APK?", "Paste a releases page (GitHub, GitLab, Codeberg, F-Droid…) or the path to an APK file.", defaultSource, true)
+		if err != nil {
+			return wizardError("App discovery stopped", err)
+		}
+		run, err = wizardResolveRun(ctx, strings.TrimSpace(answer), defaultSource, local, localPath)
+		if err != nil {
+			return wizardError("App discovery stopped", err)
+		}
 
-	spinner := ui.NewSpinner("Finding and inspecting APK releases...")
-	spinner.Start()
-	candidates, err := zsp.Fetch(ctx, run.config.Fetch, zsp.FetchOptions{SkipHTTPCache: true})
-	spinner.Stop()
-	if err != nil {
-		if isWizardCancel(err) {
-			return wizardError("No verified APK release found", err)
+		spinner := ui.NewSpinner("Finding and inspecting APK releases...")
+		spinner.Start()
+		candidates, err = zsp.Fetch(ctx, run.config.Fetch, zsp.FetchOptions{SkipHTTPCache: true})
+		spinner.Stop()
+		if err != nil {
+			if isWizardCancel(err) {
+				return wizardError("No verified APK release found", err)
+			}
+			ui.PrintInfo("No verified APK release was found at " + wizardReleaseLocation(run.config))
+			if reason := wizardFailureReason(err); reason != "" {
+				ui.PrintInfo("Reason: " + reason)
+			}
+			return 1
 		}
-		ui.PrintInfo("No verified APK release was found at " + wizardReleaseLocation(run.config))
-		if reason := wizardFailureReason(err); reason != "" {
-			ui.PrintInfo("Reason: " + reason)
+		selected, err = selectAPKForAppSetup(candidates)
+		if err != nil {
+			return wizardError("APK selection stopped", err)
 		}
-		return 1
-	}
-	defer closeCandidates(candidates)
-	selected, err := selectAPKForAppSetup(candidates)
-	if err != nil {
-		return wizardError("APK selection stopped", err)
+		back, err := wizardChooseMetadata(ctx, &run, selected.AppID)
+		if back {
+			closeCandidates(candidates)
+			candidates = nil
+			continue
+		}
+		if err != nil {
+			return wizardError("Listing sources stopped", err)
+		}
+		break
 	}
 	appName := selected.Name
 	if appName == "" {
@@ -100,7 +123,7 @@ func runWizard(ctx context.Context) int {
 	location := wizardReleaseLocation(run.config)
 	ui.PrintSuccess(fmt.Sprintf("Found %s (%s) at %s", appName, version, location))
 
-	spinner = ui.NewSpinner("Checking whether " + appName + " is on Zapstore...")
+	spinner := ui.NewSpinner("Checking whether " + appName + " is on Zapstore...")
 	spinner.Start()
 	locations, _, err := publisher.FindAppEvents(ctx, selected.AppID)
 	spinner.Stop()
@@ -152,7 +175,7 @@ func runWizard(ctx context.Context) int {
 	} else if code := wizardFirstRelease(ctx, run, selected, state, appName, version); code != 0 || !state.published {
 		return code
 	}
-	return wizardNextReleases(ctx, state, appName, run.configLabel != "")
+	return wizardNextReleases(ctx, state, appName, run.wroteYAML, run.hadYAML)
 }
 
 func isWizardCancel(err error) bool {
@@ -214,7 +237,11 @@ func wizardSourceDefault(cfg zsp.Config) string {
 // forge repository's committed zapstore.yaml is used when it is valid.
 func wizardResolveRun(ctx context.Context, answer, defaultSource string, local zsp.Config, localPath string) (wizardRun, error) {
 	if localPath != "" {
-		run := wizardRun{config: local, configLabel: localPath}
+		data, err := os.ReadFile(localPath)
+		if err != nil {
+			return wizardRun{}, err
+		}
+		run := wizardRun{config: local, configLabel: localPath, yamlBytes: data, localYAML: true, hadYAML: true}
 		if answer != defaultSource {
 			fetch, err := wizardConfigFromSource(answer)
 			if err != nil {
@@ -224,6 +251,7 @@ func wizardResolveRun(ctx context.Context, answer, defaultSource string, local z
 			fetch.Match = local.Fetch.Match
 			fetch.PrereleaseChannel = local.Fetch.PrereleaseChannel
 			run.config.Fetch = fetch
+			run.sourceChanged = true
 		}
 		ui.PrintInfo("Using the local zapstore.yaml (" + localPath + ")")
 		return run, nil
@@ -238,26 +266,30 @@ func wizardResolveRun(ctx context.Context, answer, defaultSource string, local z
 	}
 	spinner := ui.NewSpinner("Looking for zapstore.yaml in " + fetch.Repository + "...")
 	spinner.Start()
-	remote, ok := wizardRepoConfig(ctx, fetch.Repository)
+	remote, remoteBytes, ok := wizardRepoConfig(ctx, fetch.Repository)
 	spinner.Stop()
 	if !ok {
 		ui.PrintInfo("No zapstore.yaml committed in " + fetch.Repository + " yet")
 		return run, nil
 	}
 	ui.PrintInfo("Using the committed zapstore.yaml in " + fetch.Repository + " (default branch)")
-	return wizardRun{config: remote, configLabel: fetch.Repository}, nil
+	return wizardRun{config: remote, configLabel: fetch.Repository, yamlBytes: remoteBytes, hadYAML: true}, nil
 }
 
 // wizardRepoConfig fetches the repository-root zapstore.yaml on the default
 // branch. Relative media and release-note paths resolve from that root. A
 // missing or invalid file, including one with a local release source, is
 // reported as absent.
-func wizardRepoConfig(ctx context.Context, repository string) (zsp.Config, bool) {
+func wizardRepoConfig(ctx context.Context, repository string) (zsp.Config, []byte, bool) {
 	data, err := source.FetchRepoConfig(ctx, repository)
 	if err != nil {
-		return zsp.Config{}, false
+		return zsp.Config{}, nil, false
 	}
-	return parseWizardRepoConfig(data, repository)
+	cfg, ok := parseWizardRepoConfig(data, repository)
+	if !ok {
+		return zsp.Config{}, nil, false
+	}
+	return cfg, data, true
 }
 
 func parseWizardRepoConfig(data []byte, repository string) (zsp.Config, bool) {
@@ -425,7 +457,7 @@ func wizardFailureDetails(err error) []ui.KeyValue {
 
 func wizardCancellationSummary(title string) string {
 	switch title {
-	case "App discovery stopped", "No verified APK release found", "APK selection stopped":
+	case "App discovery stopped", "No verified APK release found", "APK selection stopped", "Listing sources stopped":
 		return "App discovery was cancelled. No changes were made"
 	case "Identity setup stopped":
 		return "No proof was changed"
@@ -452,6 +484,8 @@ func wizardFailureSummary(title string) string {
 		return "No proof was changed"
 	case "Configuration setup stopped":
 		return "Couldn't use zapstore.yaml. Fix it and try again"
+	case "Listing sources stopped":
+		return "Couldn't save zapstore.yaml"
 	case "Publishing choice stopped", "Signing setup stopped":
 		return "Nothing was published"
 	case "Publication stopped":
@@ -817,7 +851,14 @@ func wizardPublishNow(ctx context.Context, run wizardRun, selected *zsp.APK, sta
 		}
 		state.signer = signer
 	}
-	options := zsp.PublishOptions{Preview: true}
+	options := zsp.PublishOptions{
+		Preview: true,
+		OnProgress: func(progress zsp.Progress) {
+			if progress.Phase == "preview" && progress.Target != "" {
+				ui.PrintInfo("Preview " + progress.Target)
+			}
+		},
+	}
 	if state.proofPending {
 		options.ProofSigner = state.certificateSigner()
 	} else if _, allowed := authorizedPublisherSet(state.owner, state.delegate)[state.signer.PublicKey()]; !allowed {
@@ -842,7 +883,7 @@ func wizardPublishNow(ctx context.Context, run wizardRun, selected *zsp.APK, sta
 // wizardNextReleases is the last question: Zapstore publishes new releases
 // when RELAYS includes its relay, else the developer does; or the
 // developer's CI does. Esc on a CI/CD prompt returns to it.
-func wizardNextReleases(ctx context.Context, state *wizardIdentityState, appName string, hasConfig bool) int {
+func wizardNextReleases(ctx context.Context, state *wizardIdentityState, appName string, wroteYAML, hadYAML bool) int {
 	zapstore := hasZapstoreRelay(relaysFromEnv())
 	for {
 		choice, err := ui.SelectField("How should new releases of "+appName+" reach Zapstore?", "", wizardNextReleaseChoices(zapstore))
@@ -850,7 +891,7 @@ func wizardNextReleases(ctx context.Context, state *wizardIdentityState, appName
 			return wizardError("Setup stopped", err)
 		}
 		if choice != wizardChoiceCICD {
-			wizardHandoff(appName, hasConfig, zapstore)
+			wizardHandoff(appName, wroteYAML, hadYAML, zapstore)
 			return 0
 		}
 		code, back := wizardDelegation(ctx, state, appName)
@@ -915,27 +956,34 @@ func wizardDelegation(ctx context.Context, state *wizardIdentityState, appName s
 	}
 }
 
-// wizardHandoffNotes is the agent hand-off: the wizard never writes
-// zapstore.yaml, the agent skill does.
-func wizardHandoffNotes(appName string, hasConfig, zapstore bool) (string, []string) {
-	ask := `Next: ask your coding agent to "run zsp skill and write a zapstore.yaml"`
-	if hasConfig {
-		ask = `Next: ask your coding agent to "run zsp skill and improve the zapstore.yaml"`
+// wizardHandoffNotes is the last note. A file written this run should be
+// committed. A file the run left unchanged can still be improved by an agent.
+func wizardHandoffNotes(appName string, wroteYAML, hadYAML, zapstore bool) (string, []string) {
+	var next string
+	switch {
+	case (wroteYAML || !hadYAML) && zapstore:
+		next = "Wrote zapstore.yaml. Commit it and push it. An agent can improve it."
+	case wroteYAML || !hadYAML:
+		next = "Wrote zapstore.yaml. Commit it, then run zsp publish after each release. An agent can improve it."
+	case zapstore:
+		next = `Next: ask your coding agent to "run zsp skill and improve the zapstore.yaml", then push it.`
+	default:
+		next = `Next: ask your coding agent to "run zsp skill and improve the zapstore.yaml", then run zsp publish after each release.`
 	}
 	if zapstore {
 		return "Zapstore will keep " + appName + " up to date", []string{
 			"Your proof lets Zapstore publish each new release, shown as developed by you.",
-			ask + ", then push it.",
+			next,
 		}
 	}
 	return "You'll publish new releases of " + appName, []string{
 		"Your proof lets you publish each release with zsp publish, shown as developed by you.",
-		ask + ", then run zsp publish after each release.",
+		next,
 	}
 }
 
-func wizardHandoff(appName string, hasConfig, zapstore bool) {
-	title, notes := wizardHandoffNotes(appName, hasConfig, zapstore)
+func wizardHandoff(appName string, wroteYAML, hadYAML, zapstore bool) {
+	title, notes := wizardHandoffNotes(appName, wroteYAML, hadYAML, zapstore)
 	ui.WritePanel(os.Stdout, "success", title, nil, notes)
 }
 

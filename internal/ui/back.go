@@ -77,6 +77,27 @@ func PromptPathBack(ctx context.Context, title, description string, required boo
 	return strings.TrimSpace(*value), nil
 }
 
+// MultiSelectFieldBack asks the user to keep or clear any of choices. Every
+// choice starts selected. Esc returns ErrBack. Cancelling ctx ends the prompt.
+func MultiSelectFieldBack(ctx context.Context, title, description string, choices []SelectChoice) ([]string, error) {
+	selected := make([]string, len(choices))
+	options := make([]huh.Option[string], len(choices))
+	for i, choice := range choices {
+		selected[i] = choice.Value
+		options[i] = huh.NewOption(choice.Label, choice.Value).Selected(true)
+	}
+	field := huh.NewMultiSelect[string]().
+		Title(title).
+		Description(description).
+		Options(options...).
+		Value(&selected).
+		Filterable(false)
+	if err := runBackForm(ctx, huh.NewForm(huh.NewGroup(field))); err != nil {
+		return nil, err
+	}
+	return selected, nil
+}
+
 // ConfirmBack asks a yes/no question where Esc returns ErrBack. Cancelling ctx
 // ends the prompt.
 func ConfirmBack(ctx context.Context, title, description string, defaultYes bool) (bool, error) {

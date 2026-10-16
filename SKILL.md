@@ -32,7 +32,7 @@ zsp publish -q -s <signed-apk>
 
 `SIGN_WITH` must already be set. An npub cannot publish. When `HOTBOX_SOCKET` and `HOTBOX_PIN` are set, this run creates or renews the C1 proof. A `version_code` not greater than the published one will not publish unless they asked for `--overwrite-release`. If several APKs verify, add `--apk-hash <hash>` from `error.context.candidates`. When `error.next_step.requires_human` is true, tell them to run `zsp` themselves and stop. When there is nothing newer to publish, say so and stop.
 
-`zsp` never writes `zapstore.yaml`; you do, and only when the file is missing or they asked to change it. Follow the format below. Do not invent fields. A local APK goes in `release_source` only when the file has no public release source. When `repository` is the release source and they are uploading a local APK, tell them to attach this APK to the forge release and keep the local path out of the committed file. Until then, this run may pass `-s <apk>`. When `release_source` is already another URL, leave it.
+The wizard may already have written `repository` or `release_source` and `metadata_sources`. Keep `metadata_sources` when the file sets it, including `[]`. Otherwise you write `zapstore.yaml`, and only when the file is missing or they asked to change it. Follow the format below. Do not invent fields. A local APK goes in `release_source` only when the file has no public release source. When `repository` is the release source and they are uploading a local APK, tell them to attach this APK to the forge release and keep the local path out of the committed file. Until then, this run may pass `-s <apk>`. When `release_source` is already another URL, leave it.
 
 When they asked only to check a signed APK, run `zsp check` on it once.
 

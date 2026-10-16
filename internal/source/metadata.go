@@ -738,6 +738,7 @@ func (f *MetadataFetcher) fetchPlayStoreMetadata(ctx context.Context) (*AppMetad
 
 	// Create Play Store fetcher and get metadata
 	ps := NewPlayStore(packageID)
+	ps.client = f.client
 	psMeta, err := ps.FetchMetadata(ctx)
 	if err != nil {
 		return nil, err

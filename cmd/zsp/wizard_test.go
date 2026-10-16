@@ -178,19 +178,19 @@ func TestParseWizardRepoConfigRejectsInvalidFiles(t *testing.T) {
 }
 
 func TestWizardHandoffNotesPointAtSkill(t *testing.T) {
-	title, notes := wizardHandoffNotes("Notes", false, true)
+	title, notes := wizardHandoffNotes("Notes", true, false, true)
 	if title != "Zapstore will keep Notes up to date" {
 		t.Fatalf("title = %q", title)
 	}
-	if len(notes) != 2 || !strings.Contains(notes[0], "shown as developed by you") || !strings.Contains(notes[1], `"run zsp skill and write a zapstore.yaml"`) {
+	if len(notes) != 2 || !strings.Contains(notes[0], "shown as developed by you") || notes[1] != "Wrote zapstore.yaml. Commit it and push it. An agent can improve it." {
 		t.Fatalf("notes = %v", notes)
 	}
-	_, notes = wizardHandoffNotes("Notes", true, true)
+	_, notes = wizardHandoffNotes("Notes", false, true, true)
 	if !strings.Contains(notes[1], "improve the zapstore.yaml") {
 		t.Fatalf("with config notes = %v", notes)
 	}
-	title, notes = wizardHandoffNotes("Notes", false, false)
-	if title != "You'll publish new releases of Notes" || !strings.Contains(notes[1], "run zsp publish after each release") {
+	title, notes = wizardHandoffNotes("Notes", true, false, false)
+	if title != "You'll publish new releases of Notes" || !strings.Contains(notes[1], "run zsp publish after each release") || !strings.Contains(notes[1], "Wrote zapstore.yaml") {
 		t.Fatalf("without Zapstore relay = (%q, %v)", title, notes)
 	}
 }

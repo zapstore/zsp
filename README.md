@@ -23,9 +23,10 @@ ZSP finds your APK, checks that your keystore signed it, and publishes the
 proof that the app is yours: alone when the app is already listed,
 otherwise with the first release.
 
-The wizard does not write `zapstore.yaml`. Ask your coding agent to run
-`zsp skill` and write one, then commit and push it so Zapstore keeps your
-listing up to date.
+The wizard writes a basic `zapstore.yaml`: where the APK comes from, and
+which metadata sources fill the listing. Commit and push it so Zapstore
+keeps the listing up to date. An agent can improve the file; run
+`zsp skill` for that.
 
 ## Check
 
