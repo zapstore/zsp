@@ -17,6 +17,7 @@ endif
 GOOS ?= $(shell go env GOOS)
 GOARCH ?= $(shell go env GOARCH)
 BIN := dist/$(NAME)-$(GOOS)-$(GOARCH)
+LOCALBIN := $(HOME)/.local/bin
 
 comma := ,
 ifeq ($(GOOS),darwin)
@@ -31,6 +32,10 @@ export CGO_LDFLAGS
 
 all: bin
 	ln -sfn $(BIN) $(NAME)
+	@if [ -d "$(LOCALBIN)" ]; then \
+		ln -sfn "$(CURDIR)/$(BIN)" "$(LOCALBIN)/$(NAME)" || exit 1; \
+		echo "linked $(LOCALBIN)/$(NAME)"; \
+	fi
 
 bin:
 	mkdir -p dist
@@ -55,6 +60,10 @@ linux-amd64:
 clean:
 	rm -rf dist
 	rm -f $(NAME)
+	@l="$(LOCALBIN)/$(NAME)"; \
+	if [ -L "$$l" ]; then \
+		case "$$(readlink "$$l")" in "$(CURDIR)/dist/"*) rm -f "$$l";; esac; \
+	fi
 
 test:
 	$(MAKE) test-unit
