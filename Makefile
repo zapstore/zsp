@@ -1,25 +1,60 @@
-# Deploy runs: make release REF=<ref>
-# Writes dist/<name>-<ref>-<arch>. Infra installs that file as releases/<id>-<ref>.
+# dist/<name>-<os>-<arch>
 
 NAME := zsp
-REF ?=
-GOARCH ?= $(shell go env GOARCH)
-DIST := dist/$(NAME)-$(or $(REF),dev)-$(GOARCH)
+CMD := ./cmd/zsp
 
-# The WebP encoder compiles the bundled libwebp, so every build and test needs cgo.
+# libwebp is cgo, including under make test.
 export CGO_ENABLED = 1
+GOFLAGS := -trimpath
+LDFLAGS := -s -w
 
-.PHONY: release clean test test-unit test-integration test-release
+# Stamp main.version only when HEAD is exactly a git tag.
+VERSION := $(shell git describe --tags --exact-match HEAD 2>/dev/null)
+ifneq ($(VERSION),)
+LDFLAGS += -X main.version=$(VERSION)
+endif
 
-release:
+GOOS ?= $(shell go env GOOS)
+GOARCH ?= $(shell go env GOARCH)
+BIN := dist/$(NAME)-$(GOOS)-$(GOARCH)
+
+comma := ,
+ifeq ($(GOOS),darwin)
+CGO_LDFLAGS += -Wl,-no_warn_duplicate_libraries
+else
+# A Darwin parent exports this flag; zig rejects it when linking Linux.
+CGO_LDFLAGS := $(filter-out -Wl$(comma)-no_warn_duplicate_libraries,$(CGO_LDFLAGS))
+endif
+export CGO_LDFLAGS
+
+.PHONY: all bin darwin-arm64 linux-arm64 linux-amd64 clean test test-unit test-integration test-release
+
+all: bin
+	ln -sfn $(BIN) $(NAME)
+
+bin:
 	mkdir -p dist
-	rm -rf $(DIST)
-	go build -trimpath \
-		-ldflags '-s -w $(if $(REF),-X main.version=$(REF))' \
-		-o $(DIST) ./cmd/zsp
+	rm -rf $(BIN)
+	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) \
+		go build $(GOFLAGS) -ldflags '$(LDFLAGS)' \
+		-o $(BIN) $(CMD)
+
+darwin-arm64:
+	$(MAKE) bin GOOS=darwin GOARCH=arm64
+
+linux-arm64:
+	$(MAKE) bin GOOS=linux GOARCH=arm64 \
+		CC="zig cc -target aarch64-linux-gnu" \
+		CXX="zig c++ -target aarch64-linux-gnu"
+
+linux-amd64:
+	$(MAKE) bin GOOS=linux GOARCH=amd64 \
+		CC="zig cc -target x86_64-linux-gnu" \
+		CXX="zig c++ -target x86_64-linux-gnu"
 
 clean:
 	rm -rf dist
+	rm -f $(NAME)
 
 test:
 	$(MAKE) test-unit
