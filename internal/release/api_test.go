@@ -666,6 +666,57 @@ func TestAllRelayQueryFailuresAreRetryable(t *testing.T) {
 	}
 }
 
+func TestUnsignedAPKFile(t *testing.T) {
+	signed := buildSignedTestAPK(t)
+	unsigned := filepath.Join(filepath.Dir(signed), "unsigned.apk")
+	got, err := apk.Unsigned(unsigned)
+	if err != nil || !got {
+		t.Fatalf("unsigned = %v %v", got, err)
+	}
+	got, err = apk.Unsigned(signed)
+	if err != nil || got {
+		t.Fatalf("signed = %v %v", got, err)
+	}
+	root := t.TempDir()
+	nested := filepath.Join(root, "a", "b")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	armUnsigned := filepath.Join(nested, "app-arm64-v8a-release-unsigned.apk")
+	if err := os.Link(unsigned, armUnsigned); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(signed, filepath.Join(root, "app-release.apk")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "bad.apk"), []byte("not an apk"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	found, err := FindUnsigned(root)
+	if err != nil || len(found) != 1 || found[0] != armUnsigned {
+		t.Fatalf("found = %v err %v", found, err)
+	}
+}
+
+func TestNoCandidateErrorNamesTheUnsignedArm64APK(t *testing.T) {
+	assets := []*source.Asset{
+		{Name: "app-x86_64-release-unsigned.apk"},
+		{Name: "app-armeabi-v7a-release-unsigned.apk"},
+		{Name: "app-arm64-v8a-release-unsigned.apk"},
+	}
+	err := noCandidateError(assets, "")
+	if !errors.Is(err, ErrInvalidAPK) || !strings.Contains(err.Error(), "app-arm64-v8a-release-unsigned.apk") {
+		t.Fatalf("error = %v", err)
+	}
+	missed := noCandidateError([]*source.Asset{{Name: "app-arm64-v8a-release.apk"}}, "no-such")
+	if !errors.Is(missed, ErrNoAPK) {
+		t.Fatalf("match miss = %v", missed)
+	}
+}
+
 func TestExcludedFilenameUsesTokenBoundaries(t *testing.T) {
 	tests := []struct {
 		name string

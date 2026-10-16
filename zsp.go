@@ -103,6 +103,11 @@ func Check(ctx context.Context, config PublishConfig, candidate *APK, options Ch
 	return release.Check(ctx, config, candidate, options)
 }
 
+// FindUnsigned walks dir and returns the valid unsigned APKs, in walk order.
+func FindUnsigned(dir string) ([]string, error) {
+	return release.FindUnsigned(dir)
+}
+
 // Publish uploads one verified APK and publishes its NIP-82 events.
 func Publish(ctx context.Context, config PublishConfig, candidate *APK, options PublishOptions) (*PublishResult, error) {
 	return release.Publish(ctx, config, candidate, options)

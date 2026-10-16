@@ -64,7 +64,7 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 		return nil, err
 	}
 	if len(candidates) == 0 {
-		return nil, operationErr(ErrNoAPK, false, "no APK candidates")
+		return nil, noCandidateError(release.Assets, config.Match)
 	}
 	isLocalSource := config.ReleaseSource != nil && config.ReleaseSource.LocalPath != ""
 	if len(candidates) > 10 && !isLocalSource {
@@ -380,6 +380,7 @@ func filterCandidates(assets []*source.Asset, match string) ([]*source.Asset, er
 }
 
 var excludedFilenamePattern = regexp.MustCompile(`(?i)(^|[^a-z0-9])(x86_64|x86|armeabi-v7a|armeabi|unsigned|split|config)([^a-z0-9]|$)`)
+var unsignedFilenamePattern = regexp.MustCompile(`(?i)(^|[^a-z0-9])unsigned([^a-z0-9]|$)`)
 var (
 	fdroidFilenamePattern        = regexp.MustCompile(`(?i)(^|[^a-z0-9])f-?droid([^a-z0-9]|$)`)
 	nonProductionFilenamePattern = regexp.MustCompile(`(?i)(^|[^a-z0-9])(debug|test[-_]?signed)([^a-z0-9]|$)`)
@@ -390,6 +391,54 @@ var (
 
 func excludedFilename(name string) bool {
 	return excludedFilenamePattern.MatchString(name)
+}
+
+// noCandidateError reports an unsigned APK by name. no_apk is only for a
+// source that has no APK left after filtering. Signing is not this package's job.
+func noCandidateError(assets []*source.Asset, match string) error {
+	name, err := unsignedAPKName(assets, match)
+	if err != nil {
+		return err
+	}
+	if name != "" {
+		return operationErr(ErrInvalidAPK, false, "unsigned APK %s", name)
+	}
+	return operationErr(ErrNoAPK, false, "no APK candidates")
+}
+
+// unsignedAPKName is an APK the filename filter dropped because its name says
+// unsigned. An arm64-v8a name wins. A match that excludes the file yields "".
+func unsignedAPKName(assets []*source.Asset, match string) (string, error) {
+	var expression *regexp.Regexp
+	if match != "" {
+		var err error
+		expression, err = regexp.Compile(match)
+		if err != nil {
+			return "", wrapOperationError(ErrInvalidConfig, err, false, "validate match")
+		}
+	}
+	var names []string
+	for _, asset := range assets {
+		if asset == nil || !asset.IsAPK() {
+			continue
+		}
+		if expression != nil && !expression.MatchString(asset.Name) {
+			continue
+		}
+		if !unsignedFilenamePattern.MatchString(asset.Name) {
+			continue
+		}
+		names = append(names, asset.Name)
+	}
+	for _, name := range names {
+		if arm64FilenamePattern.MatchString(name) {
+			return name, nil
+		}
+	}
+	if len(names) == 0 {
+		return "", nil
+	}
+	return names[0], nil
 }
 
 func omitGooglePlayCandidates(candidates []*source.Asset) []*source.Asset {

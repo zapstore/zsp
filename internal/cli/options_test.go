@@ -94,8 +94,12 @@ func TestParseArgs_CheckRejectsPublishOnlyFlags(t *testing.T) {
 }
 
 func TestParseArgs_RemovedCommands(t *testing.T) {
-	if opts := parseArgs([]string{"utils", "extract-apk", "app.apk"}); opts.UnknownSubcommand != "utils" {
-		t.Fatalf("utils = %+v, want unknown", opts)
+	opts := parseArgs([]string{"utils", "extract-apk", "--icon-path", "icon.png", "app.apk"})
+	if opts.FlagParseError != nil || opts.Command != CommandUtils || opts.Utils.Operation != "extract-apk" || opts.Utils.IconPath != "icon.png" || len(opts.Args) != 1 || opts.Args[0] != "app.apk" {
+		t.Fatalf("extract-apk = %+v", opts)
+	}
+	if opts := parseArgs([]string{"utils", "find-unsigned", "build"}); opts.FlagParseError != nil || opts.Utils.Operation != "find-unsigned" || len(opts.Args) != 1 {
+		t.Fatalf("find-unsigned = %+v", opts)
 	}
 	if opts := parseArgs([]string{"publish", "--check"}); opts.FlagParseError == nil {
 		t.Fatal("publish --check must be rejected")

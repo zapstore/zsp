@@ -19,6 +19,7 @@ const (
 	CommandWizard  Command = "wizard"
 	CommandCheck   Command = "check"
 	CommandPublish Command = "publish"
+	CommandUtils   Command = "utils"
 	CommandSkill   Command = "skill"
 )
 
@@ -76,6 +77,13 @@ type Options struct {
 
 	Global  GlobalOptions
 	Publish PublishOptions
+	Utils   UtilsOptions
+}
+
+// UtilsOptions holds flags for zsp utils.
+type UtilsOptions struct {
+	Operation string
+	IconPath  string
 }
 
 // stringSliceFlag implements flag.Value to accumulate multiple flag values.
@@ -141,6 +149,9 @@ dispatch:
 	case "publish":
 		opts.Command = CommandPublish
 		parseCommandFlags(opts, args[1:], true)
+	case "utils":
+		opts.Command = CommandUtils
+		parseUtilsArgs(opts, args[1:])
 	case "skill":
 		opts.Command = CommandSkill
 		if len(args) > 1 {
@@ -202,6 +213,49 @@ func parseCommandFlags(opts *Options, args []string, publish bool) {
 	}
 	opts.Publish.Metadata = metadataFlags
 	opts.Args = fs.Args()
+}
+
+func parseUtilsArgs(opts *Options, args []string) {
+	fs := flag.NewFlagSet("utils", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var showHelp bool
+	fs.BoolVar(&showHelp, "h", false, "Show help")
+	fs.BoolVar(&showHelp, "help", false, "Show help")
+	fs.BoolVar(&opts.Global.JSON, "json", opts.Global.JSON, "JSON output")
+	fs.BoolVar(&opts.Global.Verbose, "verbose", opts.Global.Verbose, "Debug output")
+	fs.BoolVar(&opts.Global.NoColor, "no-color", opts.Global.NoColor, "Disable colored output")
+	fs.StringVar(&opts.Utils.IconPath, "icon-path", "", "Write the APK icon to this file")
+	if err := fs.Parse(reorderArgsForFlagSet(args, fs)); err != nil {
+		opts.FlagParseError = err
+		return
+	}
+	if showHelp {
+		opts.Global.Help = true
+		return
+	}
+	rest := fs.Args()
+	if len(rest) == 0 {
+		opts.FlagParseError = fmt.Errorf("usage: zsp utils <extract-apk|find-unsigned>")
+		return
+	}
+	opts.Utils.Operation = rest[0]
+	opts.Args = rest[1:]
+	switch opts.Utils.Operation {
+	case "extract-apk":
+		if len(opts.Args) != 1 {
+			opts.FlagParseError = fmt.Errorf("usage: zsp utils extract-apk <file.apk>")
+		}
+	case "find-unsigned":
+		if opts.Utils.IconPath != "" {
+			opts.FlagParseError = fmt.Errorf("--icon-path is only for extract-apk")
+			return
+		}
+		if len(opts.Args) != 1 {
+			opts.FlagParseError = fmt.Errorf("usage: zsp utils find-unsigned <dir>")
+		}
+	default:
+		opts.FlagParseError = fmt.Errorf("unknown utils operation %q", opts.Utils.Operation)
+	}
 }
 
 // reorderArgsForFlagSet moves flags before positional arguments so flags may

@@ -100,6 +100,8 @@ func run(handler *cli.SignalHandler) int {
 				text = help.PublishHelp()
 			case cli.CommandCheck:
 				text = help.CheckHelp()
+			case cli.CommandUtils:
+				text = help.UtilsHelp()
 			}
 			_ = json.NewEncoder(os.Stdout).Encode(struct {
 				OK        bool   `json:"ok"`
@@ -117,6 +119,9 @@ func run(handler *cli.SignalHandler) int {
 	if options.Command == cli.CommandSkill {
 		fmt.Print(zsp.Skill)
 		return 0
+	}
+	if options.Command == cli.CommandUtils {
+		return utilsCommand(ctx, options)
 	}
 	if err := config.CheckDotEnvPermissions(); err != nil {
 		if options.Global.JSON {

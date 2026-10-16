@@ -46,12 +46,15 @@ func RootHelp() string {
 	b.WriteString(renderBold("COMMANDS") + "\n")
 	b.WriteString("  " + renderAccent("check") + "       " + renderWhite("Verify the APK and show listing, proof, and next step (read-only)") + "\n")
 	b.WriteString("  " + renderAccent("publish") + "     " + renderWhite("Publish APK releases to Nostr relays") + "\n")
+	b.WriteString("  " + renderAccent("utils") + "       " + renderWhite("extract-apk and find-unsigned") + "\n")
 	b.WriteString("  " + renderAccent("skill") + "       " + renderWhite("Print the agent skill for writing zapstore.yaml") + "\n\n")
 
 	b.WriteString(renderBold("EXAMPLES") + "\n")
 	writeExample(&b, "zsp", "Start the interactive app setup wizard")
 	writeExample(&b, "zsp check", "Check zapstore.yaml: listing, proof, next step")
 	writeExample(&b, "zsp check app-release.apk", "Check one local APK")
+	writeExample(&b, "zsp utils extract-apk app.apk", "Print APK metadata as JSON")
+	writeExample(&b, "zsp utils find-unsigned app/build/outputs/apk/release", "Print unsigned APKs under a directory")
 	writeExample(&b, "zsp publish", "Publish from zapstore.yaml")
 	writeExample(&b, "zsp publish -r github.com/org/repo", "Override repository in zapstore.yaml")
 	writeExample(&b, "zsp publish -s ./app-release.apk", "Override release_source in zapstore.yaml")
@@ -248,6 +251,29 @@ func CheckHelp() string {
 	return b.String()
 }
 
+// UtilsHelp returns help for the utils subcommand.
+func UtilsHelp() string {
+	var b strings.Builder
+
+	b.WriteString(renderBold("zsp utils") + " " + renderWhite("— APK file utilities") + "\n\n")
+
+	b.WriteString(renderBold("USAGE") + "\n")
+	b.WriteString("  " + renderAccent("zsp utils extract-apk") + " <file.apk> [--icon-path <file>]\n")
+	b.WriteString("  " + renderAccent("zsp utils find-unsigned") + " <dir>\n\n")
+
+	b.WriteString(renderGreyDark("  extract-apk prints metadata for one signed APK as JSON. The icon is") + "\n")
+	b.WriteString(renderGreyDark("  standard base64 in the icon field. --icon-path writes that icon to a") + "\n")
+	b.WriteString(renderGreyDark("  file and leaves icon out of the JSON.") + "\n\n")
+	b.WriteString(renderGreyDark("  find-unsigned walks a directory and prints each valid unsigned APK,") + "\n")
+	b.WriteString(renderGreyDark("  one path per line. A signed or invalid file is omitted.") + "\n\n")
+
+	b.WriteString(renderBold("EXIT CODES") + "\n")
+	b.WriteString("  " + renderAccent("0") + "   Success\n")
+	b.WriteString("  " + renderAccent("1") + "   Error\n")
+
+	return b.String()
+}
+
 // HandleHelp processes help for a command.
 func HandleHelp(cmd cli.Command, args []string) {
 	if cmd == cli.CommandNone && len(args) > 0 {
@@ -258,6 +284,8 @@ func HandleHelp(cmd cli.Command, args []string) {
 		fmt.Fprint(os.Stdout, PublishHelp())
 	case cli.CommandCheck:
 		fmt.Fprint(os.Stdout, CheckHelp())
+	case cli.CommandUtils:
+		fmt.Fprint(os.Stdout, UtilsHelp())
 	default:
 		fmt.Fprint(os.Stdout, RootHelp())
 	}

@@ -680,6 +680,24 @@ func (s *verifiedSignature) fingerprint() string {
 // mismatches, and downgrade-attack detection) and rejects APKs with more than
 // one current signer, since zsp's identity model requires a single current
 // signing certificate.
+// Unsigned reports whether path has no APK signature. A present but invalid
+// signature is an error, not an unsigned file.
+func Unsigned(path string) (bool, error) {
+	_, err := verifySignature(path)
+	if err == nil {
+		return false, nil
+	}
+	if unsignedVerification(err) {
+		return true, nil
+	}
+	return false, err
+}
+
+func unsignedVerification(err error) bool {
+	message := err.Error()
+	return strings.Contains(message, "No signatures") || strings.Contains(message, "not signed") || strings.Contains(message, "no valid certificate")
+}
+
 func verifySignature(apkPath string) (*verifiedSignature, error) {
 	res, err := apkverifier.Verify(apkPath, nil)
 	if err != nil {
