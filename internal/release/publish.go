@@ -239,7 +239,6 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 	}
 	internalnostr.FinalizeEventSet(events, firstRelay(relayURLs))
 	if options.Preview {
-		reportPublish(options, "publish", "preview", "Awaiting browser approval", 0, 0)
 		previewData := internalnostr.BuildPreviewData(parsed, eventConfig, events, releaseNotes, blossomURL, publicRelayURLs(relayURLs))
 		previewData.C1Status = c1Status
 		previewData.IconURL = media.iconURL
@@ -254,9 +253,11 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 			})
 		}
 		preview := internalnostr.NewPreviewServer(previewData, releaseNotes, media.iconURL, options.BrowserPort)
-		if _, err := preview.Start(); err != nil {
+		previewURL, err := preview.Start()
+		if err != nil {
 			return nil, wrapOperationError(ErrTemporaryFailure, err, true, "start preview"+causeDetail(err))
 		}
+		reportPublish(options, "publish", "preview", previewURL, 0, 0)
 		approved, err := preview.WaitDecision(ctx)
 		_ = preview.Close()
 		if err != nil {
