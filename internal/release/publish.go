@@ -195,21 +195,6 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 	} else if releaseNotes == "" {
 		releaseNotes = verified.releaseNotes
 	}
-	applicationPubkey := signer.PublicKey()
-	if options.SkipAppEvent {
-		appEvents, appWarnings, appErr := publisher.FetchApplicationEvents(ctx, parsed.PackageID, authorizedPublisherList(authorizedPublishers))
-		if appErr != nil {
-			if contextErr := contextOperationError(ctx.Err(), "find existing application event"); contextErr != nil {
-				return nil, contextErr
-			}
-			sentinel, retryable := relayQueryErrorClassification(appErr)
-			return nil, wrapOperationError(sentinel, appErr, retryable, "find existing application event"+causeDetail(appErr))
-		}
-		result.Warnings = append(result.Warnings, safeRelayQueryWarnings("application event", appWarnings)...)
-		if existing := newestAuthorizedApplication(appEvents, parsed.PackageID, authorizedPublishers); existing != nil {
-			applicationPubkey = existing.PubKey
-		}
-	}
 	events := internalnostr.BuildEventSet(internalnostr.BuildEventSetParams{
 		APKInfo: parsed, Config: eventConfig, Pubkey: signer.PublicKey(), OriginalURL: verified.originalURL,
 		BlossomURL: blossomURL + "/" + verified.hash + ".apk",
@@ -220,7 +205,6 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 	})
 	if options.SkipAppEvent {
 		events.AppMetadata = nil
-		events.SetApplicationPubkey(applicationPubkey)
 	} else if !options.OverwriteAppEvent {
 		appEvents, appWarnings, appErr := publisher.FetchApplicationEvents(ctx, parsed.PackageID, []string{signer.PublicKey()})
 		if appErr != nil {
@@ -787,14 +771,6 @@ func singleNostrTagValue(tags gonostr.Tags, name string) (string, bool) {
 		value = tag[1]
 	}
 	return value, found
-}
-
-func authorizedPublisherList(publishers map[string]struct{}) []string {
-	result := make([]string, 0, len(publishers))
-	for publisher := range publishers {
-		result = append(result, publisher)
-	}
-	return result
 }
 
 func statusAfterExternal(result *PublishResult) string {

@@ -557,8 +557,8 @@ func assertRelayPublication(
 		}
 		application := release.Tags.GetFirst([]string{"a"})
 		if application == nil || len(*application) < 2 ||
-			(*application)[1] != "32267:"+applicationPubkey+":com.example.zspe2e" {
-			t.Fatalf("release application coordinate = %v", application)
+			(*application)[1] != "32267:"+release.PubKey+":com.example.zspe2e" {
+			t.Fatalf("release application coordinate = %v, signer %s", application, release.PubKey)
 		}
 		linked := false
 		for _, tag := range release.Tags {
@@ -606,5 +606,9 @@ func assertReleasePublishedBy(t *testing.T, relayURL, eventID, pubkey string) {
 	valid, err := events[0].CheckSignature()
 	if err != nil || !valid {
 		t.Fatalf("invalid indexer-style release signature: %v", err)
+	}
+	application := events[0].Tags.GetFirst([]string{"a"})
+	if application == nil || len(*application) < 2 || (*application)[1] != "32267:"+pubkey+":com.example.zspe2e" {
+		t.Fatalf("release application coordinate = %v, signer %s", application, pubkey)
 	}
 }

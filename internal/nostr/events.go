@@ -586,25 +586,6 @@ func (es *EventSet) SetApplicationRelayHint(relayHint string) {
 	}
 }
 
-// SetApplicationPubkey points the release at an existing application event
-// owner without changing the release signer's pubkey.
-func (es *EventSet) SetApplicationPubkey(pubkey string) {
-	if pubkey == "" {
-		return
-	}
-	for index, tag := range es.Release.Tags {
-		if len(tag) >= 2 && tag[0] == "a" {
-			parts := strings.SplitN(tag[1], ":", 3)
-			if len(parts) != 3 {
-				return
-			}
-			tag[1] = parts[0] + ":" + pubkey + ":" + parts[2]
-			es.Release.Tags[index] = tag
-			return
-		}
-	}
-}
-
 // UpdateReleasePlatforms aggregates platform identifiers (f tags) from all Software Assets
 // and updates the Release event. This should be called after all assets are added to the EventSet
 // but before the Release event is signed. This is useful when publishing multiple APK assets
