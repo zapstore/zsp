@@ -1,20 +1,26 @@
 ---
 name: zapstore-publish
 description: >-
-  Builds a release, signs it when the build left it unsigned, and publishes
-  it with zsp. Use when the user asks to build, sign, or publish an APK, or
-  mentions zapstore.yaml or zsp publish.
+  Builds a release APK, signs it with hotbox, and publishes it with zsp.
+  Use only when the user asks to build, sign, or publish an APK, or to run
+  zsp publish. Do not use it to bump a version or edit a changelog.
 ---
 
 # Publish
 
-Do these steps and nothing else.
+Run the commands below and then stop. Do not discover how to do this.
 
-`zsp check` and `zsp publish` take a signed APK. Do not publish a debug APK.
+Do not search the repo, old chats, help text, or this skill's directory. Do not run `--help`. Do not check that `gradlew` or `hotbox` exists. Do not read `.env` or list its keys. Do not look up signing, keystores, or `apksigner`. Do not fetch tool schemas. Do not hardcode a path to `hotbox`.
+
+`zsp check` takes a signed APK. `zsp publish` reads `zapstore.yaml`. Do not pass an APK to `zsp publish`. Do not publish a debug APK.
 
 From the project directory:
 
-1. Build. When `./gradlew` exists, run `./gradlew assembleRelease`. Otherwise run the project's release build.
+1. Build.
+
+```bash
+./gradlew assembleRelease
+```
 
 2. Choose the APK. This prints the unsigned `arm64-v8a` file, or else the unsigned universal file:
 
@@ -22,23 +28,35 @@ From the project directory:
 zsp utils find-unsigned . | grep -m1 arm64-v8a || zsp utils find-unsigned . | grep -m1 -E 'universal|app-release\.apk'
 ```
 
-When that prints a path, sign it the way this project signs. When it uses hotbox, `hotbox sign <apk>` and use the path it prints. Do not rename it. When it prints nothing, the build already signed the APK. Publish no other ABI.
-
-3. Publish that signed APK. Leave `zapstore.yaml` when it already has `repository`, `release_source`, and `release_notes`.
+When that prints a path, sign it. Use the path it prints. Do not rename it. When it prints nothing, the build already signed the APK. Publish no other ABI.
 
 ```bash
-zsp publish -q -s <signed-apk>
+hotbox sign <apk>
 ```
+
+3. Read `release_source` in `zapstore.yaml` before publishing. Publish from that file. Do not pass `-s`.
+
+When `release_source` is a URL or a mapping, leave it:
+
+```bash
+zsp publish -q
+```
+
+When it is a local path or glob, point it at the signed APK when it does not already name that file, then run the same command.
+
+When it is missing and `repository` is set, tell them to attach this APK to the forge release, keep the local path out of the committed file, and stop. When the file has no public release source, set `release_source` to the signed APK path, then publish.
+
+Leave the rest of `zapstore.yaml` when it already has `repository`, `release_source`, and `release_notes`. Do not read the yaml reference below in that case.
 
 `SIGN_WITH` must already be set. An npub cannot publish. When `HOTBOX_SOCKET` and `HOTBOX_PIN` are set, this run creates or renews the C1 proof. A `version_code` not greater than the published one will not publish unless they asked for `--overwrite-release`. If several APKs verify, add `--apk-hash <hash>` from `error.context.candidates`. When `error.next_step.requires_human` is true, tell them to run `zsp` themselves and stop. When there is nothing newer to publish, say so and stop.
 
-The wizard may already have written `repository` or `release_source` and `metadata_sources`. Keep `metadata_sources` when the file sets it, including `[]`. Otherwise you write `zapstore.yaml`, and only when the file is missing or they asked to change it. Follow the format below. Do not invent fields. A local APK goes in `release_source` only when the file has no public release source. When `repository` is the release source and they are uploading a local APK, tell them to attach this APK to the forge release and keep the local path out of the committed file. Until then, this run may pass `-s <apk>`. When `release_source` is already another URL, leave it.
+The wizard may already have written `repository` or `release_source` and `metadata_sources`. Keep `metadata_sources` when the file sets it, including `[]`. Otherwise you write `zapstore.yaml`, and only when the file is missing or they asked to change it. Follow the format below. Do not invent fields.
 
 When they asked only to check a signed APK, run `zsp check` on it once.
 
 Stdout is one JSON document when it isn't a terminal; pass `--json` to be sure. Branch on `error.code`.
 
-After signing is the last step, reply with the signed path and the certificate SHA-256, then stop:
+After signing is the last step, reply with the signed path and the certificate SHA-256, then stop. Do not publish.
 
 ```
 Signed. The APK is `<path>`.
@@ -46,9 +64,21 @@ Signed. The APK is `<path>`.
 Certificate SHA-256: `<digest>`
 ```
 
-After a publish, reply with the release event `id`, add the push reminder, and stop. After a build or a check with nothing else to report, reply with the path, `version_name`, and `version_code`, then stop.
+After a publish, reply with only this, then stop:
+
+```
+Published <version_name> (version code <version_code>).
+
+Release event id: `<id>`
+
+Push the version bump and changelog so the repository matches this release.
+```
+
+After a build or a check with nothing else to report, reply with the path, `version_name`, and `version_code`, then stop.
 
 ## zapstore.yaml
+
+Read this section only when `zapstore.yaml` is missing or the user asked to change it.
 
 Canonical file in the project directory. Relative paths resolve from the file's directory. Explicit values win over gathered metadata. Do not write `changelog`, `pubkey`, or `communities`; they have no effect.
 
