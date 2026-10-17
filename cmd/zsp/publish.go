@@ -238,9 +238,6 @@ func selectPublicAPKWithPrompt(opts *cli.Options, candidates []*zsp.APK, title, 
 		return candidates[0], nil
 	}
 	choices := apkSelectionChoices(candidates)
-	if len(choices) == 1 {
-		return candidates[0], nil
-	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) || opts.Publish.Quiet || opts.Global.JSON {
 		return nil, &cliOperationError{
 			code: "apk_selection_required", message: "multiple verified APKs require --apk-hash",
@@ -264,17 +261,12 @@ func selectPublicAPKWithPrompt(opts *cli.Options, candidates []*zsp.APK, title, 
 
 func apkSelectionChoices(candidates []*zsp.APK) []ui.SelectChoice {
 	choices := make([]ui.SelectChoice, 0, len(candidates))
-	byCertificateHash := make(map[string]int, len(candidates))
 	for _, candidate := range candidates {
-		if index, ok := byCertificateHash[candidate.CertificateHash]; ok {
-			choices[index].Label += "\n  " + candidate.Filename
-			continue
+		label := candidate.Filename
+		if candidate.CertificateHash != "" {
+			label = candidate.CertificateHash + "\n  " + candidate.Filename
 		}
-		byCertificateHash[candidate.CertificateHash] = len(choices)
-		choices = append(choices, ui.SelectChoice{
-			Label: fmt.Sprintf("%s\n  %s", candidate.CertificateHash, candidate.Filename),
-			Value: candidate.Hash,
-		})
+		choices = append(choices, ui.SelectChoice{Label: label, Value: candidate.Hash})
 	}
 	return choices
 }

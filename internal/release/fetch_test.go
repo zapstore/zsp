@@ -7,6 +7,107 @@ import (
 	"github.com/zapstore/zsp/internal/source"
 )
 
+func TestSelectFetchedAPKs(t *testing.T) {
+	arm64 := []string{"arm64-v8a"}
+	fat := []string{"arm64-v8a", "armeabi-v7a"}
+	tests := []struct {
+		name string
+		in   []*APK
+		want []string
+	}{
+		{
+			name: "greatest arm64 version",
+			in: []*APK{
+				apkChoice("old", "com.app", "cert", 10, arm64),
+				apkChoice("new", "com.app", "cert", 12, arm64),
+				apkChoice("mid", "com.app", "cert", 11, fat),
+			},
+			want: []string{"new"},
+		},
+		{
+			name: "fat dropped when arm64-only shares the version",
+			in: []*APK{
+				apkChoice("fat", "com.app", "cert", 12, fat),
+				apkChoice("arm", "com.app", "cert", 12, arm64),
+				apkChoice("old-arm", "com.app", "cert", 11, arm64),
+			},
+			want: []string{"arm"},
+		},
+		{
+			name: "higher fat kept when it is the greatest arm64 version",
+			in: []*APK{
+				apkChoice("arm", "com.app", "cert", 11, arm64),
+				apkChoice("fat", "com.app", "cert", 12, fat),
+			},
+			want: []string{"fat"},
+		},
+		{
+			name: "several arm64-only files remain",
+			in: []*APK{
+				apkChoice("online", "com.app", "cert", 12, arm64),
+				apkChoice("offline", "com.app", "cert", 12, arm64),
+				apkChoice("old", "com.app", "cert", 9, arm64),
+			},
+			want: []string{"online", "offline"},
+		},
+		{
+			name: "no native code when nothing includes arm64",
+			in: []*APK{
+				apkChoice("old-java", "com.app", "cert", 4, nil),
+				apkChoice("java", "com.app", "cert", 8, nil),
+			},
+			want: []string{"java"},
+		},
+		{
+			name: "arm64 preferred over a higher java version",
+			in: []*APK{
+				apkChoice("java", "com.app", "cert", 20, nil),
+				apkChoice("arm", "com.app", "cert", 12, arm64),
+			},
+			want: []string{"arm"},
+		},
+		{
+			name: "each app keeps its own greatest version",
+			in: []*APK{
+				apkChoice("a-old", "com.a", "cert-a", 2, arm64),
+				apkChoice("b", "com.b", "cert-b", 9, arm64),
+				apkChoice("a-new", "com.a", "cert-a", 4, arm64),
+			},
+			want: []string{"b", "a-new"},
+		},
+		{
+			name: "same package with two certificates stays two apps",
+			in: []*APK{
+				apkChoice("first", "com.app", "cert-a", 2, arm64),
+				apkChoice("second", "com.app", "cert-b", 3, arm64),
+			},
+			want: []string{"first", "second"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := selectFetchedAPKs(test.in)
+			names := make([]string, len(got))
+			for i, candidate := range got {
+				names[i] = candidate.Filename
+			}
+			if !reflect.DeepEqual(names, test.want) {
+				t.Fatalf("selectFetchedAPKs() = %v, want %v", names, test.want)
+			}
+		})
+	}
+}
+
+func apkChoice(name, appID, certificate string, version int64, architectures []string) *APK {
+	return &APK{
+		Filename:        name,
+		AppID:           appID,
+		CertificateHash: certificate,
+		VersionCode:     version,
+		Architectures:   architectures,
+	}
+}
+
 func TestFilterCandidatesKeepsAPKMediaTypeWithoutAPKSuffix(t *testing.T) {
 	assets := []*source.Asset{
 		{

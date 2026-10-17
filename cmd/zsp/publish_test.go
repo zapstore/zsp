@@ -75,20 +75,15 @@ func TestSelectPublicAPKWrapsSelectionSentinel(t *testing.T) {
 	}
 }
 
-func TestSelectPublicAPKSkipsSelectionForOneCertificate(t *testing.T) {
+func TestSelectPublicAPKRequiresChoiceForSeveralFiles(t *testing.T) {
 	options := &cli.Options{}
 	options.Publish.Quiet = true
-	candidates := []*zsp.APK{
-		{Hash: "one", CertificateHash: "certificate"},
-		{Hash: "two", CertificateHash: "certificate"},
-	}
-
-	got, err := selectPublicAPK(options, candidates)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != candidates[0] {
-		t.Fatalf("selectPublicAPK() = %#v, want first candidate %#v", got, candidates[0])
+	_, err := selectPublicAPK(options, []*zsp.APK{
+		{Hash: "one", CertificateHash: "certificate", Filename: "one.apk"},
+		{Hash: "two", CertificateHash: "certificate", Filename: "two.apk"},
+	})
+	if !errors.Is(err, zsp.ErrAPKSelectionRequired) {
+		t.Fatalf("selectPublicAPK error = %v, want ErrAPKSelectionRequired", err)
 	}
 }
 
@@ -101,7 +96,7 @@ func TestSelectPublicAPKWrapsUncheckedSentinel(t *testing.T) {
 	}
 }
 
-func TestAPKSelectionChoicesGroupsCandidatesByCertificateHash(t *testing.T) {
+func TestAPKSelectionChoicesListsEveryFile(t *testing.T) {
 	candidates := []*zsp.APK{
 		{Hash: "apk-a", CertificateHash: "certificate-a", Filename: "example-arm64.apk"},
 		{Hash: "apk-b", CertificateHash: "certificate-a", Filename: "example-offline-arm64.apk"},
@@ -110,7 +105,8 @@ func TestAPKSelectionChoicesGroupsCandidatesByCertificateHash(t *testing.T) {
 
 	got := apkSelectionChoices(candidates)
 	want := []ui.SelectChoice{
-		{Label: "certificate-a\n  example-arm64.apk\n  example-offline-arm64.apk", Value: "apk-a"},
+		{Label: "certificate-a\n  example-arm64.apk", Value: "apk-a"},
+		{Label: "certificate-a\n  example-offline-arm64.apk", Value: "apk-b"},
 		{Label: "certificate-b\n  example-x86_64.apk", Value: "apk-c"},
 	}
 	if !reflect.DeepEqual(got, want) {

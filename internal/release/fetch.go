@@ -202,7 +202,109 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 			_ = committer.CommitCache()
 		}
 	}
-	return results, nil
+	return selectFetchedAPKs(results), nil
+}
+
+// selectFetchedAPKs keeps, for each app, the greatest version_code whose
+// native code includes arm64-v8a. With none, it keeps an APK that has no
+// native code. At that version_code a fat APK is dropped when an arm64-only
+// APK is present. Several arm64-only files, or more than one app, stay in
+// the result so the caller can ask. An app is one package and certificate.
+func selectFetchedAPKs(candidates []*APK) []*APK {
+	if len(candidates) <= 1 {
+		return candidates
+	}
+	keep := make(map[*APK]struct{}, len(candidates))
+	for _, group := range groupAPKs(candidates) {
+		for _, chosen := range chooseAppAPKs(group) {
+			keep[chosen] = struct{}{}
+		}
+	}
+	selected := make([]*APK, 0, len(keep))
+	for _, candidate := range candidates {
+		if _, ok := keep[candidate]; ok {
+			selected = append(selected, candidate)
+			continue
+		}
+		_ = candidate.Close()
+	}
+	return selected
+}
+
+func groupAPKs(candidates []*APK) [][]*APK {
+	var order []string
+	groups := make(map[string][]*APK)
+	for _, candidate := range candidates {
+		key := candidate.AppID + "\x00" + candidate.CertificateHash
+		if _, ok := groups[key]; !ok {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], candidate)
+	}
+	result := make([][]*APK, 0, len(order))
+	for _, key := range order {
+		result = append(result, groups[key])
+	}
+	return result
+}
+
+func chooseAppAPKs(candidates []*APK) []*APK {
+	pool := filterAPKs(candidates, hasArm64Native)
+	if len(pool) == 0 {
+		pool = filterAPKs(candidates, func(candidate *APK) bool {
+			return len(candidate.Architectures) == 0
+		})
+	}
+	if len(pool) == 0 {
+		return candidates
+	}
+	best := pool[0].VersionCode
+	for _, candidate := range pool[1:] {
+		if candidate.VersionCode > best {
+			best = candidate.VersionCode
+		}
+	}
+	atBest := filterAPKs(pool, func(candidate *APK) bool {
+		return candidate.VersionCode == best
+	})
+	arm64Only := filterAPKs(atBest, func(candidate *APK) bool {
+		return onlyArm64(candidate.Architectures)
+	})
+	if len(arm64Only) > 0 {
+		return arm64Only
+	}
+	return atBest
+}
+
+func filterAPKs(candidates []*APK, keep func(*APK) bool) []*APK {
+	filtered := make([]*APK, 0, len(candidates))
+	for _, candidate := range candidates {
+		if keep(candidate) {
+			filtered = append(filtered, candidate)
+		}
+	}
+	return filtered
+}
+
+func hasArm64Native(candidate *APK) bool {
+	for _, arch := range candidate.Architectures {
+		if arch == "arm64-v8a" {
+			return true
+		}
+	}
+	return false
+}
+
+func onlyArm64(architectures []string) bool {
+	if len(architectures) == 0 {
+		return false
+	}
+	for _, arch := range architectures {
+		if arch != "arm64-v8a" {
+			return false
+		}
+	}
+	return true
 }
 
 // safeAssetName reduces a source-controlled asset name to display-safe text
