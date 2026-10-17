@@ -8,33 +8,33 @@ description: >-
 
 # Publish
 
-Run the commands below and then stop. Do not discover how to do this.
+Run each command, then the next, in the same turn. Send no text until the sequence ends. Do not say a command finished, name the next one, or preview it. "The release build finished. Next I'll pick the arm64 APK and sign it." is a broken turn: the find command, then `hotbox sign`, should already be running. If a command fails, stop and report that error. Otherwise the only message is the final reply below.
+
+Do not discover how to do this.
 
 Do not search the repo, old chats, help text, or this skill's directory. Do not run `--help`. Do not check that `gradlew` or `hotbox` exists. Do not read `.env` or list its keys. Do not look up signing, keystores, or `apksigner`. Do not fetch tool schemas. Do not hardcode a path to `hotbox`.
 
 `zsp check` takes a signed APK. `zsp publish` reads `zapstore.yaml`. Do not pass an APK to `zsp publish`. Do not publish a debug APK.
 
-From the project directory:
-
-1. Build.
+From the project directory, run this and continue:
 
 ```bash
 ./gradlew assembleRelease
 ```
 
-2. Choose the APK. This prints the unsigned `arm64-v8a` file, or else the unsigned universal file:
+Then this. It prints the unsigned `arm64-v8a` file, or else the unsigned universal file:
 
 ```bash
 zsp utils find-unsigned . | grep -m1 arm64-v8a || zsp utils find-unsigned . | grep -m1 -E 'universal|app-release\.apk'
 ```
 
-When that prints a path, sign it. Use the path it prints. Do not rename it. When it prints nothing, the build already signed the APK. Publish no other ABI.
+When that prints a path, the next command signs that path. Do not rename it. When it prints nothing, the build already signed the APK. Publish no other ABI.
 
 ```bash
 hotbox sign <apk>
 ```
 
-3. Read `release_source` in `zapstore.yaml` before publishing. Publish from that file. Do not pass `-s`.
+Read `release_source` in `zapstore.yaml` before publishing. Publish from that file. Do not pass `-s`.
 
 When `release_source` is a URL or a mapping, leave it:
 
@@ -56,7 +56,7 @@ When they asked only to check a signed APK, run `zsp check` on it once.
 
 Stdout is one JSON document when it isn't a terminal; pass `--json` to be sure. Branch on `error.code`.
 
-After signing is the last step, reply with the signed path and the certificate SHA-256, then stop. Do not publish.
+When signing is the last command, this is the whole reply. Do not publish.
 
 ```
 Signed. The APK is `<path>`.
@@ -64,7 +64,7 @@ Signed. The APK is `<path>`.
 Certificate SHA-256: `<digest>`
 ```
 
-After a publish, reply with only this, then stop:
+When publish is the last command, this is the whole reply:
 
 ```
 Published <version_name> (version code <version_code>).
@@ -74,7 +74,7 @@ Release event id: `<id>`
 Push the version bump and changelog so the repository matches this release.
 ```
 
-After a build or a check with nothing else to report, reply with the path, `version_name`, and `version_code`, then stop.
+When a build or a check is the last command and there is nothing else to report, the whole reply is the path, `version_name`, and `version_code`.
 
 ## zapstore.yaml
 
