@@ -136,7 +136,7 @@ func TestLoadReleaseNotesLocalPathsAreConfined(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := loadReleaseNotes(t.Context(), base, tt.location)
+			got, _, err := loadReleaseNotes(t.Context(), base, tt.location, "", "")
 			if tt.wantErr {
 				if !errors.Is(err, ErrInvalidConfig) {
 					t.Fatalf("loadReleaseNotes(%q) error = %v, want ErrInvalidConfig", tt.location, err)

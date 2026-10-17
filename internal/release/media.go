@@ -265,26 +265,27 @@ func readMedia(ctx context.Context, baseDir, location string) ([]byte, string, e
 	return data, response.Header.Get("Content-Type"), nil
 }
 
-func loadReleaseNotes(ctx context.Context, baseDir, location string) (string, error) {
+func loadReleaseNotes(ctx context.Context, baseDir, location, versionName, releaseVersion string) (string, string, error) {
 	if location == "" {
-		return "", nil
+		return "", "", nil
 	}
 	if !strings.Contains(location, "://") {
 		if !filepath.IsAbs(location) {
-			return "", operationErr(ErrInvalidConfig, false, "local release notes path must be absolute")
+			return "", "", operationErr(ErrInvalidConfig, false, "local release notes path must be absolute")
 		}
 		data, err := localpath.ReadFile(baseDir, location, maxReleaseNotesSize)
 		if errors.Is(err, localpath.ErrTooLarge) {
-			return "", operationErr(ErrInvalidConfig, false, "release notes exceed %d bytes", maxReleaseNotesSize)
+			return "", "", operationErr(ErrInvalidConfig, false, "release notes exceed %d bytes", maxReleaseNotesSize)
 		}
 		if err != nil {
-			return "", wrapOperationError(ErrInvalidConfig, err, false, "read release notes"+causeDetail(err))
+			return "", "", wrapOperationError(ErrInvalidConfig, err, false, "read release notes"+causeDetail(err))
 		}
-		return string(data), nil
+		notes, warning := releaseNotesFromChangelog(string(data), versionName, releaseVersion)
+		return notes, warning, nil
 	}
 	parsed, err := url.Parse(location)
 	if err != nil || !allowedRemoteURL(parsed) {
-		return "", operationErr(ErrInvalidConfig, false, "release notes URL must use HTTPS outside loopback")
+		return "", "", operationErr(ErrInvalidConfig, false, "release notes URL must use HTTPS outside loopback")
 	}
 	client := &http.Client{
 		Timeout:       30 * time.Second,
@@ -294,37 +295,38 @@ func loadReleaseNotes(ctx context.Context, baseDir, location string) (string, er
 	defer client.CloseIdleConnections()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
-		return "", wrapOperationError(ErrInvalidConfig, err, false, "create release notes request"+causeDetail(err))
+		return "", "", wrapOperationError(ErrInvalidConfig, err, false, "create release notes request"+causeDetail(err))
 	}
 	response, err := source.DoWithTorFallback(ctx, client, request)
 	if err != nil {
 		if contextErr := contextOperationError(ctx.Err(), "fetch release notes"); contextErr != nil {
-			return "", contextErr
+			return "", "", contextErr
 		}
 		sentinel, retryable := sourceErrorClassification(err)
-		return "", wrapOperationError(sentinel, err, retryable, "fetch release notes"+causeDetail(err))
+		return "", "", wrapOperationError(sentinel, err, retryable, "fetch release notes"+causeDetail(err))
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		if response.StatusCode == http.StatusTooManyRequests {
-			return "", operationErr(ErrRateLimited, true, "release notes returned status %d", response.StatusCode)
+			return "", "", operationErr(ErrRateLimited, true, "release notes returned status %d", response.StatusCode)
 		}
 		if response.StatusCode >= 500 {
-			return "", operationErr(ErrTemporaryFailure, true, "release notes returned status %d", response.StatusCode)
+			return "", "", operationErr(ErrTemporaryFailure, true, "release notes returned status %d", response.StatusCode)
 		}
-		return "", operationErr(ErrSourceFailed, false, "release notes returned status %d", response.StatusCode)
+		return "", "", operationErr(ErrSourceFailed, false, "release notes returned status %d", response.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, maxReleaseNotesSize+1))
 	if err != nil {
 		if contextErr := contextOperationError(ctx.Err(), "read release notes"); contextErr != nil {
-			return "", contextErr
+			return "", "", contextErr
 		}
-		return "", wrapOperationError(ErrTemporaryFailure, err, true, "read release notes"+causeDetail(err))
+		return "", "", wrapOperationError(ErrTemporaryFailure, err, true, "read release notes"+causeDetail(err))
 	}
 	if len(data) > maxReleaseNotesSize {
-		return "", operationErr(ErrInvalidConfig, false, "release notes exceed %d bytes", maxReleaseNotesSize)
+		return "", "", operationErr(ErrInvalidConfig, false, "release notes exceed %d bytes", maxReleaseNotesSize)
 	}
-	return string(data), nil
+	notes, warning := releaseNotesFromChangelog(string(data), versionName, releaseVersion)
+	return notes, warning, nil
 }
 
 func allowedRemoteURL(value *url.URL) bool {

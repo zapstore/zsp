@@ -186,11 +186,13 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 		}
 		result.Warnings = append(result.Warnings, mediaWarnings...)
 	}
-	releaseNotes, err := loadReleaseNotes(ctx, preparedConfig.baseDir, preparedConfig.ReleaseNotes)
+	releaseNotes, notesWarning, err := loadReleaseNotes(ctx, preparedConfig.baseDir, preparedConfig.ReleaseNotes, parsed.VersionName, verified.releaseVersion)
 	if err != nil {
 		return nil, err
 	}
-	if releaseNotes == "" {
+	if notesWarning != "" {
+		result.Warnings = append(result.Warnings, notesWarning)
+	} else if releaseNotes == "" {
 		releaseNotes = verified.releaseNotes
 	}
 	applicationPubkey := signer.PublicKey()
