@@ -289,32 +289,25 @@ func (p *Publisher) FetchIdentityProofs(ctx context.Context, certHashes []string
 	return current, warnings, nil
 }
 
-// FetchApplicationEvents returns deduplicated application events for appID
-// from each explicitly authorized author on every completed relay query.
-func (p *Publisher) FetchApplicationEvents(ctx context.Context, appID string, authors []string) ([]*nostr.Event, []error, error) {
-	sort.Strings(authors)
+// FetchApplicationEvents returns deduplicated application events for appID on
+// every completed relay query. It names no author: a catalog relay serves only
+// the selected listing, so the caller filters by signer.
+func (p *Publisher) FetchApplicationEvents(ctx context.Context, appID string) ([]*nostr.Event, []error, error) {
 	byID := make(map[string]*nostr.Event)
 	var warnings []error
 	completed := 0
+	filter := nostr.Filter{
+		Kinds: []int{KindAppMetadata}, Tags: nostr.TagMap{"d": []string{appID}}, Limit: 100,
+	}
 	for _, relayURL := range p.relayURLs {
-		relayCompleted := false
-		for _, author := range authors {
-			filter := nostr.Filter{
-				Kinds: []int{KindAppMetadata}, Authors: []string{author},
-				Tags: nostr.TagMap{"d": []string{appID}}, Limit: 100,
-			}
-			events, err := p.queryRelayMultiple(ctx, relayURL, filter)
-			if err != nil {
-				warnings = append(warnings, relayFailure(relayURL, err))
-				continue
-			}
-			relayCompleted = true
-			for _, event := range events {
-				byID[event.ID] = event
-			}
+		events, err := p.queryRelayMultiple(ctx, relayURL, filter)
+		if err != nil {
+			warnings = append(warnings, relayFailure(relayURL, err))
+			continue
 		}
-		if relayCompleted {
-			completed++
+		completed++
+		for _, event := range events {
+			byID[event.ID] = event
 		}
 	}
 	if completed == 0 && len(p.relayURLs) > 0 {
@@ -473,51 +466,55 @@ func compactStrings(values []string) []string {
 	return result
 }
 
-// HighestReleaseVersionCode returns the greatest version_code among assets
-// linked by valid main-channel releases from authorized publishers for appID.
-// Releases and assets are queried independently for each publisher so a
-// delegate's release can link an owner's asset.
-func (p *Publisher) HighestReleaseVersionCode(ctx context.Context, publishers map[string]struct{}, appID string, certificateHashes []string, channel string) (int64, time.Time, []error, error) {
+// PublishedReleases is the greatest linked version_code relays serve for an
+// app in one channel.
+type PublishedReleases struct {
+	// VersionCode and ReleasedAt come from the authorized publishers.
+	VersionCode int64
+	ReleasedAt  time.Time
+	// OtherVersionCode comes from any other signer, such as the catalog key
+	// when its listing is the one a catalog relay selects.
+	OtherVersionCode int64
+}
+
+// FetchPublishedReleases reads the releases and assets for appID by app id
+// alone: a catalog relay serves only the selected listing, whoever signed it.
+// A release links assets from any authorized publisher, so a delegate's
+// release can link an owner's asset.
+func (p *Publisher) FetchPublishedReleases(ctx context.Context, publishers map[string]struct{}, appID string, certificateHashes []string, channel string) (PublishedReleases, []error, error) {
 	if channel == "" {
 		channel = "main"
 	}
-	authors := make([]string, 0, len(publishers))
-	for pubkey := range publishers {
-		authors = append(authors, pubkey)
-	}
-	sort.Strings(authors)
-	eventsByID := make(map[string]*nostr.Event)
+	own := make(map[string]*nostr.Event)
+	other := make(map[string]*nostr.Event)
 	var warnings []error
 	completed := 0
 	for _, relayURL := range p.relayURLs {
 		relayCompleted := false
-		for _, pubkey := range authors {
-			for _, kind := range []int{KindRelease, KindSoftwareAsset} {
-				tags := nostr.TagMap{"i": []string{appID}}
-				if kind == KindRelease {
-					tags["c"] = []string{channel}
-				}
-				filter := nostr.Filter{
-					Kinds:   []int{kind},
-					Authors: []string{pubkey},
-					Tags:    tags,
-				}
-				events, err := p.queryRelayMultiple(ctx, relayURL, filter)
-				if err != nil {
-					warnings = append(warnings, relayFailure(relayURL, err))
+		for _, kind := range []int{KindRelease, KindSoftwareAsset} {
+			tags := nostr.TagMap{"i": []string{appID}}
+			if kind == KindRelease {
+				tags["c"] = []string{channel}
+			}
+			events, err := p.queryRelayMultiple(ctx, relayURL, nostr.Filter{Kinds: []int{kind}, Tags: tags})
+			if err != nil {
+				warnings = append(warnings, relayFailure(relayURL, err))
+				continue
+			}
+			relayCompleted = true
+			for _, event := range events {
+				if event == nil {
 					continue
 				}
-				relayCompleted = true
-				for _, event := range events {
-					if event == nil {
-						continue
-					}
-					identifier, validIdentifier := singleTagValue(event.Tags, "i")
-					valid, signatureErr := event.CheckSignature()
-					if signatureErr == nil && valid && event.PubKey == pubkey &&
-						validIdentifier && identifier == appID {
-						eventsByID[event.ID] = event
-					}
+				identifier, validIdentifier := singleTagValue(event.Tags, "i")
+				valid, signatureErr := event.CheckSignature()
+				if signatureErr != nil || !valid || !validIdentifier || identifier != appID {
+					continue
+				}
+				if _, ok := publishers[event.PubKey]; ok {
+					own[event.ID] = event
+				} else {
+					other[event.ID] = event
 				}
 			}
 		}
@@ -526,10 +523,12 @@ func (p *Publisher) HighestReleaseVersionCode(ctx context.Context, publishers ma
 		}
 	}
 	if completed == 0 && len(p.relayURLs) > 0 {
-		return 0, time.Time{}, warnings, relayQueryError("release", warnings)
+		return PublishedReleases{}, warnings, relayQueryError("release", warnings)
 	}
-	maximum, latestTimestamp := highestLinkedReleaseVersion(eventsByID, certificateHashes, channel)
-	return maximum, latestTimestamp, warnings, nil
+	var result PublishedReleases
+	result.VersionCode, result.ReleasedAt = highestLinkedReleaseVersion(own, certificateHashes, channel)
+	result.OtherVersionCode, _ = highestLinkedReleaseVersion(other, certificateHashes, channel)
+	return result, warnings, nil
 }
 
 func highestLinkedReleaseVersion(eventsByID map[string]*nostr.Event, certificateHashes []string, channel string) (int64, time.Time) {

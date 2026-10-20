@@ -147,7 +147,7 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 		}
 		var publishedVersionCode int64
 		reportPublish(options, "publish", "release", "published releases", 0, 0)
-		versionCode, publishedAt, warnings, checkErr := publisher.HighestReleaseVersionCode(
+		published, warnings, checkErr := publisher.FetchPublishedReleases(
 			ctx, authorizedPublishers, parsed.PackageID, parsed.CertificateHashes(), publishChannel,
 		)
 		if checkErr != nil {
@@ -158,8 +158,9 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 			return nil, wrapOperationError(sentinel, checkErr, retryable, "check published releases"+causeDetail(checkErr))
 		}
 		result.Warnings = append(result.Warnings, safeRelayQueryWarnings("published release", warnings)...)
-		publishedVersionCode = versionCode
-		existingReleaseTimestamp = publishedAt
+		publishedVersionCode = published.VersionCode
+		existingReleaseTimestamp = published.ReleasedAt
+		result.Warnings = append(result.Warnings, hiddenListingWarning(parsed.VersionCode, published.OtherVersionCode)...)
 		if parsed.VersionCode < publishedVersionCode {
 			return nil, operationErr(ErrReleaseDowngrade, false, "release downgrade from %d to %d", publishedVersionCode, parsed.VersionCode)
 		}
@@ -206,7 +207,7 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 	if options.SkipAppEvent {
 		events.AppMetadata = nil
 	} else if !options.OverwriteAppEvent {
-		appEvents, appWarnings, appErr := publisher.FetchApplicationEvents(ctx, parsed.PackageID, []string{signer.PublicKey()})
+		appEvents, appWarnings, appErr := publisher.FetchApplicationEvents(ctx, parsed.PackageID)
 		if appErr != nil {
 			if contextErr := contextOperationError(ctx.Err(), "find existing application event"); contextErr != nil {
 				return nil, contextErr
@@ -730,6 +731,16 @@ func buildC1Proof(ctx context.Context, proofSigner ProofSigner, signer internaln
 		return nil, operationErr(ErrSigner, false, "%s", "C1 proof is invalid"+causeDetail(err))
 	}
 	return event, nil
+}
+
+// hiddenListingWarning warns when another signer's listing outranks this
+// release: a catalog relay shows the greater version_code, and a tie goes to
+// the developer.
+func hiddenListingWarning(versionCode, otherVersionCode int64) []string {
+	if versionCode >= otherVersionCode {
+		return nil
+	}
+	return []string{fmt.Sprintf("the catalog shows another listing at version_code %d; this release stays hidden until you publish version_code %d or higher", otherVersionCode, otherVersionCode)}
 }
 
 func newestAuthorizedApplication(events []*gonostr.Event, appID string, authorized map[string]struct{}) *gonostr.Event {

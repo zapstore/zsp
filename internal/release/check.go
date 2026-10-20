@@ -110,12 +110,13 @@ func Check(ctx context.Context, config PublishConfig, candidate *APK, options Ch
 	_, result.Authorized = publishers[result.Signer]
 
 	channel := selectedChannel(PublishOptions{Channel: options.Channel}, config)
-	versionCode, _, releaseWarnings, err := publisher.HighestReleaseVersionCode(ctx, publishers, verified.appID, verified.certificateHashes(), channel)
+	published, releaseWarnings, err := publisher.FetchPublishedReleases(ctx, publishers, verified.appID, verified.certificateHashes(), channel)
 	if err != nil {
 		return nil, checkQueryError(ctx, err, "check published releases")
 	}
-	result.PublishedVersionCode = versionCode
+	result.PublishedVersionCode = published.VersionCode
 	result.Warnings = append(result.Warnings, safeRelayQueryWarnings("published release", releaseWarnings)...)
+	result.Warnings = append(result.Warnings, hiddenListingWarning(verified.versionCode, published.OtherVersionCode)...)
 	return result, nil
 }
 
