@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"image/draw"
 	"image/png"
 	"io"
 	"math"
@@ -30,6 +29,7 @@ import (
 	"github.com/shogo82148/androidbinary"
 	"github.com/srwiley/oksvg"
 	"github.com/srwiley/rasterx"
+	"golang.org/x/image/draw"
 
 	"github.com/zapstore/zsp/internal/media"
 )
@@ -859,7 +859,9 @@ func (a *apkArchive) extractIcon(manifest manifestInfo) (icon []byte, err error)
 
 // iconFromResource reads the manifest's icon resource. apkparser resolves it
 // to a single config and cannot list the others, so the density table adds
-// the rest. The widest bitmap wins unless an adaptive icon renders wider.
+// the rest. The widest bitmap wins unless an adaptive icon renders wider. An
+// adaptive icon whose background cannot be rendered is used only when there
+// is no bitmap, which carries its own background.
 func (a *apkArchive) iconFromResource(icon, iconRef string) ([]byte, error) {
 	paths := a.iconPaths(icon, iconRef)
 	if len(paths) == 0 {
@@ -874,13 +876,18 @@ func (a *apkArchive) iconFromResource(icon, iconRef string) ([]byte, error) {
 		}
 	}
 	bitmap, bitmapWidth, bitmapErr := a.widestBitmap(bitmaps)
-	for _, name := range layers {
-		adaptive, err := a.renderAdaptiveIcon(name)
-		if err != nil {
-			continue
+	for _, requireBackground := range []bool{true, false} {
+		if !requireBackground && bitmap != nil {
+			break
 		}
-		if config, _, err := media.ConfigBounded(adaptive); err == nil && config.Width > bitmapWidth {
-			return adaptive, nil
+		for _, name := range layers {
+			adaptive, err := a.renderAdaptiveIcon(name, requireBackground)
+			if err != nil {
+				continue
+			}
+			if config, _, err := media.ConfigBounded(adaptive); err == nil && config.Width > bitmapWidth {
+				return adaptive, nil
+			}
 		}
 	}
 	if bitmap == nil {
@@ -986,19 +993,141 @@ func densityPath(table *androidbinary.TableFile, resourceID uint32, config *andr
 	return "", false
 }
 
-func (a *apkArchive) renderAdaptiveIcon(name string) ([]byte, error) {
+// Adaptive icon layers are 108dp, of which launchers show the center 72dp
+// inside their mask. Vector layers render at adaptiveLayerSize so the visible
+// area is adaptiveIconSize.
+const (
+	adaptiveIconSize  = 512
+	adaptiveLayerSize = adaptiveIconSize * 3 / 2
+)
+
+// renderAdaptiveIcon composites an adaptive icon's background and foreground
+// as a launcher shows them. Without requireBackground, a background that
+// cannot be rendered is left transparent.
+func (a *apkArchive) renderAdaptiveIcon(name string, requireBackground bool) ([]byte, error) {
 	data, err := a.readEntry(name, maxAPKResourceSize)
 	if err != nil {
 		return nil, fmt.Errorf("read adaptive icon: %w", err)
 	}
+	// Without the table, layers stay "@<id>" references, which are needed to
+	// find every density of a bitmap layer and to resolve color resources.
 	adaptive := adaptiveIconCollector{}
-	if err := apkparser.ParseXml(bytes.NewReader(data), &adaptive, a.table); err != nil {
+	if err := apkparser.ParseXml(bytes.NewReader(data), &adaptive, nil); err != nil {
 		return nil, fmt.Errorf("parse adaptive icon %q: %w", name, err)
 	}
 	if adaptive.foreground == "" {
 		return nil, fmt.Errorf("adaptive icon %q has no foreground", name)
 	}
-	return a.renderVectorResource(adaptive.foreground, adaptive.background)
+	foreground, err := a.adaptiveLayer(adaptive.foreground)
+	if err != nil {
+		return nil, fmt.Errorf("adaptive icon %q foreground: %w", name, err)
+	}
+	if _, ok := foreground.(*image.Uniform); ok {
+		return nil, fmt.Errorf("adaptive icon %q foreground is a solid color", name)
+	}
+	layers := []image.Image{foreground}
+	if adaptive.background != "" {
+		background, err := a.adaptiveLayer(adaptive.background)
+		switch {
+		case err == nil:
+			layers = []image.Image{background, foreground}
+		case requireBackground:
+			return nil, fmt.Errorf("adaptive icon %q background: %w", name, err)
+		}
+	}
+	return encodePNG(composeAdaptiveIcon(layers))
+}
+
+// adaptiveLayer renders one layer: an opaque color, a vector at
+// adaptiveLayerSize, or the widest bitmap of the resource.
+func (a *apkArchive) adaptiveLayer(value string) (image.Image, error) {
+	if parsed, ok := a.resolveColor(value); ok {
+		return image.NewUniform(color.RGBA{R: parsed.R, G: parsed.G, B: parsed.B, A: 0xff}), nil
+	}
+	paths := a.iconPaths("", value)
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("layer %q is missing", value)
+	}
+	var bitmaps []string
+	var vectorErr error
+	for _, name := range paths {
+		if !strings.EqualFold(path.Ext(name), ".xml") {
+			bitmaps = append(bitmaps, name)
+			continue
+		}
+		img, err := a.renderVector(name)
+		if err == nil {
+			return img, nil
+		}
+		if vectorErr == nil {
+			vectorErr = err
+		}
+	}
+	data, _, err := a.widestBitmap(bitmaps)
+	if data == nil {
+		if err == nil {
+			err = vectorErr
+		}
+		if err == nil {
+			err = fmt.Errorf("layer %q has no drawable", value)
+		}
+		return nil, err
+	}
+	img, _, err := media.DecodeBounded(data)
+	return img, err
+}
+
+// resolveColor follows a color resource reference to its value. Layers are
+// parsed without the table, so an inline color arrives as decimal ARGB.
+func (a *apkArchive) resolveColor(value string) (color.NRGBA, bool) {
+	for range 16 {
+		if parsed, ok := parseColor(value); ok {
+			return parsed, true
+		}
+		if !isResourceReference(value) {
+			return parseDecimalColor(value)
+		}
+		if a.table == nil {
+			return color.NRGBA{}, false
+		}
+		resourceID, err := parseResourceID(value)
+		if err != nil {
+			return color.NRGBA{}, false
+		}
+		entry, err := a.table.GetResourceEntryEx(resourceID, apkparser.ConfigFirst)
+		if err != nil {
+			return color.NRGBA{}, false
+		}
+		// String keeps colors ("#aarrggbb") apart from references ("@<id>");
+		// Data returns both as the same integer.
+		if value, err = entry.GetValue().String(); err != nil {
+			return color.NRGBA{}, false
+		}
+	}
+	return color.NRGBA{}, false
+}
+
+// composeAdaptiveIcon stacks the layers, scaled to the widest, and keeps the
+// center two thirds, capped at adaptiveIconSize.
+func composeAdaptiveIcon(layers []image.Image) *image.RGBA {
+	layerSize := 0
+	for _, layer := range layers {
+		if _, ok := layer.(*image.Uniform); !ok {
+			layerSize = max(layerSize, layer.Bounds().Dx())
+		}
+	}
+	size := min(layerSize*2/3, adaptiveIconSize)
+	margin := size / 4
+	img := image.NewRGBA(image.Rect(0, 0, size, size))
+	target := image.Rect(-margin, -margin, size+margin, size+margin)
+	for _, layer := range layers {
+		if _, ok := layer.(*image.Uniform); ok {
+			draw.Draw(img, img.Bounds(), layer, image.Point{}, draw.Over)
+			continue
+		}
+		draw.CatmullRom.Scale(img, target, layer, layer.Bounds(), draw.Over, nil)
+	}
+	return img
 }
 
 // widestBitmap returns the widest of the named bitmaps as stored, with its
@@ -1022,18 +1151,6 @@ func (a *apkArchive) widestBitmap(names []string) (best []byte, bestWidth int, e
 		err = nil
 	}
 	return best, bestWidth, err
-}
-
-// readBitmap returns the named bitmap as PNG.
-func (a *apkArchive) readBitmap(name string) ([]byte, error) {
-	data, _, err := a.widestBitmap([]string{name})
-	if err != nil {
-		return nil, err
-	}
-	if data == nil {
-		return nil, fmt.Errorf("icon %q has no bitmap", name)
-	}
-	return toPNG(data)
 }
 
 func toPNG(data []byte) ([]byte, error) {
@@ -1074,25 +1191,20 @@ func (c *adaptiveIconCollector) Flush() error {
 	return nil
 }
 
-func (a *apkArchive) renderVectorResource(resourcePath, background string) ([]byte, error) {
-	if isResourceReference(resourcePath) {
-		resolved, err := a.resolveResourceString(resourcePath)
-		if err != nil {
-			return nil, fmt.Errorf("resolve vector resource: %w", err)
-		}
-		resourcePath = resolved
-	}
-	if !strings.EqualFold(path.Ext(resourcePath), ".xml") {
-		return a.readBitmap(resourcePath)
-	}
-
-	data, err := a.readEntry(resourcePath, maxAPKResourceSize)
+// renderVector renders a vector drawable at adaptiveLayerSize over
+// transparency.
+func (a *apkArchive) renderVector(name string) (*image.RGBA, error) {
+	data, err := a.readEntry(name, maxAPKResourceSize)
 	if err != nil {
 		return nil, fmt.Errorf("read vector resource: %w", err)
 	}
-	collector := vectorSVGCollector{}
+	collector := vectorSVGCollector{archive: a, size: adaptiveLayerSize}
 	if err := apkparser.ParseXml(bytes.NewReader(data), &collector, a.table); err != nil {
-		return nil, fmt.Errorf("parse vector resource %q: %w", resourcePath, err)
+		return nil, fmt.Errorf("parse vector resource %q: %w", name, err)
+	}
+	// oksvg cannot clip, and an unclipped path can cover the whole layer.
+	if collector.clipped {
+		return nil, fmt.Errorf("vector %q uses an unsupported clip path", name)
 	}
 	svg, err := collector.svg()
 	if err != nil {
@@ -1102,24 +1214,31 @@ func (a *apkArchive) renderVectorResource(resourcePath, background string) ([]by
 	if err != nil {
 		return nil, fmt.Errorf("read vector SVG: %w", err)
 	}
-
-	const iconSize = 512
-	img := image.NewRGBA(image.Rect(0, 0, iconSize, iconSize))
-	draw.Draw(img, img.Bounds(), &image.Uniform{C: adaptiveIconBackground(background)}, image.Point{}, draw.Src)
-	icon.SetTarget(0, 0, iconSize, iconSize)
-	scanner := rasterx.NewScannerGV(iconSize, iconSize, img, img.Bounds())
-	icon.Draw(rasterx.NewDasher(iconSize, iconSize, scanner), 1)
-	// Gradients and theme colors render as nothing, which would hide a usable
-	// bitmap icon behind a blank square.
-	if !hasForeground(img) {
-		return nil, errors.New("vector icon rendered blank")
+	if len(icon.SVGPaths) == len(collector.nonZero) {
+		for i := range icon.SVGPaths {
+			icon.SVGPaths[i].UseNonZeroWinding = collector.nonZero[i]
+		}
 	}
-	return encodePNG(img)
+
+	img := image.NewRGBA(image.Rect(0, 0, adaptiveLayerSize, adaptiveLayerSize))
+	icon.SetTarget(0, 0, adaptiveLayerSize, adaptiveLayerSize)
+	scanner := rasterx.NewScannerGV(adaptiveLayerSize, adaptiveLayerSize, img, img.Bounds())
+	icon.Draw(rasterx.NewDasher(adaptiveLayerSize, adaptiveLayerSize, scanner), 1)
+	// Gradients and theme colors render as nothing, which would hide a usable
+	// bitmap behind an empty layer.
+	if !hasVisiblePixel(img) {
+		return nil, fmt.Errorf("vector %q rendered blank", name)
+	}
+	return img, nil
 }
 
-// hasForeground reports whether any pixel differs from the top-left one.
-func hasForeground(img *image.RGBA) bool {
-	return !bytes.Equal(img.Pix, bytes.Repeat(img.Pix[:4], len(img.Pix)/4))
+func hasVisiblePixel(img *image.RGBA) bool {
+	for i := 3; i < len(img.Pix); i += 4 {
+		if img.Pix[i] != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // parseColor parses an Android color literal: #RGB, #ARGB, #RRGGBB, or
@@ -1151,21 +1270,35 @@ func parseColor(value string) (color.NRGBA, bool) {
 	return color.NRGBA{R: uint8(parsed >> 16), G: uint8(parsed >> 8), B: uint8(parsed), A: uint8(parsed >> 24)}, true
 }
 
-// adaptiveIconBackground returns the opaque background color, white when the
-// value is not a color literal.
-func adaptiveIconBackground(value string) color.Color {
-	parsed, ok := parseColor(value)
-	if !ok {
-		return color.White
+// parseDecimalColor parses a color apkparser printed as a signed decimal
+// integer, 0xAARRGGBB.
+func parseDecimalColor(value string) (color.NRGBA, bool) {
+	decimal, err := strconv.ParseInt(value, 10, 32)
+	if err != nil {
+		return color.NRGBA{}, false
 	}
-	return color.RGBA{R: parsed.R, G: parsed.G, B: parsed.B, A: 0xff}
+	argb := uint32(decimal)
+	return color.NRGBA{R: uint8(argb >> 16), G: uint8(argb >> 8), B: uint8(argb), A: uint8(argb >> 24)}, true
 }
 
 type vectorSVGCollector struct {
 	body           strings.Builder
+	defs           strings.Builder
+	gradients      int
 	viewportWidth  string
 	viewportHeight string
 	depth          int
+	// nonZero is each path's fill rule; SVG's fill-rule is not read by oksvg.
+	nonZero []bool
+	clipped bool
+	// size is the rendered width and height. oksvg evaluates user-space
+	// gradients in pixels, so transforms maps each open group's coordinates
+	// to pixels at that size.
+	size       float64
+	transforms []rasterx.Matrix2D
+	// archive resolves color references and gradient resources. It may be
+	// nil.
+	archive *apkArchive
 }
 
 func (c *vectorSVGCollector) EncodeToken(token xml.Token) error {
@@ -1175,22 +1308,43 @@ func (c *vectorSVGCollector) EncodeToken(token xml.Token) error {
 		case "vector":
 			c.viewportWidth = attribute(token, "viewportWidth")
 			c.viewportHeight = attribute(token, "viewportHeight")
+			if width, height := floatAttribute(token, "viewportWidth", 0), floatAttribute(token, "viewportHeight", 0); width > 0 && height > 0 {
+				c.transforms = []rasterx.Matrix2D{rasterx.Identity.Scale(c.size/width, c.size/height)}
+			}
 		case "group":
-			fmt.Fprintf(&c.body, `<g transform="translate(%s %s) scale(%s %s)">`,
-				svgAttribute(attribute(token, "translateX"), "0"),
-				svgAttribute(attribute(token, "translateY"), "0"),
-				svgAttribute(attribute(token, "scaleX"), "1"),
-				svgAttribute(attribute(token, "scaleY"), "1"))
+			pivotX, pivotY := floatAttribute(token, "pivotX", 0), floatAttribute(token, "pivotY", 0)
+			translateX, translateY := floatAttribute(token, "translateX", 0)+pivotX, floatAttribute(token, "translateY", 0)+pivotY
+			rotation := floatAttribute(token, "rotation", 0)
+			scaleX, scaleY := floatAttribute(token, "scaleX", 1), floatAttribute(token, "scaleY", 1)
+			fmt.Fprintf(&c.body, `<g transform="translate(%g %g) rotate(%g) scale(%g %g) translate(%g %g)">`,
+				translateX, translateY, rotation, scaleX, scaleY, -pivotX, -pivotY)
 			c.depth++
+			c.transforms = append(c.transforms, c.transform().
+				Translate(translateX, translateY).
+				Rotate(rotation*math.Pi/180).
+				Scale(scaleX, scaleY).
+				Translate(-pivotX, -pivotY))
 		case "path":
-			fmt.Fprintf(&c.body, `<path d="%s" %s/>`,
+			fmt.Fprintf(&c.body, `<path d="%s" %s`,
 				svgAttribute(attribute(token, "pathData"), ""),
-				svgFill(attribute(token, "fillColor")))
+				c.paint("fill", attribute(token, "fillColor"), floatAttribute(token, "fillAlpha", 1)))
+			if stroke := attribute(token, "strokeColor"); stroke != "" {
+				fmt.Fprintf(&c.body, ` %s stroke-width="%g"`,
+					c.paint("stroke", stroke, floatAttribute(token, "strokeAlpha", 1)),
+					floatAttribute(token, "strokeWidth", 0))
+			}
+			c.body.WriteString("/>")
+			c.nonZero = append(c.nonZero, attribute(token, "fillType") != "1")
+		case "clip-path":
+			c.clipped = true
 		}
 	case xml.EndElement:
 		if token.Name.Local == "group" && c.depth > 0 {
 			c.body.WriteString("</g>")
 			c.depth--
+			if len(c.transforms) > 1 {
+				c.transforms = c.transforms[:len(c.transforms)-1]
+			}
 		}
 	}
 	return nil
@@ -1204,9 +1358,10 @@ func (c *vectorSVGCollector) svg() (string, error) {
 	if c.viewportWidth == "" || c.viewportHeight == "" {
 		return "", errors.New("vector viewport is missing")
 	}
-	return fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %s %s">%s</svg>`,
+	return fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %s %s"><defs>%s</defs>%s</svg>`,
 		svgAttribute(c.viewportWidth, ""),
 		svgAttribute(c.viewportHeight, ""),
+		c.defs.String(),
 		c.body.String()), nil
 }
 
@@ -1219,22 +1374,163 @@ func svgAttribute(value, fallback string) string {
 	return escaped.String()
 }
 
-// svgFill renders an Android fillColor as SVG fill attributes. SVG 1.1 has no
-// #AARRGGBB, so alpha becomes fill-opacity. A decimal value is an opaque
-// color: apkparser prints integer-typed colors without their alpha.
-func svgFill(value string) string {
-	if parsed, ok := parseColor(value); ok {
-		fill := fmt.Sprintf(`fill="#%02x%02x%02x"`, parsed.R, parsed.G, parsed.B)
-		if parsed.A != 0xff {
-			fill += fmt.Sprintf(` fill-opacity="%.3f"`, float64(parsed.A)/255)
+// paint renders a path's fill or stroke. A color reference apkparser left
+// unresolved is resolved here, and a gradient resource becomes an SVG
+// gradient in defs.
+func (c *vectorSVGCollector) paint(name, value string, alpha float64) string {
+	if c.archive == nil {
+		return svgPaint(name, value, alpha)
+	}
+	if isResourceReference(value) {
+		if parsed, ok := c.archive.resolveColor(value); ok {
+			value = fmt.Sprintf("#%02x%02x%02x%02x", parsed.A, parsed.R, parsed.G, parsed.B)
 		}
-		return fill
 	}
-	decimal, err := strconv.ParseInt(value, 10, 32)
+	if !strings.EqualFold(path.Ext(value), ".xml") {
+		return svgPaint(name, value, alpha)
+	}
+	id := fmt.Sprintf("gradient%d", c.gradients)
+	gradient, err := c.archive.svgGradient(value, id, c.transform())
 	if err != nil {
-		return `fill="none"`
+		return svgPaint(name, value, alpha)
 	}
-	return fmt.Sprintf(`fill="#%06x"`, uint32(decimal)&0x00ffffff)
+	c.gradients++
+	c.defs.WriteString(gradient)
+	paint := fmt.Sprintf(`%s="url(#%s)"`, name, id)
+	if alpha != 1 {
+		paint += fmt.Sprintf(` %s-opacity="%.3f"`, name, alpha)
+	}
+	return paint
+}
+
+// transform maps the current group's coordinates to pixels.
+func (c *vectorSVGCollector) transform() rasterx.Matrix2D {
+	if len(c.transforms) == 0 {
+		return rasterx.Identity
+	}
+	return c.transforms[len(c.transforms)-1]
+}
+
+// svgGradient translates an Android gradient resource into an SVG gradient
+// with the given id. Android coordinates are in the path's space; transform
+// maps them to the pixels oksvg evaluates user-space gradients in. Sweep
+// gradients have no SVG equivalent.
+func (a *apkArchive) svgGradient(name, id string, transform rasterx.Matrix2D) (string, error) {
+	data, err := a.readEntry(name, maxAPKResourceSize)
+	if err != nil {
+		return "", fmt.Errorf("read gradient: %w", err)
+	}
+	collector := gradientCollector{}
+	if err := apkparser.ParseXml(bytes.NewReader(data), &collector, a.table); err != nil {
+		return "", fmt.Errorf("parse gradient %q: %w", name, err)
+	}
+	if collector.gradient == nil {
+		return "", fmt.Errorf("%q is not a gradient", name)
+	}
+	gradient := *collector.gradient
+	stops := collector.stops
+	if len(stops) == 0 {
+		for _, stop := range []gradientStop{{"startColor", 0}, {"centerColor", 0.5}, {"endColor", 1}} {
+			if value := attribute(gradient, stop.color); value != "" {
+				stops = append(stops, gradientStop{value, stop.offset})
+			}
+		}
+	}
+	if len(stops) == 0 {
+		return "", fmt.Errorf("gradient %q has no colors", name)
+	}
+	spread := "pad"
+	switch attribute(gradient, "tileMode") {
+	case "1":
+		spread = "repeat"
+	case "2":
+		spread = "reflect"
+	}
+
+	var svg strings.Builder
+	element := "linearGradient"
+	switch attribute(gradient, "type") {
+	case "", "0":
+		x1, y1 := transform.Transform(floatAttribute(gradient, "startX", 0), floatAttribute(gradient, "startY", 0))
+		x2, y2 := transform.Transform(floatAttribute(gradient, "endX", 0), floatAttribute(gradient, "endY", 0))
+		fmt.Fprintf(&svg, `<linearGradient id="%s" gradientUnits="userSpaceOnUse" spreadMethod="%s" x1="%g" y1="%g" x2="%g" y2="%g">`,
+			id, spread, x1, y1, x2, y2)
+	case "1":
+		element = "radialGradient"
+		cx, cy := transform.Transform(floatAttribute(gradient, "centerX", 0), floatAttribute(gradient, "centerY", 0))
+		// SVG has one radius, so a non-uniform scale uses the mean.
+		radius := floatAttribute(gradient, "gradientRadius", 0) * math.Sqrt(math.Abs(transform.A*transform.D-transform.B*transform.C))
+		fmt.Fprintf(&svg, `<radialGradient id="%s" gradientUnits="userSpaceOnUse" spreadMethod="%s" cx="%g" cy="%g" r="%g">`,
+			id, spread, cx, cy, radius)
+	default:
+		return "", fmt.Errorf("gradient %q type %q is unsupported", name, attribute(gradient, "type"))
+	}
+	for _, stop := range stops {
+		parsed, ok := a.resolveColor(stop.color)
+		if !ok {
+			return "", fmt.Errorf("gradient %q color %q is unsupported", name, stop.color)
+		}
+		fmt.Fprintf(&svg, `<stop offset="%g" stop-color="#%02x%02x%02x" stop-opacity="%.3f"/>`,
+			stop.offset, parsed.R, parsed.G, parsed.B, float64(parsed.A)/255)
+	}
+	fmt.Fprintf(&svg, "</%s>", element)
+	return svg.String(), nil
+}
+
+type gradientStop struct {
+	color  string
+	offset float64
+}
+
+type gradientCollector struct {
+	gradient *xml.StartElement
+	stops    []gradientStop
+}
+
+func (c *gradientCollector) EncodeToken(token xml.Token) error {
+	start, ok := token.(xml.StartElement)
+	if !ok {
+		return nil
+	}
+	switch start.Name.Local {
+	case "gradient":
+		if c.gradient == nil {
+			c.gradient = &start
+		}
+	case "item":
+		c.stops = append(c.stops, gradientStop{attribute(start, "color"), floatAttribute(start, "offset", 0)})
+	}
+	return nil
+}
+
+func (c *gradientCollector) Flush() error {
+	return nil
+}
+
+func floatAttribute(start xml.StartElement, name string, fallback float64) float64 {
+	value, err := strconv.ParseFloat(attribute(start, name), 64)
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+// svgPaint renders an Android color as an SVG fill or stroke and its opacity.
+// SVG 1.1 has no #AARRGGBB, so alpha, times the path's own alpha, becomes the
+// opacity. A value that is not a color paints nothing.
+func svgPaint(name, value string, alpha float64) string {
+	parsed, ok := parseColor(value)
+	if !ok {
+		parsed, ok = parseDecimalColor(value)
+	}
+	if !ok {
+		return fmt.Sprintf(`%s="none"`, name)
+	}
+	paint := fmt.Sprintf(`%s="#%02x%02x%02x"`, name, parsed.R, parsed.G, parsed.B)
+	if opacity := float64(parsed.A) / 255 * alpha; opacity != 1 {
+		paint += fmt.Sprintf(` %s-opacity="%.3f"`, name, opacity)
+	}
+	return paint
 }
 
 // extractIconManually searches for the icon in common locations within the APK.

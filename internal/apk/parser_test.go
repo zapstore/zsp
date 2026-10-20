@@ -764,35 +764,124 @@ func TestParseColor(t *testing.T) {
 	}
 }
 
-func TestSVGFill(t *testing.T) {
+func TestSVGPaint(t *testing.T) {
 	tests := []struct {
-		in   string
-		want string
+		name  string
+		in    string
+		alpha float64
+		want  string
 	}{
-		{"#112233", `fill="#112233"`},
-		{"#ff112233", `fill="#112233"`},
-		{"#80112233", `fill="#112233" fill-opacity="0.502"`},
-		{"#00112233", `fill="#112233" fill-opacity="0.000"`},
-		{"16711680", `fill="#ff0000"`},
-		{"?attr/colorPrimary", `fill="none"`},
-		{"", `fill="none"`},
+		{"fill", "#112233", 1, `fill="#112233"`},
+		{"fill", "#ff112233", 1, `fill="#112233"`},
+		{"fill", "#80112233", 1, `fill="#112233" fill-opacity="0.502"`},
+		{"fill", "#00112233", 1, `fill="#112233" fill-opacity="0.000"`},
+		{"fill", "#112233", 0.5, `fill="#112233" fill-opacity="0.500"`},
+		{"fill", "-65536", 1, `fill="#ff0000"`},
+		{"fill", "16711680", 1, `fill="#ff0000" fill-opacity="0.000"`},
+		{"fill", "?attr/colorPrimary", 1, `fill="none"`},
+		{"fill", "", 1, `fill="none"`},
+		{"stroke", "#112233", 1, `stroke="#112233"`},
 	}
 	for _, tt := range tests {
-		t.Run(tt.in, func(t *testing.T) {
-			if got := svgFill(tt.in); got != tt.want {
-				t.Errorf("svgFill(%q) = %s, want %s", tt.in, got, tt.want)
+		t.Run(tt.name+tt.in, func(t *testing.T) {
+			if got := svgPaint(tt.name, tt.in, tt.alpha); got != tt.want {
+				t.Errorf("svgPaint(%q, %q, %g) = %s, want %s", tt.name, tt.in, tt.alpha, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestAdaptiveIconBackgroundIsOpaque(t *testing.T) {
-	got := adaptiveIconBackground("#80112233")
-	if want := (color.RGBA{0x11, 0x22, 0x33, 0xff}); got != want {
-		t.Errorf("adaptiveIconBackground() = %v, want %v", got, want)
+func TestAdaptiveLayerColorIsOpaque(t *testing.T) {
+	layer, err := (&apkArchive{}).adaptiveLayer("#80112233")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := adaptiveIconBackground("@7f010000"); got != color.White {
-		t.Errorf("adaptiveIconBackground(reference) = %v, want white", got)
+	if got, want := layer.At(0, 0), (color.RGBA{0x11, 0x22, 0x33, 0xff}); got != want {
+		t.Errorf("adaptiveLayer() color = %v, want %v", got, want)
+	}
+	if _, ok := (&apkArchive{}).resolveColor("@7f010000"); ok {
+		t.Error("resolveColor(reference) without a table = ok, want failure")
+	}
+}
+
+func TestComposeAdaptiveIconCropsToMask(t *testing.T) {
+	background := image.NewUniform(color.RGBA{0x10, 0x0b, 0x15, 0xff})
+	foreground := image.NewNRGBA(image.Rect(0, 0, 108, 108))
+	// Red sits in the 18-pixel margin launchers mask off, blue in the center.
+	foreground.SetNRGBA(5, 5, color.NRGBA{R: 0xff, A: 0xff})
+	for y := 44; y < 64; y++ {
+		for x := 44; x < 64; x++ {
+			foreground.SetNRGBA(x, y, color.NRGBA{B: 0xff, A: 0xff})
+		}
+	}
+	img := composeAdaptiveIcon([]image.Image{background, foreground})
+	if got := img.Bounds().Dx(); got != 72 {
+		t.Fatalf("width = %d, want 72", got)
+	}
+	if got, want := img.RGBAAt(0, 0), (color.RGBA{0x10, 0x0b, 0x15, 0xff}); got != want {
+		t.Errorf("corner = %v, want background %v", got, want)
+	}
+	if got := img.RGBAAt(36, 36); got.B < 0xf0 || got.R > 0x10 {
+		t.Errorf("center = %v, want foreground blue", got)
+	}
+}
+
+// IronFox fills its fox with a red-to-yellow gradient resource, whose
+// coordinates are in the vector's 32-unit viewport, not pixels.
+func TestParseVectorGradient(t *testing.T) {
+	path := filepath.Join("..", "..", "testdata", "apks", "ironfox-152.0.6-arm64-v8a.apk")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		t.Skipf("test APK not found: %s", path)
+	}
+	info, err := Parse(t.Context(), path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	icon, _, err := image.Decode(bytes.NewReader(info.Icon))
+	if err != nil {
+		t.Fatalf("decode icon: %v", err)
+	}
+	upperLeft := color.NRGBAModel.Convert(icon.At(130, 200)).(color.NRGBA)
+	lowerRight := color.NRGBAModel.Convert(icon.At(360, 330)).(color.NRGBA)
+	if int(lowerRight.G)-int(upperLeft.G) < 40 {
+		t.Errorf("gradient green %d -> %d, want red at upper left turning yellow at lower right", upperLeft.G, lowerRight.G)
+	}
+}
+
+// Adaptive icons must keep their declared background, whether a color
+// resource or a color behind a bitmap foreground.
+func TestParseAdaptiveIconBackground(t *testing.T) {
+	tests := []struct {
+		apkFile  string
+		minWidth int
+		corner   color.RGBA
+	}{
+		{"exiferaser.apk", 512, color.RGBA{0x4d, 0xb6, 0xac, 0xff}},
+		{"Armada-v0.66.5.apk", 193, color.RGBA{0x10, 0x0b, 0x15, 0xff}},
+		{"mempal-v1.5.3.apk", 512, color.RGBA{0x0f, 0x21, 0x35, 0xff}},
+		{"ironfox-152.0.6-arm64-v8a.apk", 512, color.RGBA{0xff, 0xff, 0xff, 0xff}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.apkFile, func(t *testing.T) {
+			path := filepath.Join("..", "..", "testdata", "apks", tt.apkFile)
+			if _, err := os.Stat(path); os.IsNotExist(err) {
+				t.Skipf("test APK not found: %s", path)
+			}
+			info, err := Parse(t.Context(), path)
+			if err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+			icon, _, err := image.Decode(bytes.NewReader(info.Icon))
+			if err != nil {
+				t.Fatalf("decode icon: %v", err)
+			}
+			if got := icon.Bounds().Dx(); got < tt.minWidth {
+				t.Errorf("icon width = %d, want at least %d", got, tt.minWidth)
+			}
+			if got := color.RGBAModel.Convert(icon.At(0, 0)); got != tt.corner {
+				t.Errorf("icon corner = %v, want %v", got, tt.corner)
+			}
+		})
 	}
 }
 
