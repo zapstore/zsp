@@ -123,7 +123,7 @@ func relayBinary(root string) (string, func(), error) {
 		return "", nil, err
 	}
 	out := filepath.Join(tmp, "relay")
-	cmd := exec.Command("go", "build", "-tags", "fts5", "-o", out, "./cmd")
+	cmd := exec.Command("go", "build", "-o", out, "./cmd")
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
 	if runtime.GOOS == "darwin" {

@@ -103,7 +103,7 @@ func startLocalRelay(binary string) (relayURL, blossomURL, socketPath string, st
 }
 
 func buildRelay(root, out string) error {
-	cmd := exec.Command("go", "build", "-buildvcs=false", "-tags", "fts5", "-o", out, "./cmd")
+	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", out, "./cmd")
 	cmd.Dir = filepath.Join(root, "relay")
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
 	if runtime.GOOS == "darwin" {
