@@ -57,8 +57,13 @@ func TestCLI(t *testing.T) {
 		requireErrorEnvelope(t, result, 1, "check", "invalid_arguments")
 	})
 
-	t.Run("removed utils command", func(t *testing.T) {
-		result := runZSP(t, context.Background(), "utils", "extract-apk", "app.apk")
+	t.Run("utils extract-apk missing APK envelope", func(t *testing.T) {
+		result := runZSP(t, context.Background(), "utils", "extract-apk", filepath.Join(t.TempDir(), "missing.apk"))
+		requireErrorEnvelope(t, result, 1, "utils", "invalid_apk")
+	})
+
+	t.Run("utils unknown operation", func(t *testing.T) {
+		result := runZSP(t, context.Background(), "utils", "unknown", "app.apk")
 		requireErrorEnvelope(t, result, 1, "utils", "invalid_arguments")
 	})
 
