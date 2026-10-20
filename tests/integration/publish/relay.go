@@ -7,21 +7,17 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
+
+	"github.com/zapstore/zsp/tests/integration/fixture"
 )
 
 const fixturePubkey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 
 func startLocalRelay() (relayURL, blossomURL string, stop func(), err error) {
 	stop = func() {}
-	root, err := workspaceRoot()
-	if err != nil {
-		return "", "", stop, err
-	}
-	binary, cleanup, err := relayBinary(root)
+	binary, cleanup, err := fixture.Relay()
 	if err != nil {
 		return "", "", stop, err
 	}
@@ -107,57 +103,6 @@ func startLocalRelay() (relayURL, blossomURL string, stop func(), err error) {
 		return "", "", func() {}, err
 	}
 	return "ws://" + relayAddr, "http://" + blossomAddr, stop, nil
-}
-
-func relayBinary(root string) (string, func(), error) {
-	noop := func() {}
-	if binary := strings.TrimSpace(os.Getenv("RELAY_BINARY")); binary != "" {
-		return binary, noop, nil
-	}
-	dir := strings.TrimSpace(os.Getenv("RELAY_DIR"))
-	if dir == "" {
-		dir = filepath.Join(root, "relay")
-	}
-	tmp, err := os.MkdirTemp("", "zsp-publish-relay-bin-*")
-	if err != nil {
-		return "", nil, err
-	}
-	out := filepath.Join(tmp, "relay")
-	cmd := exec.Command("go", "build", "-o", out, "./cmd")
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
-	if runtime.GOOS == "darwin" {
-		cmd.Env = append(cmd.Env, "CGO_LDFLAGS=-Wl,-no_warn_duplicate_libraries")
-	}
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		os.RemoveAll(tmp)
-		return "", nil, fmt.Errorf("build relay: %w", err)
-	}
-	return out, func() { os.RemoveAll(tmp) }, nil
-}
-
-func workspaceRoot() (string, error) {
-	wd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	dir := wd
-	for {
-		zsp := filepath.Join(dir, "zsp", "go.mod")
-		relay := filepath.Join(dir, "relay", "cmd")
-		if _, zspErr := os.Stat(zsp); zspErr == nil {
-			if _, relayErr := os.Stat(relay); relayErr == nil || strings.TrimSpace(os.Getenv("RELAY_BINARY")) != "" {
-				return dir, nil
-			}
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", fmt.Errorf("zsp/ and relay/ not found from %s", wd)
-		}
-		dir = parent
-	}
 }
 
 func freeAddress() (string, error) {

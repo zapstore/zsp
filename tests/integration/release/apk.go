@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/zapstore/zsp/tests/integration/fixture"
 )
 
 const (
@@ -24,9 +26,9 @@ func buildUnsignedAPK(t *testing.T, directory string, versionCode int) string {
 
 func buildAppAPK(t *testing.T, directory, id, label string, versionCode int) string {
 	t.Helper()
-	root := "/opt/homebrew/share/android-commandlinetools"
-	aapt := androidTool(t, filepath.Join(root, "build-tools", "*", "aapt"))
-	androidJar := androidTool(t, filepath.Join(root, "platforms", "android-*", "android.jar"))
+	sdk := androidSDKRoot(t)
+	aapt := androidTool(t, filepath.Join(sdk, "build-tools", "*", "aapt"))
+	androidJar := androidTool(t, filepath.Join(sdk, "platforms", "android-*", "android.jar"))
 
 	buildDirectory := filepath.Join(directory, strings.ReplaceAll(id, ".", "_"), strconv.Itoa(versionCode))
 	if err := os.MkdirAll(buildDirectory, 0o700); err != nil {
@@ -62,7 +64,7 @@ func makeKeystore(t *testing.T, path string) {
 
 func certificateDigest(t *testing.T, apk string) string {
 	t.Helper()
-	apksigner := androidTool(t, filepath.Join("/opt/homebrew/share/android-commandlinetools", "build-tools", "*", "apksigner"))
+	apksigner := androidTool(t, filepath.Join(androidSDKRoot(t), "build-tools", "*", "apksigner"))
 	cmd := exec.Command(apksigner, "verify", "--print-certs", apk)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -79,9 +81,18 @@ func certificateDigest(t *testing.T, apk string) string {
 
 func signWithKeystore(t *testing.T, keystore, unsigned, out string) {
 	t.Helper()
-	apksigner := androidTool(t, filepath.Join("/opt/homebrew/share/android-commandlinetools", "build-tools", "*", "apksigner"))
+	apksigner := androidTool(t, filepath.Join(androidSDKRoot(t), "build-tools", "*", "apksigner"))
 	run(t, "", apksigner, "sign", "--ks", keystore, "--ks-key-alias", "release",
 		"--ks-pass", "pass:"+keystorePass, "--key-pass", "pass:"+keystorePass, "--out", out, unsigned)
+}
+
+func androidSDKRoot(t *testing.T) string {
+	t.Helper()
+	root, err := fixture.AndroidSDKRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
 }
 
 func androidTool(t *testing.T, pattern string) string {

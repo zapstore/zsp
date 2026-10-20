@@ -25,6 +25,8 @@ import (
 
 	nostr "github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
+
+	"github.com/zapstore/zsp/tests/integration/fixture"
 )
 
 const (
@@ -49,34 +51,28 @@ var (
 func TestMain(m *testing.M) {
 	code := 1
 	defer func() { os.Exit(code) }()
-	root, err := workspaceRoot()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return
-	}
-	dir, err := os.MkdirTemp("", "zsp-release-bin-*")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return
-	}
-	defer os.RemoveAll(dir)
 	defer func() { stopRelayFn() }()
-	if err := buildZSP(root, filepath.Join(dir, "zsp")); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return
-	}
-	hotbox, err := hotboxBinary(root)
+	zspPath, zspCleanup, err := fixture.ZSP()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return
 	}
-	if err := buildRelay(root, filepath.Join(dir, "relay")); err != nil {
+	defer zspCleanup()
+	hotboxPath, hotboxCleanup, err := fixture.Hotbox()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return
 	}
-	zspBin = filepath.Join(dir, "zsp")
-	hotboxBin = hotbox
-	relayURL, blossomURL, policySocket, stopRelayFn, err = startLocalRelay(filepath.Join(dir, "relay"))
+	defer hotboxCleanup()
+	relayBin, relayCleanup, err := fixture.Relay()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+	defer relayCleanup()
+	zspBin = zspPath
+	hotboxBin = hotboxPath
+	relayURL, blossomURL, policySocket, stopRelayFn, err = startLocalRelay(relayBin)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return
@@ -754,31 +750,3 @@ func copyFile(src, dest string) error {
 	return out.Close()
 }
 
-// Builds pass -buildvcs=false because this workspace's git metadata is not readable from the test.
-func buildZSP(root, out string) error {
-	cmd := exec.Command("go", "build", "-buildvcs=false", "-trimpath", "-o", out, "./cmd/zsp")
-	cmd.Dir = filepath.Join(root, "zsp")
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
-	if runtime.GOOS == "darwin" {
-		cmd.Env = append(cmd.Env, "CGO_LDFLAGS=-Wl,-no_warn_duplicate_libraries")
-	}
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("build zsp: %w", err)
-	}
-	return nil
-}
-
-// hotboxBinary is a hotbox already on disk. The workspace build is preferred.
-func hotboxBinary(root string) (string, error) {
-	bin := filepath.Join(root, "hotbox", "dist", fmt.Sprintf("hotbox-%s-%s", runtime.GOOS, runtime.GOARCH))
-	if _, err := os.Stat(bin); err == nil {
-		return bin, nil
-	}
-	found, err := exec.LookPath("hotbox")
-	if err != nil {
-		return "", fmt.Errorf("hotbox binary %s: %w", bin, err)
-	}
-	return found, nil
-}

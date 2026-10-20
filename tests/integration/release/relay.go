@@ -9,9 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
+
 )
 
 const fixturePubkey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
@@ -100,43 +100,6 @@ func startLocalRelay(binary string) (relayURL, blossomURL, socketPath string, st
 		return "", "", "", func() {}, err
 	}
 	return "ws://" + relayAddr, "http://" + blossomAddr, socketPath, stop, nil
-}
-
-func buildRelay(root, out string) error {
-	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", out, "./cmd")
-	cmd.Dir = filepath.Join(root, "relay")
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
-	if runtime.GOOS == "darwin" {
-		cmd.Env = append(cmd.Env, "CGO_LDFLAGS=-Wl,-no_warn_duplicate_libraries")
-	}
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("build relay: %w", err)
-	}
-	return nil
-}
-
-func workspaceRoot() (string, error) {
-	wd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	dir := wd
-	for {
-		zsp := filepath.Join(dir, "zsp", "go.mod")
-		relay := filepath.Join(dir, "relay", "cmd")
-		if _, zspErr := os.Stat(zsp); zspErr == nil {
-			if _, relayErr := os.Stat(relay); relayErr == nil {
-				return dir, nil
-			}
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", fmt.Errorf("zsp/ and relay/ not found from %s", wd)
-		}
-		dir = parent
-	}
 }
 
 func freeAddress() (string, error) {

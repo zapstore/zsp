@@ -28,6 +28,10 @@ CGO_LDFLAGS := $(filter-out -Wl$(comma)-no_warn_duplicate_libraries,$(CGO_LDFLAG
 endif
 export CGO_LDFLAGS
 
+# Integration tests build from *_DIR unless *_BINARY is set.
+RELAY_DIR ?= $(abspath ../relay)
+HOTBOX_DIR ?= $(abspath ../hotbox)
+
 .PHONY: all bin darwin-arm64 linux-arm64 linux-amd64 clean test test-unit test-integration test-release
 
 all: bin
@@ -76,7 +80,7 @@ test-unit:
 	go test $$(go list ./... | grep -v '/tests')
 
 test-integration:
-	go test -tags publish -count=1 -timeout=15m ./tests/integration/publish
+	RELAY_DIR=$(RELAY_DIR) go test -tags publish -count=1 -timeout=15m ./tests/integration/publish
 
 test-release:
-	go test -tags release -count=1 -timeout=20m ./tests/integration/release
+	RELAY_DIR=$(RELAY_DIR) HOTBOX_DIR=$(HOTBOX_DIR) go test -tags release -count=1 -timeout=20m ./tests/integration/release

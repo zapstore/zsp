@@ -30,6 +30,7 @@ import (
 	"github.com/nbd-wtf/go-nostr/nip19"
 	keystore "github.com/pavlo-v-chernykh/keystore-go/v4"
 	"github.com/zapstore/zsp"
+	"github.com/zapstore/zsp/tests/integration/fixture"
 )
 
 const (
@@ -285,10 +286,13 @@ func mustRead(t *testing.T, path string) []byte {
 
 func buildE2EAPK(t *testing.T, directory, keystore string, versionCode int64) string {
 	t.Helper()
-	root := "/opt/homebrew/share/android-commandlinetools"
-	aapt := e2eAndroidTool(t, filepath.Join(root, "build-tools", "*", "aapt"))
-	apksigner := e2eAndroidTool(t, filepath.Join(root, "build-tools", "*", "apksigner"))
-	androidJar := e2eAndroidTool(t, filepath.Join(root, "platforms", "android-*", "android.jar"))
+	sdk, err := fixture.AndroidSDKRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	aapt := e2eAndroidTool(t, filepath.Join(sdk, "build-tools", "*", "aapt"))
+	apksigner := e2eAndroidTool(t, filepath.Join(sdk, "build-tools", "*", "apksigner"))
+	androidJar := e2eAndroidTool(t, filepath.Join(sdk, "platforms", "android-*", "android.jar"))
 
 	buildDirectory := filepath.Join(directory, strconv.FormatInt(versionCode, 10))
 	if err := os.MkdirAll(buildDirectory, 0o700); err != nil {
