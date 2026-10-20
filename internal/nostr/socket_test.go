@@ -16,12 +16,12 @@ import (
 )
 
 func TestSocketPath(t *testing.T) {
-	path, ok := socketPath("/var/lib/zapstore/relay/data/nostr.sock")
-	if !ok || path != "/var/lib/zapstore/relay/data/nostr.sock" {
+	path, ok := socketPath("/var/lib/zapstore/relay/relay.sock")
+	if !ok || path != "/var/lib/zapstore/relay/relay.sock" {
 		t.Fatalf("path: %q %v", path, ok)
 	}
-	path, ok = socketPath("unix:///tmp/nostr.sock")
-	if !ok || path != "/tmp/nostr.sock" {
+	path, ok = socketPath("unix:///tmp/relay.sock")
+	if !ok || path != "/tmp/relay.sock" {
 		t.Fatalf("unix: %q %v", path, ok)
 	}
 	if _, ok := socketPath("wss://relay.zapstore.dev"); ok {

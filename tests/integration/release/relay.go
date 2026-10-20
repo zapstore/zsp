@@ -53,8 +53,8 @@ func startLocalRelay(binary string) (relayURL, blossomURL, socketPath string, st
 	cmd.Stdout = &logs
 	cmd.Stderr = &logs
 	cmd.Env = mergeEnv(os.Environ(), []string{
-		"SYSTEM_DIRECTORY_PATH=" + dir,
-		"SYSTEM_LOG_LEVEL=info",
+		"DATA_DIR=" + dir,
+		"LOG_LEVEL=info",
 		"RELAY_HOSTNAME=127.0.0.1",
 		"RELAY_ADDRESS=" + relayAddr,
 		"RELAY_NAME=Zapstore release test",
@@ -67,13 +67,12 @@ func startLocalRelay(binary string) (relayURL, blossomURL, socketPath string, st
 		"RELAY_SOFTWARE=https://github.com/zapstore/relay",
 		"SIGN_WITH=1",
 		"DELTA_INTERVAL=1h",
-		"ANALYTICS_GEO_ENABLED=false",
-		"ANALYTICS_API_ADDRESS=" + analyticsAddr,
+		"ANALYTICS_ADDRESS=" + analyticsAddr,
 		"BLOSSOM_HOSTNAME=127.0.0.1",
 		"BLOSSOM_ADDRESS=" + blossomAddr,
 		"DASHBOARD_HOSTNAME=127.0.0.1",
 		"DASHBOARD_ADDRESS=" + dashboardAddr,
-		"DASHBOARD_ADMIN_PUBKEYS=" + fixturePubkey,
+		"ADMIN_PUBKEYS=" + fixturePubkey,
 		"RATE_INITIAL_TOKENS=100000",
 		"RATE_MAX_TOKENS=100000",
 		"RATE_TOKENS_PER_INTERVAL=100000",
@@ -94,7 +93,7 @@ func startLocalRelay(binary string) (relayURL, blossomURL, socketPath string, st
 		stop()
 		return "", "", "", func() {}, err
 	}
-	socketPath = filepath.Join(dir, "data", "relay.sock")
+	socketPath = filepath.Join(dir, "relay.sock")
 	if err := waitUnix(socketPath, &logs); err != nil {
 		stop()
 		return "", "", "", func() {}, err
@@ -184,7 +183,7 @@ func mergeEnv(base, extra []string) []string {
 	}
 	delete(keys, "DEFENDER_URL")
 	for key := range keys {
-		if strings.HasPrefix(key, "BUNNY_") {
+		if strings.HasPrefix(key, "BUNNY_") || strings.HasPrefix(key, "BLOSSOM_BUNNY_") {
 			delete(keys, key)
 		}
 	}

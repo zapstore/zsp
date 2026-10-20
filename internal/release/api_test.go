@@ -1083,24 +1083,24 @@ func TestEffectivePublishTargetsUseContractDefaults(t *testing.T) {
 
 func TestEffectivePublishTargetsAcceptSocket(t *testing.T) {
 	t.Setenv("BLOSSOM_URL", "")
-	t.Setenv("RELAYS", "/tmp/nostr.sock, unix:///var/run/nostr.sock")
+	t.Setenv("RELAYS", "/tmp/relay.sock, unix:///run/zapstore-relay/relay.sock")
 
 	_, relayURLs, err := effectivePublishTargets(PublishOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"/tmp/nostr.sock", "unix:///var/run/nostr.sock"}
+	want := []string{"/tmp/relay.sock", "unix:///run/zapstore-relay/relay.sock"}
 	if !reflect.DeepEqual(relayURLs, want) {
 		t.Fatalf("relay URLs = %v, want %v", relayURLs, want)
 	}
 }
 
 func TestFirstRelaySkipsSocket(t *testing.T) {
-	got := firstRelay([]string{"/tmp/nostr.sock", "wss://relay.example"})
+	got := firstRelay([]string{"/tmp/relay.sock", "wss://relay.example"})
 	if got != "wss://relay.example" {
 		t.Fatalf("firstRelay() = %q, want wss://relay.example", got)
 	}
-	if got := firstRelay([]string{"unix:///tmp/nostr.sock"}); got != internalnostr.DefaultRelay {
+	if got := firstRelay([]string{"unix:///tmp/relay.sock"}); got != internalnostr.DefaultRelay {
 		t.Fatalf("firstRelay(socket) = %q, want default relay", got)
 	}
 }
@@ -1123,93 +1123,6 @@ func TestPublishRejectsClosedAPK(t *testing.T) {
 	_, err := Publish(t.Context(), PublishConfig{}, candidate, PublishOptions{})
 	if !errors.Is(err, ErrAPKNotChecked) {
 		t.Fatalf("Publish error = %v, want ErrAPKNotChecked", err)
-	}
-}
-
-func TestRetainPublishedAPKCopiesTheVerifiedFile(t *testing.T) {
-	cache := t.TempDir()
-	t.Setenv("APK_CACHE", cache)
-	srcDir := t.TempDir()
-	src := filepath.Join(srcDir, "app.apk")
-	payload := []byte("verified apk bytes")
-	if err := os.WriteFile(src, payload, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	hash := strings.Repeat("ab", 32)
-	apk := &APK{ownership: newAPKOwnership(src, "", true), verified: verifiedAPK{hash: hash}}
-
-	if err := apk.retainPublished(true, nil); err != nil {
-		t.Fatal(err)
-	}
-	got, err := os.ReadFile(filepath.Join(cache, hash))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(payload) {
-		t.Fatalf("cached bytes = %q, want %q", got, payload)
-	}
-	if err := os.WriteFile(src, []byte("changed"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	got, err = os.ReadFile(filepath.Join(cache, hash))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(payload) {
-		t.Fatal("cache file changed with the source; the copy was a link")
-	}
-
-	info, err := os.Stat(filepath.Join(cache, hash))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o644 {
-		t.Fatalf("mode = %o, want 644", info.Mode().Perm())
-	}
-}
-
-func TestRetainPublishedAPKOnAlreadyPublished(t *testing.T) {
-	cache := t.TempDir()
-	t.Setenv("APK_CACHE", cache)
-	src := filepath.Join(t.TempDir(), "app.apk")
-	if err := os.WriteFile(src, []byte("apk"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	hash := strings.Repeat("cd", 32)
-	apk := &APK{ownership: newAPKOwnership(src, "", true), verified: verifiedAPK{hash: hash}}
-	err := operationCodeErr(ErrAlreadyPublished, "release_already_published", false, "live")
-	if err := apk.retainPublished(false, err); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(cache, hash)); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestRetainPublishedAPKWritesNothingOtherwise(t *testing.T) {
-	cache := t.TempDir()
-	src := filepath.Join(t.TempDir(), "app.apk")
-	if err := os.WriteFile(src, []byte("apk"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	hash := strings.Repeat("ef", 32)
-	apk := &APK{ownership: newAPKOwnership(src, "", true), verified: verifiedAPK{hash: hash}}
-
-	t.Setenv("APK_CACHE", "")
-	if err := apk.retainPublished(true, nil); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("APK_CACHE", cache)
-	if err := apk.retainPublished(false, operationErr(ErrSigner, false, "SIGN_WITH")); err != nil {
-		t.Fatal(err)
-	}
-	entries, err := os.ReadDir(cache)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("cache entries = %d, want 0", len(entries))
 	}
 }
 

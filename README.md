@@ -123,7 +123,6 @@ refused. Prefer a short-lived NIP-46 bunker over exposing a private key.
 | `SIGN_WITH` | Nostr signer |
 | `RELAYS` | Comma-separated relays; defaults to `wss://relay.zapstore.dev`. |
 | `BLOSSOM_URL` | Blossom server; defaults to `https://cdn.zapstore.dev` |
-| `APK_CACHE` | When set, copy each accepted APK into this directory, named by its SHA-256 |
 | `KEYSTORE_PASSWORD` | JKS/PKCS#12 store password |
 | `KEYSTORE_KEY_PASSWORD` | Optional JKS private-key password |
 | `GITHUB_TOKEN` | Optional GitHub API token, sent only to GitHub hosts |
