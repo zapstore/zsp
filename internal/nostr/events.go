@@ -396,11 +396,14 @@ func canonicalStrings(values []string) []string {
 
 // BuildEventSetParams contains parameters for building an event set.
 type BuildEventSetParams struct {
-	APKInfo     *apk.APKInfo
-	Config      *config.Config
-	Pubkey      string
-	OriginalURL string // Original download URL (from release source). Not a kind 3063 url tag.
-	// BlossomURL is the APK download URL, <server>/<sha256>.apk. It is the kind 3063 url tag.
+	APKInfo *apk.APKInfo
+	Config  *config.Config
+	Pubkey  string
+	// OriginalURL is the release source. When set, it is the kind 3063 url tag.
+	// The CDN address is the x tag on the Blossom server, so it is not written.
+	OriginalURL string
+	// BlossomURL is <server>/<sha256>.apk. It is the url tag only when there is
+	// no source URL, as with a local APK.
 	BlossomURL       string
 	IconURL          string
 	ImageURLs        []string
@@ -432,10 +435,14 @@ func BuildEventSet(params BuildEventSetParams) *EventSet {
 		name = apkInfo.PackageID
 	}
 
-	// The phone downloads the url tag. A local APK has no source URL, and a
-	// source URL is not the file Blossom stored. The tag is the Blossom URL.
+	// The url tag is where the file came from. A client that wants the CDN
+	// copy uses the x tag. A local APK has no source URL, so its tag is the
+	// Blossom address.
 	var apkURLs []string
-	if params.BlossomURL != "" {
+	switch {
+	case params.OriginalURL != "":
+		apkURLs = append(apkURLs, params.OriginalURL)
+	case params.BlossomURL != "":
 		apkURLs = append(apkURLs, params.BlossomURL)
 	}
 	// Convert architectures to platform identifiers

@@ -477,8 +477,16 @@ func TestBuildEventSet(t *testing.T) {
 		t.Errorf("expected i tag 'com.example.app', got %v", iTag)
 	}
 	urlTags := filterExactTag(events.SoftwareAssets[0].Tags, "url")
+	if len(urlTags) != 1 || urlTags[0][1] != originalURL {
+		t.Errorf("asset URLs = %v, want the source URL", urlTags)
+	}
+
+	local := BuildEventSet(BuildEventSetParams{
+		APKInfo: apkInfo, Config: cfg, Pubkey: pubkey, BlossomURL: blossomURL,
+	})
+	urlTags = filterExactTag(local.SoftwareAssets[0].Tags, "url")
 	if len(urlTags) != 1 || urlTags[0][1] != blossomURL {
-		t.Errorf("asset URLs = %v, want the Blossom download URL", urlTags)
+		t.Errorf("asset URLs = %v, want the Blossom URL for a local APK", urlTags)
 	}
 }
 
