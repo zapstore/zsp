@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	gonostr "github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
 	"github.com/zapstore/zsp/internal/sanitize"
@@ -208,6 +211,65 @@ func TestRelayDialAddress(t *testing.T) {
 				t.Errorf("relayDialAddress(%q) = %q, want %q", tt.relay, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestBunkerSignerCloseDropsConnection(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := make(chan struct{})
+	closedConn := make(chan struct{})
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+			if err != nil {
+				return
+			}
+			close(accepted)
+			defer conn.Close(websocket.StatusNormalClosure, "")
+			for {
+				if _, _, err := conn.Read(t.Context()); err != nil {
+					close(closedConn)
+					return
+				}
+			}
+		}),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	relayURL := "ws://" + ln.Addr().String()
+	conn, err := gonostr.NewConnection(t.Context(), relayURL, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, cancel := context.WithCancel(t.Context())
+	pool := gonostr.NewSimplePool(runCtx)
+	relay := gonostr.NewRelay(t.Context(), relayURL)
+	relay.Connection = conn
+	pool.Relays.Store(relayURL, relay)
+	signer := &BunkerSigner{pool: pool, cancel: cancel}
+
+	wait, stop := context.WithTimeout(t.Context(), 5*time.Second)
+	defer stop()
+	select {
+	case <-accepted:
+	case <-wait.Done():
+		t.Fatal("bunker did not accept the connection")
+	}
+	if err := signer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-closedConn:
+	case <-wait.Done():
+		t.Fatal("bunker socket still open after Close")
+	}
+	if err := signer.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
 	}
 }
 

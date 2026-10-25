@@ -442,14 +442,28 @@ func (s *BunkerSigner) Sign(ctx context.Context, event *nostr.Event) error {
 	return nil
 }
 
-// Close ends the bunker connection and its relay subscription. It is safe to
+// Close ends the bunker websocket and its relay subscription. It is safe to
 // call more than once.
 func (s *BunkerSigner) Close() error {
 	if s == nil {
 		return nil
 	}
-	s.pool.Close("signer closed")
+	// pool.Close only cancels the pool. go-nostr ties each relay to
+	// context.Background, so the websocket stays open until it is closed.
+	// Take the connections first, then cancel, so the subscription loop does
+	// not dial a replacement when these sockets drop.
+	var conns []*nostr.Connection
+	s.pool.Relays.Range(func(_ string, relay *nostr.Relay) bool {
+		if relay != nil && relay.Connection != nil {
+			conns = append(conns, relay.Connection)
+		}
+		return true
+	})
 	s.cancel()
+	s.pool.Close("signer closed")
+	for _, conn := range conns {
+		_ = conn.Close() // a second Close finds the socket already gone
+	}
 	return nil
 }
 
