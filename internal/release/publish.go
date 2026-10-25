@@ -6,9 +6,11 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -296,6 +298,70 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 			Uploaded: upload.Size, Accepted: true,
 		})
 	}
+	// An APK with a public source is read from there; only a local APK is
+	// uploaded.
+	if verified.originalURL == "" {
+		if err := uploadAPK(ctx, client, path, blossomURL, verified, parsed.FileSize, signer, options, result); err != nil {
+			return result, err
+		}
+	}
+	if options.APKCacheDir != "" {
+		if err := keepAPK(path, options.APKCacheDir, verified.hash); err != nil {
+			result.Warnings = append(result.Warnings, "couldn't copy the APK to the APK cache")
+		}
+	}
+
+	if events.AppMetadata != nil {
+		reportPublish(options, "publish", "relay", "application", 0, 0)
+		relayResults, accepted, publishErr := publishEvent(ctx, publisher, events.AppMetadata, false)
+		result.Relays = append(result.Relays, relayResults...)
+		if !accepted {
+			result.Status = "partial"
+			return result, publishErr
+		}
+		result.Warnings = append(result.Warnings, relayWarnings(relayResults)...)
+	}
+	for _, event := range events.SoftwareAssets {
+		reportPublish(options, "publish", "relay", "asset", 0, 0)
+		relayResults, accepted, publishErr := publishEvent(ctx, publisher, event, false)
+		result.Relays = append(result.Relays, relayResults...)
+		if !accepted {
+			result.Status = "partial"
+			return result, publishErr
+		}
+		result.Warnings = append(result.Warnings, relayWarnings(relayResults)...)
+	}
+	reportPublish(options, "publish", "relay", "release", 0, 0)
+	relayResults, accepted, publishErr := publishEvent(ctx, publisher, events.Release, true)
+	result.Relays = append(result.Relays, relayResults...)
+	if !accepted {
+		result.Status = "partial"
+		return result, publishErr
+	}
+	result.Warnings = append(result.Warnings, relayWarnings(relayResults)...)
+	if proofEvent != nil {
+		reportPublish(options, "publish", "relay", "C1 proof", 0, 0)
+		relayResults, accepted, publishErr := publishEvent(ctx, publisher, proofEvent, false)
+		result.Relays = append(result.Relays, relayResults...)
+		if !accepted {
+			result.Status = "partial"
+			return result, publishErr
+		}
+		result.Warnings = append(result.Warnings, relayWarnings(relayResults)...)
+	}
+	result.ID = events.Release.ID
+	result.Status = "published"
+	for _, relay := range result.Relays {
+		if relay.Pending {
+			result.Status = "pending"
+		}
+	}
+	published = true
+	return result, nil
+}
+
+func uploadAPK(ctx context.Context, client *blossom.Client, path, blossomURL string, verified verifiedAPK, size int64,
+	signer internalnostr.Signer, options PublishOptions, result *PublishResult) error {
 	reportPublish(options, "publish", "upload", verified.filename, 0, verified.size)
 	var uploadedBytes int64
 	upload, err := client.Upload(ctx, path, verified.hash, signer, func(done, total int64) {
@@ -310,65 +376,57 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 			Uploaded: uploadedBytes, Accepted: false, Message: "upload failed",
 		})
 		sentinel, retryable := blossomErrorClassification(err)
-		return result, wrapOperationError(sentinel, err, retryable, "upload APK"+uploadFailureDetail(err))
+		return wrapOperationError(sentinel, err, retryable, "upload APK"+uploadFailureDetail(err))
 	}
 	expectedAPKURL := blossomURL + "/" + verified.hash + ".apk"
-	if mismatch := descriptorMismatch(upload, expectedAPKURL, verified.hash, parsed.FileSize,
+	if mismatch := descriptorMismatch(upload, expectedAPKURL, verified.hash, size,
 		"application/vnd.android.package-archive"); mismatch != "" {
 		result.Status = statusAfterExternal(result)
 		result.Uploads = append(result.Uploads, BlobResult{
 			URL: sanitize.URL(upload.URL), Hash: upload.SHA256, Size: upload.Size, Type: upload.Type,
 			Accepted: false, Message: "Blossom returned an unexpected descriptor",
 		})
-		return result, operationErr(ErrTemporaryFailure, true, "Blossom returned an invalid APK descriptor%s", mismatch)
+		return operationErr(ErrTemporaryFailure, true, "Blossom returned an invalid APK descriptor%s", mismatch)
 	}
 	result.Uploads = append(result.Uploads, BlobResult{
 		URL: sanitize.URL(upload.URL), Hash: upload.SHA256, Size: upload.Size,
 		Type: upload.Type, Uploaded: upload.Size, Accepted: true,
 	})
+	return nil
+}
 
-	if events.AppMetadata != nil {
-		reportPublish(options, "publish", "relay", "application", 0, 0)
-		relayResults, accepted, publishErr := publishEvent(ctx, publisher, events.AppMetadata)
-		result.Relays = append(result.Relays, relayResults...)
-		if !accepted {
-			result.Status = "partial"
-			return result, publishErr
-		}
-		result.Warnings = append(result.Warnings, relayWarnings(relayResults)...)
+// keepAPK copies the APK to <dir>/<hash>.apk. A file already there is kept.
+// The copy is renamed into place, so a reader never sees a partial file.
+func keepAPK(path, dir, hash string) error {
+	dest := filepath.Join(dir, hash+".apk")
+	if _, err := os.Stat(dest); err == nil {
+		return nil
 	}
-	for _, event := range events.SoftwareAssets {
-		reportPublish(options, "publish", "relay", "asset", 0, 0)
-		relayResults, accepted, publishErr := publishEvent(ctx, publisher, event)
-		result.Relays = append(result.Relays, relayResults...)
-		if !accepted {
-			result.Status = "partial"
-			return result, publishErr
-		}
-		result.Warnings = append(result.Warnings, relayWarnings(relayResults)...)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
 	}
-	reportPublish(options, "publish", "relay", "release", 0, 0)
-	relayResults, accepted, publishErr := publishEvent(ctx, publisher, events.Release)
-	result.Relays = append(result.Relays, relayResults...)
-	if !accepted {
-		result.Status = "partial"
-		return result, publishErr
+	src, err := os.Open(path)
+	if err != nil {
+		return err
 	}
-	result.Warnings = append(result.Warnings, relayWarnings(relayResults)...)
-	if proofEvent != nil {
-		reportPublish(options, "publish", "relay", "C1 proof", 0, 0)
-		relayResults, accepted, publishErr := publishEvent(ctx, publisher, proofEvent)
-		result.Relays = append(result.Relays, relayResults...)
-		if !accepted {
-			result.Status = "partial"
-			return result, publishErr
-		}
-		result.Warnings = append(result.Warnings, relayWarnings(relayResults)...)
+	defer src.Close()
+	tmp, err := os.CreateTemp(dir, ".apk-*")
+	if err != nil {
+		return err
 	}
-	result.ID = events.Release.ID
-	result.Status = "published"
-	published = true
-	return result, nil
+	defer os.Remove(tmp.Name())
+	if _, err := io.Copy(tmp, src); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), dest)
 }
 
 // shouldClearHTTPCache reports whether a Publish error means the next Fetch
@@ -757,11 +815,14 @@ func firstRelay(values []string) string {
 	return internalnostr.DefaultRelay
 }
 
-func publishEvent(ctx context.Context, publisher *internalnostr.Publisher, event *gonostr.Event) ([]RelayResult, bool, error) {
+// publishEvent sends event to every relay. With checkServed, an accepted
+// event that a relay does not serve right after is marked pending.
+func publishEvent(ctx context.Context, publisher *internalnostr.Publisher, event *gonostr.Event, checkServed bool) ([]RelayResult, bool, error) {
 	published := publisher.Publish(ctx, event)
 	results := make([]RelayResult, 0, len(published))
 	accepted := false
 	for _, relay := range published {
+		pending := checkServed && relay.Success && !relay.IsDuplicate && !publisher.Served(ctx, relay.RelayURL, event)
 		message := ""
 		if relay.Error != nil {
 			if relay.IsDuplicate {
@@ -775,14 +836,14 @@ func publishEvent(ctx context.Context, publisher *internalnostr.Publisher, event
 		}
 		results = append(results, RelayResult{
 			RelayURL: publicRelayURL(relay.RelayURL), EventID: event.ID, Accepted: relay.Success,
-			Duplicate: relay.IsDuplicate, Message: message,
+			Duplicate: relay.IsDuplicate, Pending: pending, Message: message,
 		})
 		accepted = accepted || relay.Success
 	}
 	if accepted {
 		return results, true, nil
 	}
-	return results, false, relayPublicationError(ctx, published)
+	return results, false, relayPublicationError(ctx, published, results)
 }
 
 func publicRelayURL(raw string) string {
@@ -806,7 +867,9 @@ func publicRelayURLs(raw []string) []string {
 	return result
 }
 
-func relayPublicationError(ctx context.Context, published []internalnostr.PublishResult) error {
+// relayPublicationError classifies an event no relay accepted. A rejection
+// carries the first relay's reason, so a caller can show why.
+func relayPublicationError(ctx context.Context, published []internalnostr.PublishResult, results []RelayResult) error {
 	if err := ctx.Err(); err != nil {
 		return operationCodeErr(err, "cancelled", false, "relay publication cancelled")
 	}
@@ -820,6 +883,11 @@ func relayPublicationError(ctx context.Context, published []internalnostr.Publis
 		sentinel, retryable := networkErrorClassification(relay.Error)
 		if errors.Is(sentinel, ErrTemporaryFailure) {
 			return operationErr(ErrTemporaryFailure, retryable, "relay publication failed temporarily")
+		}
+	}
+	for _, result := range results {
+		if result.Message != "" && result.Message != "relay rejected event" {
+			return operationErr(ErrPublishRejected, false, "event rejected by all relays: %s", result.Message)
 		}
 	}
 	return operationErr(ErrPublishRejected, false, "event rejected by all relays")

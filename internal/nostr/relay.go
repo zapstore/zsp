@@ -190,6 +190,41 @@ func (p *Publisher) publishToRelay(ctx context.Context, relayURL string, event *
 	return result
 }
 
+// Served reports whether the relay returns event to a read for its id and
+// author. A relay that accepted the event but holds it back, as Zapstore's
+// buffer zone does until it has read the APK, returns false. So does a
+// failed read.
+func (p *Publisher) Served(ctx context.Context, relayURL string, event *nostr.Event) bool {
+	ctx, cancel := context.WithTimeout(ctx, RelayTimeout)
+	defer cancel()
+	filter := nostr.Filter{IDs: []string{event.ID}, Authors: []string{event.PubKey}, Limit: 1}
+	var events []*nostr.Event
+	if path, ok := socketPath(relayURL); ok {
+		found, err := querySocket(ctx, path, filter)
+		if err != nil {
+			return false
+		}
+		events = found
+	} else {
+		relay, err := nostr.RelayConnect(ctx, relayURL)
+		if err != nil {
+			return false
+		}
+		defer relay.Close()
+		found, err := relay.QuerySync(ctx, filter)
+		if err != nil {
+			return false
+		}
+		events = found
+	}
+	for _, found := range events {
+		if found != nil && found.ID == event.ID {
+			return true
+		}
+	}
+	return false
+}
+
 // storedOnRelay opens a fresh connection and reports whether the relay has
 // the event.
 func storedOnRelay(ctx context.Context, relayURL, eventID string) bool {

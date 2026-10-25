@@ -27,7 +27,7 @@ working directory, never a parent directory.
 | --- | --- | --- |
 | `SIGN_WITH` | `nsec1…` or `bunker://`; hex keys are refused | required to sign |
 | `RELAYS` | comma-separated WebSocket URLs or Unix socket paths | `wss://relay.zapstore.dev` |
-| `BLOSSOM_URL` | Blossom server | `https://cdn.zapstore.dev` |
+| `BLOSSOM_URL` | Blossom server for media, and for an APK with no public source | `https://cdn.zapstore.dev` |
 | `KEYSTORE_PASSWORD`, `KEYSTORE_KEY_PASSWORD` | keystore passwords for the wizard | — |
 | `HOTBOX_SOCKET`, `HOTBOX_PIN` | hotbox socket and PIN; `publish` creates or renews the C1 proof through them | — |
 | `GITHUB_TOKEN` | GitHub API token, sent only to `github.com`, `api.github.com`, and `raw.githubusercontent.com` | — |
@@ -431,14 +431,19 @@ When the run used a `zapstore.yaml` it did not change, the note asks an
 agent to improve that file instead of saying one was written.
 
 CI/CD asks for the npub or hex public key of a separate Nostr key the CI
-holds; Esc returns to the question. The prompt says the nsec stays in the
-CI as its `SIGN_WITH` secret, that the proof names the key as a delegate
-that can publish releases but can't change ownership, and that rotating it
-means running `zsp` again with a new key, whose proof replaces the old one.
-The wizard never asks for the nsec. It publishes a new proof, signed by the
-owner, that names the delegate. It reuses the keystore or hotbox from
-Prove it's yours and asks for the keystore only when that step did not.
-The signer must be the owner. It ends with `CI/CD publishing enabled`.
+holds; Esc returns to the question. The prompt says the proof names the key
+as a delegate that can publish releases but can't change ownership, that CI
+should prefer that delegate as `SIGN_WITH` (its `nsec`, or a bunker for that
+key), that the main key also works the same two ways, and that rotating the
+delegate means running `zsp` again with a new key, whose proof replaces the
+old one. The wizard never asks for the `nsec` or the bunker URL. It publishes
+a new proof, signed by the owner, that names the delegate. It reuses the
+keystore or hotbox from Prove it's yours and asks for the keystore only when
+that step did not. The signer must be the owner. It ends with
+`CI/CD publishing enabled`. That panel repeats the same `SIGN_WITH` choice,
+says a bunker keeps working on the machine that still has zsp's `bunker-keys`
+directory while an `nsec` needs only `SIGN_WITH`, and says to run
+`zsp publish` after each release.
 
 The step ends with `Release published`, the hand-off,
 `CI/CD publishing enabled`, or a short error that says whether anything was
@@ -643,12 +648,17 @@ not survive the process. HTTP validators do.
    browser, and wait. The address is the progress target for phase `preview`.
    Rejection stops before signing.
 8. Sign, including a new or renewed proof when one is needed.
-9. Upload the APK and media to Blossom. Every required blob must succeed
-   before any event is published.
+9. Upload media to Blossom, and the APK only when it has no public source
+   URL, a local file. Every required blob must succeed before any event is published.
+   With `APKCacheDir`, copy the APK to `<APKCacheDir>/<sha256>.apk`; a
+   failed copy warns.
 10. Publish the app event when present, then the assets, then the release.
     Each event needs one accepting relay; other rejections are warnings.
+    After a relay accepts the release, `zsp` reads it back by id and
+    author. A relay that does not serve it marks it `pending`.
 11. Publish the new or renewed proof last. The relay keeps the listing in
-    its buffer zone and checks the proof against the uploaded APK.
+    its buffer zone until it has read the APK, from its Blossom, the APK
+    cache, or the asset `url`, and checks the proof against it.
 
 ### Proof check and release guard
 
@@ -711,11 +721,12 @@ overrides them.
   signer's own coordinate. `zsp` never points a release at another key's
   app event. If that event does not exist, the catalog relay rejects the
   release. `created_at` is the source release time when known, else now.
-- Kind `3063` has empty `content`, `url` = `<BLOSSOM_URL>/<sha256>.apk`
-  computed before preview and signing, `x`, and one
-  `apk_certificate_hash` for the current certificate. Each validated
-  ancestor is an `apk_certificate_ancestor` tag, oldest first. A source URL
-  is not a download link.
+- Kind `3063` has empty `content`, `url`, `x`, and one
+  `apk_certificate_hash` for the current certificate. `url` is the public
+  source URL the APK was fetched from, such as a GitHub release asset's
+  `browser_download_url`; a local APK's is `<BLOSSOM_URL>/<sha256>.apk`.
+  Both are computed before preview and signing. Each validated ancestor is
+  an `apk_certificate_ancestor` tag, oldest first.
 - `f` tags name the APK's architectures (`android-<abi>`). ABIs come from
   `lib/<abi>/`. When a `.so` is present but that path names no ABI, the
   ABI is the ELF machine. When no ABI can be detected, the tag is
@@ -982,8 +993,10 @@ func Publish(ctx context.Context, config PublishConfig, apk *APK, options Publis
   and the fallback for `PublishConfig.Name`. `LineageHashes` is nil without
   a rotation. A probe before `Fetch` is only a hint; `Fetch` resolves again.
 - `Publish` accepts only an open `*APK` from `Fetch`; anything else is
-  `ErrAPKNotChecked`. On success `Status` is `published` and `ID` is the
-  release event id. The downloader retries transient transfer failures;
+  `ErrAPKNotChecked`. On success `Status` is `published`, or `pending`
+  when an accepting relay does not serve the release yet, and `ID` is the
+  release event id. That relay result has `Pending`. `APKCacheDir` is for a
+  caller on the relay's host, such as the indexer, which prunes it. The downloader retries transient transfer failures;
   signing, Blossom, and relay requests are not retried.
 - `Check` accepts an open `*APK` from `Fetch` and leaves it open. It runs
   the proof lookup and release query of Proof check for the APK

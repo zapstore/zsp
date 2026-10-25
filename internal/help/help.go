@@ -68,7 +68,7 @@ func RootHelp() string {
 	b.WriteString("  " + renderAccent("GITLAB_TOKEN") + "    " + renderWhite("GitLab API token, sent only to GITLAB_HOST (optional)") + "\n")
 	b.WriteString("  " + renderAccent("GITLAB_HOST") + "     " + renderWhite("GitLab host (default: gitlab.com)") + "\n")
 	b.WriteString("  " + renderAccent("RELAYS") + "          " + renderWhite("WebSocket URLs or a Unix socket path (default: wss://relay.zapstore.dev)") + "\n")
-	b.WriteString("  " + renderAccent("BLOSSOM_URL") + "     " + renderWhite("Custom CDN server (default: https://cdn.zapstore.dev)") + "\n")
+	b.WriteString("  " + renderAccent("BLOSSOM_URL") + "     " + renderWhite("Blossom server for media and local APKs (default: https://cdn.zapstore.dev)") + "\n")
 	b.WriteString("  " + renderAccent("HOTBOX_SOCKET") + "   " + renderWhite("Hotbox socket; with HOTBOX_PIN, publish creates the C1 proof") + "\n\n")
 
 	b.WriteString(renderBold("GLOBAL FLAGS") + "\n")

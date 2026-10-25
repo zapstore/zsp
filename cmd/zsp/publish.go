@@ -294,15 +294,28 @@ func writePublishSuccess(opts *cli.Options, result *zsp.PublishResult, selected 
 		}{true, "publish", result.ID, result.Status, selected.AppID, selected.VersionName, selected.VersionCode, result.Warnings})
 		return 0
 	}
-	ui.WritePanel(os.Stdout, "success", "Release published", []ui.KeyValue{
+	title, notes := publishOutcome(result)
+	ui.WritePanel(os.Stdout, "success", title, []ui.KeyValue{
 		{Key: "App", Value: selected.AppID},
 		{Key: "Version", Value: fmt.Sprintf("%s (%d)", selected.VersionName, selected.VersionCode)},
 		{Key: "Release", Value: result.ID},
-	}, nil)
+	}, notes)
 	for _, warning := range result.Warnings {
 		ui.WritePanel(os.Stderr, "warning", "Publish warning", nil, []string{warning})
 	}
 	return 0
+}
+
+// publishOutcome is the success panel title, and for a pending release what
+// to do next.
+func publishOutcome(result *zsp.PublishResult) (string, []string) {
+	if result.Status != "pending" {
+		return "Release published", nil
+	}
+	return "Release pending", []string{
+		"The relay holds the release until it has read the APK, then lists or refuses it.",
+		"Run zsp publish again in a few minutes to see which.",
+	}
 }
 
 // apkCandidate is how JSON names an APK a caller must choose between.

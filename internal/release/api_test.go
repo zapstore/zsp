@@ -53,14 +53,14 @@ func TestPublicStructFieldsMatchContract(t *testing.T) {
 		{FetchOptions{}, []string{"OnProgress", "SkipHTTPCache", "MaxReleases"}},
 		{APK{}, []string{"Hash", "Filename", "SourceURL", "Size", "AppID", "VersionName", "VersionCode", "MinSDK", "TargetSDK", "Name", "CertificateHash", "LineageHashes", "Architectures"}},
 		{Progress{}, []string{"Operation", "Phase", "Target", "Completed", "Total"}},
-		{PublishOptions{}, []string{"BlossomURL", "Relays", "Channel", "Commit", "SkipAppEvent", "SkipMediaCompression", "SkipProofCheck", "OverwriteRelease", "OverwriteAppEvent", "AppCreatedAtRelease", "Preview", "BrowserPort", "OnProgress", "ProofSigner"}},
+		{PublishOptions{}, []string{"BlossomURL", "Relays", "Channel", "Commit", "SkipAppEvent", "SkipMediaCompression", "SkipProofCheck", "OverwriteRelease", "OverwriteAppEvent", "AppCreatedAtRelease", "Preview", "BrowserPort", "OnProgress", "APKCacheDir", "ProofSigner"}},
 		{CheckOptions{}, []string{"Relays", "Channel"}},
 		{CheckResult{}, []string{"AppID", "CertificateHash", "Listed", "Proof", "PublishedVersionCode", "Signer", "Authorized", "Warnings"}},
 		{ProofStatus{}, []string{"Owner", "Delegate", "ExpiresAt"}},
 		{EventIDs{}, []string{"Application", "Release", "Assets"}},
 		{PublishResult{}, []string{"ID", "Status", "AppID", "CertificateHash", "LineageHashes", "Events", "Uploads", "Relays", "Warnings"}},
 		{BlobResult{}, []string{"URL", "Hash", "Size", "Type", "Uploaded", "Accepted", "Message"}},
-		{RelayResult{}, []string{"RelayURL", "EventID", "Accepted", "Duplicate", "Message"}},
+		{RelayResult{}, []string{"RelayURL", "EventID", "Accepted", "Duplicate", "Pending", "Message"}},
 	}
 
 	for _, test := range tests {
@@ -766,7 +766,7 @@ func TestRelayPublicationErrorsRemainClassifiable(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := relayPublicationError(test.ctx, []internalnostr.PublishResult{{Error: test.err}})
+			err := relayPublicationError(test.ctx, []internalnostr.PublishResult{{Error: test.err}}, nil)
 			if !errors.Is(err, test.sentinel) {
 				t.Fatalf("relayPublicationError() = %v, want %v", err, test.sentinel)
 			}

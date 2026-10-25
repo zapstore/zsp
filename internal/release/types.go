@@ -173,6 +173,10 @@ type PublishOptions struct {
 	Preview              bool           `json:"preview"`
 	BrowserPort          int            `json:"browser_port"`
 	OnProgress           func(Progress) `json:"-"`
+	// APKCacheDir, when set, receives a copy of the verified APK as
+	// <sha256>.apk before any event is sent, so a relay on the same host reads
+	// it there instead of downloading it. The caller prunes the directory.
+	APKCacheDir string `json:"apk_cache_dir"`
 	// ProofSigner, when set, creates or renews the signer's C1 proof during
 	// Publish. It is not used when another key owns the active proof.
 	ProofSigner ProofSigner `json:"-"`
@@ -227,7 +231,11 @@ type RelayResult struct {
 	EventID   string `json:"event_id"`
 	Accepted  bool   `json:"accepted"`
 	Duplicate bool   `json:"duplicate"`
-	Message   string `json:"message,omitempty"`
+	// Pending is an accepted release the relay does not serve yet. Zapstore's
+	// relay holds a listing until it has read the APK, then promotes or
+	// refuses it.
+	Pending bool   `json:"pending,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 // Error is an operation error that tells callers whether identical input may
