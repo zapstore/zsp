@@ -34,6 +34,25 @@ func TestWizardContinuingNotesNameReachableRelays(t *testing.T) {
 	}
 }
 
+func TestWizardCINotesRecommendDelegateOrMainKey(t *testing.T) {
+	notes := strings.Join(append([]string{wizardCIPrompt("Example")}, wizardCINotes()...), "\n")
+	for _, want := range []string{
+		"prefer this delegate as SIGN_WITH",
+		"its nsec, or a bunker for that key",
+		"The main key also works, as an nsec or a bunker",
+		"bunker-keys",
+		"An nsec needs only SIGN_WITH",
+		"Run zsp publish after each release",
+	} {
+		if !strings.Contains(notes, want) {
+			t.Errorf("CI copy does not mention %q:\n%s", want, notes)
+		}
+	}
+	if strings.Contains(notes, "delegate's nsec") || strings.Contains(notes, "store it there as the SIGN_WITH secret") {
+		t.Errorf("CI copy still requires the delegate nsec:\n%s", notes)
+	}
+}
+
 func TestWizardErrorNsecSetupExplainsEnvAndExitsCleanly(t *testing.T) {
 	if code := wizardError("Identity setup stopped", fmt.Errorf("signer: %w", errNsecSetup)); code != 0 {
 		t.Fatalf("wizardError(errNsecSetup) = %d, want 0", code)

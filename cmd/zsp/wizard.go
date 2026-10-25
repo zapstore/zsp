@@ -876,7 +876,8 @@ func wizardPublishNow(ctx context.Context, run wizardRun, selected *zsp.APK, sta
 		return wizardError("Publication stopped", err)
 	}
 	state.published = true
-	ui.WritePanel(os.Stdout, "success", "Release published", []ui.KeyValue{{Key: "Release", Value: result.ID}}, nil)
+	title, notes := publishOutcome(result)
+	ui.WritePanel(os.Stdout, "success", title, []ui.KeyValue{{Key: "Release", Value: result.ID}}, notes)
 	return 0
 }
 
@@ -903,6 +904,22 @@ func wizardNextReleases(ctx context.Context, state *wizardIdentityState, appName
 
 const wizardChoiceCICD = "Set up CI/CD publishing (advanced)"
 
+func wizardCIPrompt(appName string) string {
+	return "Create a separate Nostr key for your CI and paste its npub here. Your proof names this key as your delegate, so it can publish releases of " + appName + " but can't change who owns it. " + wizardCISignerNote() + " To rotate the delegate, run zsp again and name a new key: the new proof replaces the old one. Esc goes back."
+}
+
+func wizardCISignerNote() string {
+	return "In CI, prefer this delegate as SIGN_WITH: its nsec, or a bunker for that key. The main key also works, as an nsec or a bunker."
+}
+
+func wizardCINotes() []string {
+	return []string{
+		wizardCISignerNote() + " Run zsp publish after each release.",
+		"A bunker keeps working on the machine that still has zsp's bunker-keys directory. An nsec needs only SIGN_WITH.",
+		"To rotate the delegate, run zsp again and choose CI/CD with a new npub.",
+	}
+}
+
 func wizardNextReleaseChoices(zapstore bool) []string {
 	if zapstore {
 		return []string{"Let Zapstore publish them for you (recommended)", wizardChoiceCICD}
@@ -914,7 +931,7 @@ func wizardNextReleaseChoices(zapstore bool) []string {
 // reports back when the developer pressed Esc on its first prompt.
 func wizardDelegation(ctx context.Context, state *wizardIdentityState, appName string) (int, bool) {
 	for {
-		value, err := ui.PromptFieldBack(ctx, "CI public key (npub)", "Create a separate Nostr key for your CI and paste its npub here. The nsec never leaves your CI: store it there as the SIGN_WITH secret. Your proof names this key as your delegate, so it can publish releases of "+appName+" but can't change who owns it. To rotate it, run zsp again and name a new key: the new proof replaces the old one. Esc goes back.", false, true)
+		value, err := ui.PromptFieldBack(ctx, "CI public key (npub)", wizardCIPrompt(appName), false, true)
 		if errors.Is(err, ui.ErrBack) {
 			return 0, true
 		}
@@ -948,10 +965,7 @@ func wizardDelegation(ctx context.Context, state *wizardIdentityState, appName s
 		if err := publishWizardProof(ctx, state, delegate); err != nil {
 			return wizardError("CI/CD setup stopped", err), false
 		}
-		ui.WritePanel(os.Stdout, "success", "CI/CD publishing enabled", nil, []string{
-			"In your CI, set the delegate's nsec as the SIGN_WITH secret and run zsp publish after each release.",
-			"To rotate the key, run zsp again and choose CI/CD with a new npub.",
-		})
+		ui.WritePanel(os.Stdout, "success", "CI/CD publishing enabled", nil, wizardCINotes())
 		return 0, false
 	}
 }
