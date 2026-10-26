@@ -400,6 +400,27 @@ func TestIsJKS(t *testing.T) {
 	}
 }
 
+func TestIsPKCS12(t *testing.T) {
+	key, cert := mustGenerateECDSA(t)
+	data, err := pkcs12.Modern.Encode(key, cert, nil, "storepass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !IsPKCS12(data) {
+		t.Fatal("IsPKCS12() = false for PKCS12 data")
+	}
+	for name, data := range map[string][]byte{
+		"JKS magic":       {0xFE, 0xED, 0xFE, 0xED, 0, 0, 0, 2},
+		"DER certificate": cert.Raw,
+		"text":            []byte("not a keystore"),
+		"empty":           nil,
+	} {
+		if IsPKCS12(data) {
+			t.Fatalf("IsPKCS12() = true for %s", name)
+		}
+	}
+}
+
 func TestLoadJKS_JDKFixture(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "fixtures", "jdk-generated.jks"))
 	if err != nil {

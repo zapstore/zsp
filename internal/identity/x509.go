@@ -10,6 +10,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
@@ -439,6 +440,20 @@ func detectJKS(data []byte) bool {
 // IsJKS reports whether data has the Java KeyStore magic bytes.
 func IsJKS(data []byte) bool {
 	return detectJKS(data)
+}
+
+// IsPKCS12 reports whether data starts with a PKCS#12 PFX structure
+// (RFC 7292): a SEQUENCE whose version is 3 followed by the auth-safe
+// ContentInfo. keytool writes this format by default since JDK 9, whatever
+// the file extension.
+func IsPKCS12(data []byte) bool {
+	var pfx struct {
+		Version  int
+		AuthSafe asn1.RawValue
+		Rest     asn1.RawValue `asn1:"optional"`
+	}
+	_, err := asn1.Unmarshal(data, &pfx)
+	return err == nil && pfx.Version == 3
 }
 
 // LoadPKCS12 loads a private key and leaf certificate from PKCS12 data. The

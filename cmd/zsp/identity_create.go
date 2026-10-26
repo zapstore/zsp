@@ -127,36 +127,36 @@ func resolveKeystorePath(path string, interactive bool) (string, error) {
 }
 
 // loadIdentityMaterial loads a private key and certificate for the wizard
-// proof flow from a keystore or PEM certificate/key pair. JKS (.jks,
-// .keystore), PKCS#12 (.p12, .pfx), and PEM (.pem, .crt, .cer) inputs are
-// supported. Missing aliases, PEM keys, or passwords are prompted for on a
-// TTY; non-TTY use reports the missing value.
+// proof flow from a keystore or PEM certificate/key pair. PEM (.pem, .crt,
+// .cer) is chosen by extension; any other file is read as JKS or PKCS#12
+// according to its contents, since keytool names PKCS#12 stores .jks too.
+// Missing aliases, PEM keys, or passwords are prompted for on a TTY; non-TTY
+// use reports the missing value.
 func loadIdentityMaterial(options proofOptions) (crypto.PrivateKey, *x509.Certificate, error) {
 	if options.PrivateKey != "" {
 		return loadPEMIdentity(options.Keystore, options.PrivateKey)
 	}
 
 	lower := strings.ToLower(options.Keystore)
-	switch {
-	case strings.HasSuffix(lower, ".pem") || strings.HasSuffix(lower, ".crt") || strings.HasSuffix(lower, ".cer"):
+	if strings.HasSuffix(lower, ".pem") || strings.HasSuffix(lower, ".crt") || strings.HasSuffix(lower, ".cer") {
 		keyPath, err := resolvePEMKeyPath(options.Keystore, !options.NonInteractive)
 		if err != nil {
 			return nil, nil, err
 		}
 		return loadPEMIdentity(options.Keystore, keyPath)
-	case strings.HasSuffix(lower, ".jks") || strings.HasSuffix(lower, ".keystore"):
-		return loadJKSIdentity(options.Keystore, options.KeyAlias, !options.NonInteractive)
-	case strings.HasSuffix(lower, ".p12") || strings.HasSuffix(lower, ".pfx"):
-		return loadPKCS12Identity(options.Keystore, options.KeyAlias, !options.NonInteractive)
+	}
+
+	data, err := os.ReadFile(options.Keystore)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read keystore file: %w", err)
+	}
+	switch {
+	case identity.IsJKS(data):
+		return loadJKSIdentityFromData(data, options.Keystore, options.KeyAlias, !options.NonInteractive)
+	case identity.IsPKCS12(data):
+		return loadPKCS12IdentityFromData(data, options.Keystore, !options.NonInteractive)
 	default:
-		data, err := os.ReadFile(options.Keystore)
-		if err != nil {
-			return nil, nil, fmt.Errorf("read keystore file: %w", err)
-		}
-		if identity.IsJKS(data) {
-			return loadJKSIdentityFromData(data, options.Keystore, options.KeyAlias, !options.NonInteractive)
-		}
-		return nil, nil, fmt.Errorf("unsupported keystore type: %s (use .jks, .keystore, .p12, .pfx, .pem, or .crt)", options.Keystore)
+		return nil, nil, fmt.Errorf("unsupported keystore type: %s is not a JKS or PKCS#12 keystore (or use a .pem/.crt certificate)", options.Keystore)
 	}
 }
 
@@ -197,15 +197,6 @@ func resolvePEMKeyPath(certPath string, interactive bool) (string, error) {
 	return ui.PromptPath("Private key path", "PEM private key paired with "+certPath+". Tab completes files.", true)
 }
 
-// loadJKSIdentity loads a private key and certificate from a JKS keystore file.
-func loadJKSIdentity(path, alias string, interactive bool) (crypto.PrivateKey, *x509.Certificate, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, nil, fmt.Errorf("read keystore file: %w", err)
-	}
-	return loadJKSIdentityFromData(data, path, alias, interactive)
-}
-
 // loadJKSIdentityFromData loads a private key and certificate from JKS
 // bytes, resolving the store password from KEYSTORE_PASSWORD (or a TTY
 // prompt) and the key alias from --key-alias (or a TTY selection) when the
@@ -242,14 +233,9 @@ func loadJKSIdentityFromData(data []byte, path, alias string, interactive bool) 
 	}
 }
 
-// loadPKCS12Identity loads a private key and certificate from a PKCS#12
-// keystore file, resolving the password from KEYSTORE_PASSWORD or a TTY
-// prompt. Falls back to JKS loading when the file is actually JKS-formatted.
-func loadPKCS12Identity(path, alias string, interactive bool) (crypto.PrivateKey, *x509.Certificate, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, nil, fmt.Errorf("read keystore file: %w", err)
-	}
+// loadPKCS12IdentityFromData loads a private key and certificate from PKCS#12
+// bytes, resolving the password from KEYSTORE_PASSWORD or a TTY prompt.
+func loadPKCS12IdentityFromData(data []byte, path string, interactive bool) (crypto.PrivateKey, *x509.Certificate, error) {
 	useSavedPassword := true
 	for {
 		password, err := resolveKeystorePassword(path, interactive, !useSavedPassword)
@@ -259,9 +245,6 @@ func loadPKCS12Identity(path, alias string, interactive bool) (crypto.PrivateKey
 		privateKey, cert, err := identity.LoadPKCS12WithSecurePassword(data, []byte(password))
 		if err == nil {
 			return privateKey, cert, nil
-		}
-		if errors.Is(err, identity.ErrJKSFormat) {
-			return loadJKSIdentityFromData(data, path, alias, interactive)
 		}
 		if interactive && isTTY() && errors.Is(err, identity.ErrInvalidPassword) {
 			ui.PrintInfo("That password is incorrect. Try again.")

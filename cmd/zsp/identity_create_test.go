@@ -479,6 +479,37 @@ func TestLoadIdentityMaterial_PKCS12(t *testing.T) {
 	}
 }
 
+func TestLoadIdentityMaterial_DetectsFormatByContent(t *testing.T) {
+	tests := []struct {
+		storeType string
+		name      string
+	}{
+		{"PKCS12", "release.jks"},
+		{"PKCS12", "release.keystore"},
+		{"PKCS12", "release"},
+		{"JKS", "release.p12"},
+		{"JKS", "release"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.storeType+"/"+tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), tt.name)
+			if err := os.Rename(generateTestKeystore(t, tt.storeType, "release"), path); err != nil {
+				t.Fatalf("Rename: %v", err)
+			}
+			t.Setenv("KEYSTORE_PASSWORD", "storepass")
+			withNoEnvFile(t)
+
+			gotKey, gotCert, err := loadIdentityMaterial(proofOptions{Keystore: path})
+			if err != nil {
+				t.Fatalf("loadIdentityMaterial() error: %v", err)
+			}
+			if err := identity.ValidateKeyCertPair(gotKey, gotCert); err != nil {
+				t.Fatalf("loaded pair invalid: %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadIdentityMaterial_PKCS12MissingPasswordNonInteractive(t *testing.T) {
 	forceTTY(t, false)
 
