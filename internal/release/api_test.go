@@ -50,7 +50,7 @@ func TestPublicStructFieldsMatchContract(t *testing.T) {
 		{PublishConfig{}, []string{"Name", "Summary", "Description", "Tags", "License", "Website", "Icon", "Images", "ReleaseNotes", "SupportedNIPs", "MinAllowedVersion", "MinAllowedVersionCode", "MetadataSources", "Channel"}},
 		{ReleaseSource{}, []string{"URL", "LocalPath", "Type", "AssetURL", "VersionExtractor", "AssetExtractor"}},
 		{Extractor{}, []string{"URL", "Selector", "Attribute", "Path", "Header", "Match"}},
-		{FetchOptions{}, []string{"OnProgress", "SkipHTTPCache", "MaxReleases"}},
+		{FetchOptions{}, []string{"OnProgress", "SkipHTTPCache", "HTTPCacheDir", "MaxReleases"}},
 		{APK{}, []string{"Hash", "Filename", "SourceURL", "Size", "AppID", "VersionName", "VersionCode", "MinSDK", "TargetSDK", "Name", "CertificateHash", "LineageHashes", "Architectures"}},
 		{Progress{}, []string{"Operation", "Phase", "Target", "Completed", "Total"}},
 		{PublishOptions{}, []string{"BlossomURL", "Relays", "Channel", "Commit", "SkipAppEvent", "SkipMediaCompression", "SkipProofCheck", "OverwriteRelease", "OverwriteAppEvent", "AppCreatedAtRelease", "Preview", "BrowserPort", "OnProgress", "APKCacheDir", "ProofSigner"}},
@@ -1136,6 +1136,48 @@ func TestFetchReturnsErrNoNewAPKWhenETagUnchanged(t *testing.T) {
 	t.Cleanup(func() { closeAPKs(forced) })
 	if len(forced) != 1 {
 		t.Fatalf("SkipHTTPCache len(candidates) = %d, want 1", len(forced))
+	}
+}
+
+func TestFetchKeepsValidatorsInHTTPCacheDir(t *testing.T) {
+	config, _ := fetchCachedTestAPK(t)
+	options := FetchOptions{HTTPCacheDir: t.TempDir()}
+
+	first, err := Fetch(t.Context(), config, options)
+	if err != nil {
+		t.Fatalf("first Fetch() = %v, want the APK: the default cache must not answer", err)
+	}
+	t.Cleanup(func() { closeAPKs(first) })
+	if _, err := Fetch(t.Context(), config, options); !errors.Is(err, ErrNoNewAPK) {
+		t.Fatalf("second Fetch() = %v, want ErrNoNewAPK", err)
+	}
+}
+
+func TestFetchWarnsWhenHTTPCacheCannotBeSaved(t *testing.T) {
+	config, _ := fetchCachedTestAPK(t)
+	blocked := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var warnings []string
+	options := FetchOptions{
+		HTTPCacheDir: blocked,
+		OnProgress: func(p Progress) {
+			if p.Phase == "warning" {
+				warnings = append(warnings, p.Target)
+			}
+		},
+	}
+
+	for range 2 {
+		candidates, err := Fetch(t.Context(), config, options)
+		if err != nil {
+			t.Fatalf("Fetch() = %v, want the APK", err)
+		}
+		closeAPKs(candidates)
+	}
+	if len(warnings) != 2 || !strings.Contains(warnings[0], "HTTP cache") || strings.Contains(warnings[0], blocked) {
+		t.Fatalf("warnings = %q, want one safe HTTP cache warning per Fetch", warnings)
 	}
 }
 

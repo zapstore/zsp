@@ -555,7 +555,10 @@ ETag or Last-Modified; only `200` and `304` answers count, and a server
 that sends neither is always treated as changed. An unchanged source
 returns `ErrNoNewAPK`. `Publish`
 deletes those validators only when it fails with a retryable error.
-`SkipHTTPCache` fetches unconditionally and stores nothing. The downloaded
+`SkipHTTPCache` fetches unconditionally and stores nothing. Validators live
+in `HTTPCacheDir`, or in `zsp/` under the user cache directory when it is
+empty. A validator that cannot be written is a `warning` progress event,
+and the next `Fetch` reads the source again. The downloaded
 APK is a temporary file, removed by a successful `Publish` or by `Close`.
 
 ### Metadata
@@ -809,6 +812,7 @@ type Extractor struct {
 type FetchOptions struct {
     OnProgress    func(Progress)
     SkipHTTPCache bool
+    HTTPCacheDir  string
     MaxReleases   int
 }
 

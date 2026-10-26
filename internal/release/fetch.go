@@ -32,6 +32,7 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 		IncludePreReleases: config.PrereleaseChannel != "",
 		SkipHTTPCache:      options.SkipHTTPCache,
 		MaxReleases:        options.MaxReleases,
+		CacheDir:           options.HTTPCacheDir,
 	})
 	if err != nil {
 		return nil, wrapOperationError(ErrInvalidConfig, err, false, "create source"+causeDetail(err))
@@ -43,9 +44,7 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 			// A source may refresh cached validators even when reporting
 			// not modified (e.g. an ETag that moved for volatile fields).
 			if !options.SkipHTTPCache {
-				if committer, ok := src.(source.CacheCommitter); ok {
-					_ = committer.CommitCache()
-				}
+				commitHTTPCache(src, options)
 			}
 			return nil, operationErr(ErrNoNewAPK, false, "no new APKs")
 		}
@@ -198,11 +197,21 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 		return nil, operationErr(ErrNoAPK, false, "no candidate passed APK verification")
 	}
 	if !options.SkipHTTPCache {
-		if committer, ok := src.(source.CacheCommitter); ok {
-			_ = committer.CommitCache()
-		}
+		commitHTTPCache(src, options)
 	}
 	return selectFetchedAPKs(results), nil
+}
+
+// commitHTTPCache stores the source's validators. A failed write is a
+// warning: the fetch succeeded, but the next one cannot answer ErrNoNewAPK.
+func commitHTTPCache(src source.Source, options FetchOptions) {
+	committer, ok := src.(source.CacheCommitter)
+	if !ok {
+		return
+	}
+	if err := committer.CommitCache(); err != nil {
+		report(options, "fetch", "warning", "couldn't save the HTTP cache; the next fetch reads the source again", 0, 0)
+	}
 }
 
 // selectFetchedAPKs keeps, for each app, the greatest version_code whose

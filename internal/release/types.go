@@ -81,6 +81,9 @@ type FetchOptions struct {
 	// that cache only for Retryable failures. Use SkipHTTPCache when caller
 	// or developer state changed.
 	SkipHTTPCache bool `json:"skip_http_cache"`
+	// HTTPCacheDir holds those validators. Empty uses the user cache
+	// directory, which a sandboxed service may not be able to write.
+	HTTPCacheDir string `json:"http_cache_dir,omitempty"`
 	// MaxReleases is how many recent GitHub, GitLab, or Gitea releases to
 	// scan for a usable APK. Zero uses the default of 10. The maximum is 100.
 	MaxReleases int `json:"max_releases,omitempty"`
