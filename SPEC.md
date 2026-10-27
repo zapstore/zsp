@@ -549,7 +549,10 @@ validation, stall detection, bounded retries, and temporary-file cleanup. A
 SOCKS5 proxy at `127.0.0.1:9050`, with the same headers minus credentials.
 When F-Droid or GitHub publishes an APK's SHA-256, the download must match
 it. `Fetch` stores HTTP validators between runs. GitHub stores an ETag and a
-fingerprint of the release fields `zsp` reads. F-Droid stores the index
+fingerprint of the release fields `zsp` reads. GitLab stores a fingerprint of
+the release it would download; its releases API does not support conditional
+requests, so each check still reads the list and skips the APK when that
+fingerprint matches. F-Droid stores the index
 validators and a fingerprint of the package's entries. A direct URL stores
 ETag or Last-Modified; only `200` and `304` answers count, and a server
 that sends neither is always treated as changed. An unchanged source
@@ -604,9 +607,8 @@ In order:
 1. Resolve releases from the source and apply `release_filter`.
 2. Keep APK assets and apply `match`.
 3. Drop filenames that clearly name an unsupported ABI (`x86`, `x86_64`,
-   `armeabi`, `armeabi-v7a`), an unsigned APK, or a split or config APK.
-   Matching is case-insensitive and token-aware. A split set is never an
-   asset; see [Catalog](../product/specs/catalog.md#one-complete-apk).
+   `armeabi`, `armeabi-v7a`) or an unsigned APK. Matching is
+   case-insensitive and token-aware.
 4. More than ten left: fail and ask for a narrower `match`.
 5. Download the rest.
 6. Verify signatures v1, v2, and v3. Reject malformed signatures, multiple

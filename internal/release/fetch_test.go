@@ -228,6 +228,19 @@ func TestFilterCandidatesPrecedence(t *testing.T) {
 			},
 		},
 		{
+			name: "split and config in a filename stay",
+			assets: []string{
+				"app-github-split-arm64-v8a-release.apk",
+				"split_config.arm64_v8a.apk",
+				"config.en.apk",
+			},
+			want: []string{
+				"app-github-split-arm64-v8a-release.apk",
+				"split_config.arm64_v8a.apk",
+				"config.en.apk",
+			},
+		},
+		{
 			name: "match narrows candidates before precedence",
 			assets: []string{
 				"app-arm64-v8a.apk",

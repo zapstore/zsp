@@ -490,7 +490,7 @@ func filterCandidates(assets []*source.Asset, match string) ([]*source.Asset, er
 	return omitUniversalCandidatesWhenArm64Exists(result), nil
 }
 
-var excludedFilenamePattern = regexp.MustCompile(`(?i)(^|[^a-z0-9])(x86_64|x86|armeabi-v7a|armeabi|unsigned|split|config)([^a-z0-9]|$)`)
+var excludedFilenamePattern = regexp.MustCompile(`(?i)(^|[^a-z0-9])(x86_64|x86|armeabi-v7a|armeabi|unsigned)([^a-z0-9]|$)`)
 var unsignedFilenamePattern = regexp.MustCompile(`(?i)(^|[^a-z0-9])unsigned([^a-z0-9]|$)`)
 var (
 	fdroidFilenamePattern        = regexp.MustCompile(`(?i)(^|[^a-z0-9])f-?droid([^a-z0-9]|$)`)
