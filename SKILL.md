@@ -46,13 +46,7 @@ When it is a local path or glob, point it at the signed APK when it does not alr
 
 When it is missing and `repository` is set, tell them to attach this APK to the forge release, keep the local path out of the committed file, and stop. When the file has no public release source, set `release_source` to the signed APK path, then publish. Only then does zsp upload the APK, to `BLOSSOM_URL`.
 
-When the result has `"status": "pending"`, the relay holds the release until it has read the APK. Wait 1 minute and run `zsp publish -q --json` again, then after 2, 3, and 4 more minutes, about 10 minutes in all. Stop at the first run that answers:
-
-- `"status": "published"`, or `error.code` `release_already_published`: it is listed. Use the published reply.
-- `error.code` `publish_rejected`: the relay refused it. Use the refused reply with `error.detail`.
-- `"status": "pending"` after the last run: use the pending reply.
-
-Each run signs the events again; that is expected. Do not wait for anything else between runs.
+When the result has `"status": "pending"`, zsp is done. The relay accepted the events and will run its own checks. Use the pending reply and finish. Do not wait, publish again, or query the relay unless they ask to check. `"status": "published"` and `error.code` `release_already_published` use the published reply. `error.code` `publish_rejected` uses the refused reply with `error.detail`.
 
 Leave the rest of `zapstore.yaml` when it already has `repository`, `release_source`, and `release_notes`. Do not read the yaml reference below in that case.
 
@@ -88,12 +82,14 @@ When the relay refused it, this is the whole reply:
 Zapstore refused <version_name> (version code <version_code>): <error.detail>
 ```
 
-When it is still pending, this is the whole reply:
+When the status is pending, this is the whole reply:
 
 ```
-<version_name> (version code <version_code>) is waiting on the Zapstore relay, which reads the APK before listing it. Run `zsp publish` again later to see whether it was listed.
+<version_name> (version code <version_code>) is pending. The relay accepted it and will run its own checks.
 
 Release event id: `<id>`
+
+Say if you want this checked again once the relay finishes.
 ```
 
 When a build or a check is the last command and there is nothing else to report, the whole reply is the path, `version_name`, and `version_code`.
