@@ -60,6 +60,129 @@ func TestGitLabFetchUsesMaxReleases(t *testing.T) {
 	}
 }
 
+func TestGitLabFetchLatestReleaseSkipsUnchangedRelease(t *testing.T) {
+	const body = `[{"tag_name":"v1.0.0","name":"1.0.0","assets":{"links":[{"name":"app.apk","url":"https://example.com/app.apk"}]}}]`
+	var conditional atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "" {
+			conditional.Add(1)
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+
+	gitlab := &GitLab{
+		baseURL:          server.URL,
+		repoPath:         "group/app",
+		projectID:        "app",
+		numericProjectID: 1,
+		client:           server.Client(),
+		cacheDir:         t.TempDir(),
+	}
+
+	release, err := gitlab.FetchLatestRelease(t.Context())
+	if err != nil {
+		t.Fatalf("first FetchLatestRelease() = %v", err)
+	}
+	if release.Version != "1.0.0" {
+		t.Fatalf("version = %q, want 1.0.0", release.Version)
+	}
+	if gitlab.pendingCache == nil || gitlab.pendingCache.Fingerprint == "" {
+		t.Fatalf("pendingCache = %+v, want a fingerprint", gitlab.pendingCache)
+	}
+	if err := gitlab.CommitCache(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := gitlab.FetchLatestRelease(t.Context()); !errors.Is(err, ErrNotModified) {
+		t.Fatalf("second FetchLatestRelease() = %v, want ErrNotModified", err)
+	}
+
+	if err := gitlab.ClearHTTPCache(); err != nil {
+		t.Fatal(err)
+	}
+	release, err = gitlab.FetchLatestRelease(t.Context())
+	if err != nil {
+		t.Fatalf("FetchLatestRelease after ClearHTTPCache() = %v", err)
+	}
+	if release.Version != "1.0.0" {
+		t.Fatalf("version after clear = %q, want 1.0.0", release.Version)
+	}
+
+	if err := gitlab.CommitCache(); err != nil {
+		t.Fatal(err)
+	}
+	gitlab.SkipHTTPCache = true
+	release, err = gitlab.FetchLatestRelease(t.Context())
+	if err != nil {
+		t.Fatalf("SkipHTTPCache FetchLatestRelease() = %v", err)
+	}
+	if release.Version != "1.0.0" {
+		t.Fatalf("SkipHTTPCache version = %q, want 1.0.0", release.Version)
+	}
+	if gitlab.pendingCache != nil {
+		t.Fatal("SkipHTTPCache stored a fingerprint")
+	}
+	if conditional.Load() != 0 {
+		t.Fatalf("conditional requests = %d, want 0", conditional.Load())
+	}
+}
+
+// TestGitLabFetchLatestReleaseIgnoresListOnlyChanges covers a releases list
+// that gained a release without an APK while the APK release stayed the same.
+func TestGitLabFetchLatestReleaseIgnoresListOnlyChanges(t *testing.T) {
+	apk := `{"tag_name":"v1.0.0","name":"1.0.0","assets":{"links":[{"name":"app.apk","url":"https://example.com/app.apk"}]}}`
+	apkNext := `{"tag_name":"v1.1.0","name":"1.1.0","assets":{"links":[{"name":"app.apk","url":"https://example.com/app-1.1.0.apk"}]}}`
+	desktop := `{"tag_name":"v9.0.0","name":"desktop","assets":{"links":[{"name":"app.dmg","url":"https://example.com/app.dmg"}]}}`
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := hits.Add(1)
+		switch n {
+		case 1:
+			_, _ = w.Write([]byte("[" + apk + "]"))
+		case 2:
+			_, _ = w.Write([]byte("[" + desktop + "," + apk + "]"))
+		default:
+			_, _ = w.Write([]byte("[" + apkNext + "]"))
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	gitlab := &GitLab{
+		baseURL:          server.URL,
+		repoPath:         "group/app",
+		projectID:        "app",
+		numericProjectID: 1,
+		client:           server.Client(),
+		cacheDir:         t.TempDir(),
+	}
+
+	if _, err := gitlab.FetchLatestRelease(t.Context()); err != nil {
+		t.Fatalf("first FetchLatestRelease() = %v", err)
+	}
+	if err := gitlab.CommitCache(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := gitlab.FetchLatestRelease(t.Context()); !errors.Is(err, ErrNotModified) {
+		t.Fatalf("second FetchLatestRelease() = %v, want ErrNotModified", err)
+	}
+	if gitlab.pendingCache != nil {
+		t.Fatalf("pendingCache = %+v, want nil for an unchanged APK release", gitlab.pendingCache)
+	}
+
+	release, err := gitlab.FetchLatestRelease(t.Context())
+	if err != nil {
+		t.Fatalf("third FetchLatestRelease() = %v", err)
+	}
+	if release.TagName != "v1.1.0" {
+		t.Fatalf("tag = %q, want v1.1.0", release.TagName)
+	}
+	if gitlab.pendingCache == nil || gitlab.pendingCache.Fingerprint == "" {
+		t.Fatal("changed release did not store a fingerprint")
+	}
+}
+
 func TestNewWithOptionsPassesPreReleaseSettingToGitLab(t *testing.T) {
 	source, err := NewWithOptions(&config.Config{
 		Repository: "https://gitlab.example.com/group/project",

@@ -3,11 +3,18 @@ package source
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -39,6 +46,13 @@ const gitlabExternalRedirectMarker = "You are being redirected away from GitLab"
 // gitlabExternalRedirectHref matches the external target link on that page.
 var gitlabExternalRedirectHref = regexp.MustCompile(`(?i)href=["'](https?://[^"']+)["']`)
 
+// gitlabCache stores a fingerprint of the release zsp would download. GitLab's
+// releases API does not support conditional requests, so the next fetch reads
+// the list again and skips the APK download when this fingerprint matches.
+type gitlabCache struct {
+	Fingerprint string `json:"fingerprint,omitempty"`
+}
+
 // GitLab implements Source for GitLab releases.
 // Supports both gitlab.com and self-hosted GitLab instances.
 type GitLab struct {
@@ -49,8 +63,11 @@ type GitLab struct {
 	client             *http.Client
 	downloadClient     *http.Client
 	filter             *releaseFilter
+	cacheDir           string
+	SkipHTTPCache      bool
 	IncludePreReleases bool
 	maxReleases        int
+	pendingCache       *gitlabCache
 }
 
 // NewGitLab creates a new GitLab source.
@@ -81,6 +98,7 @@ func newGitLab(cfg *config.Config, opts Options) (*GitLab, error) {
 		client:         newSecureHTTPClient(30*time.Second, tor),
 		downloadClient: newDownloadHTTPClient(tor),
 		filter:         filter,
+		cacheDir:       sourceCacheDir(opts.CacheDir, "gitlab"),
 	}, nil
 }
 
@@ -118,12 +136,12 @@ type gitlabAssetLink struct {
 // Upcoming releases are always skipped. Pre-release tags (v1.2.3-rc.1, v1.2.0-alpha)
 // are skipped unless IncludePreReleases is set. GitLab has no prerelease flag;
 // the tag is the marker.
+//
+// Returns ErrNotModified when the release zsp would download matches the
+// fingerprint stored after the previous fetch. The releases list is still
+// read: GitLab does not support conditional requests. Set SkipHTTPCache to
+// bypass the check and always fetch fresh data.
 func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
-	// Numeric id is required to resolve markdown /uploads/ attachments.
-	if err := g.ensureNumericProjectID(ctx); err != nil {
-		return nil, err
-	}
-
 	// GitLab API: GET /projects/:id/releases
 	// Returns releases sorted by released_at descending
 	limit := releaseScanLimit(g.maxReleases)
@@ -132,6 +150,10 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	req, err := newForgeRequest(ctx, config.SourceGitLab, apiURL)
 	if err != nil {
 		return nil, err
+	}
+	var cache *gitlabCache
+	if !g.SkipHTTPCache {
+		cache = g.loadCache()
 	}
 
 	resp, err := g.client.Do(req)
@@ -156,7 +178,8 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 	// Find the first release with valid APKs.
 	// Upcoming releases are not published yet. Pre-release tags are skipped
 	// unless the caller opted in; edition suffixes such as -ee stay eligible.
-	for _, glRelease := range releases {
+	for i := range releases {
+		glRelease := &releases[i]
 		if glRelease.UpcomingRelease {
 			continue
 		}
@@ -166,13 +189,119 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		if !g.filter.matches(glRelease.TagName, glRelease.Name) {
 			continue
 		}
-		release := g.convertRelease(&glRelease)
-		if HasValidAPKs(release.Assets) {
-			return release, nil
+		fingerprint := gitlabReleaseFingerprint(glRelease)
+		if !g.SkipHTTPCache && cache != nil && cache.Fingerprint == fingerprint {
+			return nil, ErrNotModified
 		}
+		// Numeric id resolves markdown /uploads/ attachments. An unchanged
+		// release returns above and does not spend this request.
+		if err := g.ensureNumericProjectID(ctx); err != nil {
+			return nil, err
+		}
+		release := g.convertRelease(glRelease)
+		if !HasValidAPKs(release.Assets) {
+			continue
+		}
+		if !g.SkipHTTPCache {
+			g.pendingCache = &gitlabCache{Fingerprint: fingerprint}
+		}
+		return release, nil
 	}
 
 	return nil, fmt.Errorf("no releases with valid APKs found in the last %d releases for %s", limit, g.repoPath)
+}
+
+func (g *GitLab) cacheFilePath() string {
+	parts := strings.Split(g.repoPath, "/")
+	for i, part := range parts {
+		parts[i] = filepath.Base(part)
+	}
+	name := strings.Join(parts, "_")
+	if name == "" || name == "." || name == ".." {
+		name = "project"
+	}
+	return filepath.Join(g.cacheDir, name+".json")
+}
+
+func (g *GitLab) loadCache() *gitlabCache {
+	if g.cacheDir == "" {
+		return nil
+	}
+	data, err := os.ReadFile(g.cacheFilePath())
+	if err != nil {
+		return nil
+	}
+	var cache gitlabCache
+	if err := json.Unmarshal(data, &cache); err != nil || cache.Fingerprint == "" {
+		return nil
+	}
+	return &cache
+}
+
+func (g *GitLab) saveCache(cache *gitlabCache) error {
+	if err := os.MkdirAll(g.cacheDir, 0o755); err != nil {
+		return err
+	}
+	data, err := json.Marshal(cache)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(g.cacheFilePath(), data, 0o644)
+}
+
+// CommitCache persists the validators from the last successful fetch.
+func (g *GitLab) CommitCache() error {
+	if g.pendingCache == nil {
+		return nil
+	}
+	if err := g.saveCache(g.pendingCache); err != nil {
+		return err
+	}
+	g.pendingCache = nil
+	return nil
+}
+
+// ClearHTTPCache deletes the persisted validators so the next fetch is unconditional.
+func (g *GitLab) ClearHTTPCache() error {
+	g.pendingCache = nil
+	if g.cacheDir == "" {
+		return nil
+	}
+	err := os.Remove(g.cacheFilePath())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+// gitlabReleaseFingerprint hashes the release fields that decide which APK to
+// download. Fields GitLab adds and this client does not read stay out of the
+// hash, so they do not force another download.
+func gitlabReleaseFingerprint(release *gitlabRelease) string {
+	links := slices.Clone(release.Assets.Links)
+	slices.SortFunc(links, func(a, b gitlabAssetLink) int {
+		if byName := strings.Compare(a.Name, b.Name); byName != 0 {
+			return byName
+		}
+		if byURL := strings.Compare(a.URL, b.URL); byURL != 0 {
+			return byURL
+		}
+		return strings.Compare(a.DirectAssetURL, b.DirectAssetURL)
+	})
+	payload, _ := json.Marshal(struct {
+		TagName         string
+		Name            string
+		Description     string
+		ReleasedAt      string
+		UpcomingRelease bool
+		Self            string
+		Links           []gitlabAssetLink
+	}{
+		release.TagName, release.Name, release.Description, release.ReleasedAt,
+		release.UpcomingRelease, release.Links.Self, links,
+	})
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
 }
 
 // ensureNumericProjectID loads the project's numeric id from the GitLab API once.

@@ -173,6 +173,7 @@ func NewWithOptions(cfg *config.Config, opts Options) (Source, error) {
 			return nil, err
 		}
 		gl.IncludePreReleases = opts.IncludePreReleases
+		gl.SkipHTTPCache = opts.SkipHTTPCache
 		gl.maxReleases = limit
 		return gl, nil
 	case config.SourceGitea:
