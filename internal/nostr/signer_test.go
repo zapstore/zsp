@@ -13,7 +13,7 @@ import (
 	"github.com/coder/websocket"
 	gonostr "github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
-	"github.com/zapstore/zsp/internal/sanitize"
+	"github.com/zapstore/zsp/v2/internal/sanitize"
 )
 
 func TestLoopbackBunkerUsesSharedClientKey(t *testing.T) {

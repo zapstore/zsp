@@ -3,7 +3,7 @@ package release
 import (
 	"context"
 
-	"github.com/zapstore/zsp/internal/apk"
+	"github.com/zapstore/zsp/v2/internal/apk"
 )
 
 // Icon returns the launcher icon extracted from an APK, as PNG bytes.

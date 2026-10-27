@@ -18,8 +18,8 @@ import (
 	gonostr "github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
 
-	"github.com/zapstore/zsp/internal/identity"
-	internalnostr "github.com/zapstore/zsp/internal/nostr"
+	"github.com/zapstore/zsp/v2/internal/identity"
+	internalnostr "github.com/zapstore/zsp/v2/internal/nostr"
 )
 
 type fakeProofSigner struct {

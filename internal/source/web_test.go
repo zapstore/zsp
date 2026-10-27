@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/v2/internal/config"
 )
 
 func TestWebDirectURLKeepsOriginalDownloadURL(t *testing.T) {

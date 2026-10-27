@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zapstore/zsp/internal/apk"
-	"github.com/zapstore/zsp/internal/source"
+	"github.com/zapstore/zsp/v2/internal/apk"
+	"github.com/zapstore/zsp/v2/internal/source"
 )
 
 func writeTestFile(t *testing.T, path, content string) {

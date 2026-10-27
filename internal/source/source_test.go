@@ -19,8 +19,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/zapstore/zsp/internal/config"
-	"github.com/zapstore/zsp/internal/netpolicy"
+	"github.com/zapstore/zsp/v2/internal/config"
+	"github.com/zapstore/zsp/v2/internal/netpolicy"
 )
 
 func TestDecodeJSONResponseRejectsOversizedBody(t *testing.T) {

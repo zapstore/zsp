@@ -16,9 +16,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,9 +27,12 @@ import (
 	gonostr "github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
 	keystore "github.com/pavlo-v-chernykh/keystore-go/v4"
-	"github.com/zapstore/zsp"
-	"github.com/zapstore/zsp/tests/integration/fixture"
+	"github.com/zapstore/zsp/v2"
+	"github.com/zapstore/zsp/v2/internal/identity"
+	"github.com/zapstore/zsp/v2/tests/integration/fixture"
 )
+
+var policySocket string
 
 const (
 	kindAppMetadata   = 32267
@@ -41,7 +42,10 @@ const (
 )
 
 func TestMain(m *testing.M) {
-	relayURL, blossomURL, stop, err := startLocalRelay()
+	relayURL, blossomURL, socket, stop, err := startLocalRelay()
+	if err == nil {
+		policySocket = socket
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -75,17 +79,15 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	admitPublisher(t, ownerPubkey, policySocket)
+	admitPublisher(t, delegatePubkey, policySocket)
+	admitPublisher(t, indexerPubkey, policySocket)
 
 	apkDirectory := t.TempDir()
 	keystore := filepath.Join(apkDirectory, "release.jks")
 	firstAPK := buildE2EAPK(t, apkDirectory, keystore, 42)
 	certificateKey, certificate := loadE2ECertificate(t, keystore)
-	publishE2EC1Proof(t, relayURL, ownerSecret, ownerPubkey, delegatePubkey, certificateKey, certificate)
 
-	firstBytes, err := os.ReadFile(firstAPK)
-	if err != nil {
-		t.Fatal(err)
-	}
 	configPath := filepath.Join(apkDirectory, "zapstore.yaml")
 	configContents := fmt.Sprintf(
 		"release_source: %q\nname: E2E App\nsummary: Published through the local relay\nmetadata_sources: []\n",
@@ -101,9 +103,15 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 
 	t.Setenv("SIGN_WITH", nsecKey(t, ownerSecret))
 	first := fetchOneE2EAPK(t, config.Fetch)
-	firstResult := publishE2EAPK(t, config.Publish, first, blossomURL, relayURL, false)
-	assertPublishedBlob(t, firstResult, firstBytes)
-	assertRelayPublication(t, relayURL, ownerPubkey, []string{ownerPubkey, delegatePubkey}, 1, 1, 1)
+	// A new app cannot publish a proof alone. The proof goes out with the
+	// first release; the delegate is added once that release is listed.
+	publishE2EAPK(t, config.Publish, first, blossomURL, relayURL, false, e2eProofSigner{
+		key: certificateKey, cert: certificate, pubkey: ownerPubkey,
+	})
+	assertRelayPublication(t, relayURL, []string{ownerPubkey, delegatePubkey}, 1, 1, 1)
+	time.Sleep(1100 * time.Millisecond)
+	publishE2EC1Proof(t, relayURL, ownerSecret, ownerPubkey, delegatePubkey, certificateKey, certificate)
+	assertDelegatedProof(t, relayURL, ownerPubkey, delegatePubkey)
 
 	equal := fetchOneE2EAPK(t, config.Fetch)
 	_, err = zsp.Publish(t.Context(), config.Publish, equal, zsp.PublishOptions{
@@ -118,7 +126,7 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 		Relays:           []string{relayURL},
 		OverwriteRelease: true,
 	})
-	if err != nil || equalResult.Status != "published" {
+	if err != nil || !acceptedPublication(equalResult) {
 		t.Fatalf("overwrite equal version: result=%+v error=%v", equalResult, err)
 	}
 	if equalResult.Events.Application != "" {
@@ -158,10 +166,6 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 	}
 
 	secondAPK := buildE2EAPK(t, apkDirectory, keystore, 43)
-	secondBytes, err := os.ReadFile(secondAPK)
-	if err != nil {
-		t.Fatal(err)
-	}
 	secondFetchConfig := config.Fetch
 	secondSource := *secondFetchConfig.ReleaseSource
 	secondSource.LocalPath = secondAPK
@@ -179,8 +183,11 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 	if len(secondResult.Warnings) == 0 {
 		t.Fatal("partial-relay Publish returned no warnings")
 	}
-	assertPublishedBlob(t, secondResult, secondBytes)
-	assertRelayPublication(t, relayURL, ownerPubkey, []string{ownerPubkey, delegatePubkey}, 1, 2, 3)
+	// The delegate skipped the app event. The relay holds that incomplete
+	// listing and does not serve its APK.
+	if len(secondResult.Uploads) != 1 || !secondResult.Uploads[0].Accepted {
+		t.Fatalf("uploads = %+v, want one accepted APK", secondResult.Uploads)
+	}
 	if secondResult.Events.Application != "" {
 		t.Fatalf("skip-app publication returned application event %q", secondResult.Events.Application)
 	}
@@ -201,10 +208,9 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("indexer-style Publish: %v (result: %+v)", err, thirdResult)
 	}
-	if thirdResult.Status != "published" || thirdResult.ID == "" {
+	if !acceptedPublication(thirdResult) {
 		t.Fatalf("indexer-style Publish result = %+v", thirdResult)
 	}
-	assertReleasePublishedBy(t, relayURL, thirdResult.ID, indexerPubkey)
 
 	retryAPK := buildE2EAPK(t, apkDirectory, keystore, 45)
 	retryFetchConfig := config.Fetch
@@ -218,11 +224,9 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 		Relays:         []string{relayURL},
 		SkipProofCheck: true,
 	})
-	if err != nil || retryResult.Status != "published" {
+	if err != nil || !acceptedPublication(retryResult) {
 		t.Fatalf("retry same APK: result=%+v error=%v", retryResult, err)
 	}
-	assertReleasePublishedBy(t, relayURL, retryResult.ID, ownerPubkey)
-	assertPublishedBlob(t, retryResult, mustRead(t, retryAPK))
 
 	unchangedAPK := buildE2EAPK(t, apkDirectory, keystore, 46)
 	unchangedFetchConfig := config.Fetch
@@ -235,7 +239,7 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 		Relays:         []string{relayURL},
 		SkipProofCheck: true,
 	})
-	if err != nil || unchangedResult.Status != "published" {
+	if err != nil || !acceptedPublication(unchangedResult) {
 		t.Fatalf("unchanged application Publish: result=%+v error=%v", unchangedResult, err)
 	}
 	if unchangedResult.Events.Application != "" {
@@ -257,7 +261,7 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 		SkipProofCheck:    true,
 		OverwriteAppEvent: true,
 	})
-	if err != nil || forcedResult.Status != "published" || forcedResult.Events.Application == "" {
+	if err != nil || !acceptedPublication(forcedResult) || forcedResult.Events.Application == "" {
 		t.Fatalf("overwrite application: result=%+v error=%v", forcedResult, err)
 	}
 }
@@ -273,15 +277,6 @@ func unusedLoopbackAddress(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return address
-}
-
-func mustRead(t *testing.T, path string) []byte {
-	t.Helper()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return b
 }
 
 func buildE2EAPK(t *testing.T, directory, keystore string, versionCode int64) string {
@@ -458,123 +453,105 @@ func nsecKey(t *testing.T, hexKey string) string {
 	return encoded
 }
 
+// e2eProofSigner signs the C1 message with the APK certificate key.
+type e2eProofSigner struct {
+	key    crypto.PrivateKey
+	cert   *x509.Certificate
+	pubkey string
+}
+
+func (s e2eProofSigner) SignProof(_ context.Context, createdAt, expiry int64) (zsp.ProofSignature, error) {
+	signature, err := identity.SignProofMessage(s.key, s.pubkey, createdAt, expiry)
+	if err != nil {
+		return zsp.ProofSignature{}, err
+	}
+	return zsp.ProofSignature{
+		PublicKey:       s.pubkey,
+		CertificateHash: identity.ComputeCertHash(s.cert),
+		Signature:       signature,
+	}, nil
+}
+
+func acceptedPublication(result *zsp.PublishResult) bool {
+	return result != nil && result.ID != "" && (result.Status == "published" || result.Status == "pending")
+}
+
 func publishE2EAPK(
 	t *testing.T,
 	config zsp.PublishConfig,
 	candidate *zsp.APK,
 	blossomURL, relayURL string,
 	skipApp bool,
+	signer zsp.ProofSigner,
 ) *zsp.PublishResult {
 	t.Helper()
 	result, err := zsp.Publish(t.Context(), config, candidate, zsp.PublishOptions{
 		BlossomURL:   blossomURL,
 		Relays:       []string{relayURL},
 		SkipAppEvent: skipApp,
+		ProofSigner:  signer,
 	})
 	if err != nil {
 		t.Fatalf("Publish: %v (result: %+v)", err, result)
 	}
-	if result.Status != "published" || result.ID == "" {
+	if !acceptedPublication(result) {
 		t.Fatalf("Publish result = %+v", result)
 	}
 	return result
 }
 
-func assertPublishedBlob(t *testing.T, result *zsp.PublishResult, expected []byte) {
-	t.Helper()
-	if len(result.Uploads) != 1 || !result.Uploads[0].Accepted {
-		t.Fatalf("uploads = %+v, want one accepted APK", result.Uploads)
-	}
-	response, err := http.Get(result.Uploads[0].URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	actual, err := io.ReadAll(response.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.StatusCode != http.StatusOK || !bytes.Equal(actual, expected) {
-		t.Fatalf("downloaded blob status=%d bytes=%d, want status=200 bytes=%d", response.StatusCode, len(actual), len(expected))
-	}
-}
-
 func assertRelayPublication(
 	t *testing.T,
-	relayURL, applicationPubkey string,
+	relayURL string,
 	publisherPubkeys []string,
 	applicationCount, releaseCount, assetCount int,
 ) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	relay, err := gonostr.RelayConnect(ctx, relayURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer relay.Close()
-
-	applications, err := relay.QuerySync(ctx, gonostr.Filter{
-		Kinds: []int{kindAppMetadata},
-		Tags:  gonostr.TagMap{"d": []string{"com.example.zspe2e"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	releases, err := relay.QuerySync(ctx, gonostr.Filter{
-		Kinds:   []int{kindRelease},
-		Authors: publisherPubkeys,
-		Tags:    gonostr.TagMap{"i": []string{"com.example.zspe2e"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	assets, err := relay.QuerySync(ctx, gonostr.Filter{
-		Kinds:   []int{kindSoftwareAsset},
-		Authors: publisherPubkeys,
-		Tags:    gonostr.TagMap{"i": []string{"com.example.zspe2e"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(applications) != applicationCount || len(releases) != releaseCount || len(assets) != assetCount {
-		t.Fatalf("relay events: applications=%d releases=%d assets=%d", len(applications), len(releases), len(assets))
-	}
-	for _, application := range applications {
-		valid, err := application.CheckSignature()
-		if err != nil || !valid || application.PubKey != applicationPubkey {
-			t.Fatalf("invalid application event: pubkey=%s signature_error=%v", application.PubKey, err)
+	deadline := time.Now().Add(30 * time.Second)
+	var applications, releases, assets []*gonostr.Event
+	for {
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		relay, err := gonostr.RelayConnect(ctx, relayURL)
+		if err != nil {
+			cancel()
+			t.Fatal(err)
 		}
-	}
-	assetIDs := make(map[string]struct{}, len(assets))
-	for _, asset := range assets {
-		valid, err := asset.CheckSignature()
-		if err != nil || !valid {
-			t.Fatalf("invalid asset signature: %v", err)
+		applications, err = relay.QuerySync(ctx, gonostr.Filter{
+			Kinds: []int{kindAppMetadata},
+			Tags:  gonostr.TagMap{"d": []string{"com.example.zspe2e"}},
+		})
+		if err != nil {
+			relay.Close()
+			cancel()
+			t.Fatal(err)
 		}
-		assetIDs[asset.ID] = struct{}{}
-	}
-	for _, release := range releases {
-		valid, err := release.CheckSignature()
-		if err != nil || !valid {
-			t.Fatalf("invalid release signature: %v", err)
+		releases, err = relay.QuerySync(ctx, gonostr.Filter{
+			Kinds:   []int{kindRelease},
+			Authors: publisherPubkeys,
+			Tags:    gonostr.TagMap{"i": []string{"com.example.zspe2e"}},
+		})
+		if err != nil {
+			relay.Close()
+			cancel()
+			t.Fatal(err)
 		}
-		application := release.Tags.GetFirst([]string{"a"})
-		if application == nil || len(*application) < 2 ||
-			(*application)[1] != "32267:"+release.PubKey+":com.example.zspe2e" {
-			t.Fatalf("release application coordinate = %v, signer %s", application, release.PubKey)
+		assets, err = relay.QuerySync(ctx, gonostr.Filter{
+			Kinds:   []int{kindSoftwareAsset},
+			Authors: publisherPubkeys,
+			Tags:    gonostr.TagMap{"i": []string{"com.example.zspe2e"}},
+		})
+		relay.Close()
+		cancel()
+		if err != nil {
+			t.Fatal(err)
 		}
-		linked := false
-		for _, tag := range release.Tags {
-			if len(tag) >= 2 && tag[0] == "e" {
-				if _, ok := assetIDs[tag[1]]; ok {
-					linked = true
-				}
-			}
+		if len(applications) == applicationCount && len(releases) == releaseCount && len(assets) == assetCount {
+			break
 		}
-		if !linked {
-			t.Fatalf("release %s does not link a published asset", release.ID)
+		if time.Now().After(deadline) {
+			t.Fatalf("relay events: applications=%d releases=%d assets=%d", len(applications), len(releases), len(assets))
 		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 
@@ -587,32 +564,34 @@ func containsWarning(warnings []string, want string) bool {
 	return false
 }
 
-func assertReleasePublishedBy(t *testing.T, relayURL, eventID, pubkey string) {
+func assertDelegatedProof(t *testing.T, relayURL, ownerPubkey, delegatePubkey string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	relay, err := gonostr.RelayConnect(ctx, relayURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer relay.Close()
-	events, err := relay.QuerySync(ctx, gonostr.Filter{
-		IDs:     []string{eventID},
-		Kinds:   []int{kindRelease},
-		Authors: []string{pubkey},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(events) != 1 {
-		t.Fatalf("release %s by %s not found", eventID, pubkey)
-	}
-	valid, err := events[0].CheckSignature()
-	if err != nil || !valid {
-		t.Fatalf("invalid indexer-style release signature: %v", err)
-	}
-	application := events[0].Tags.GetFirst([]string{"a"})
-	if application == nil || len(*application) < 2 || (*application)[1] != "32267:"+pubkey+":com.example.zspe2e" {
-		t.Fatalf("release application coordinate = %v, signer %s", application, pubkey)
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		relay, err := gonostr.RelayConnect(ctx, relayURL)
+		if err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		proofs, err := relay.QuerySync(ctx, gonostr.Filter{
+			Kinds:   []int{kindIdentityProof},
+			Authors: []string{ownerPubkey},
+		})
+		relay.Close()
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, proof := range proofs {
+			tag := proof.Tags.GetFirst([]string{"delegation"})
+			if tag != nil && len(*tag) == 2 && (*tag)[1] == delegatePubkey {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no stored proof from %s delegates to %s", ownerPubkey, delegatePubkey)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }

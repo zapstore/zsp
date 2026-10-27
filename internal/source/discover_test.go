@@ -9,7 +9,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/v2/internal/config"
 )
 
 func TestAvailableSources(t *testing.T) {

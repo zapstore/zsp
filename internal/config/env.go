@@ -10,8 +10,8 @@ import (
 	"strings"
 
 	"github.com/joho/godotenv"
-	"github.com/zapstore/zsp/internal/netpolicy"
-	"github.com/zapstore/zsp/internal/sanitize"
+	"github.com/zapstore/zsp/v2/internal/netpolicy"
+	"github.com/zapstore/zsp/v2/internal/sanitize"
 )
 
 // DefaultRelayHTTPURL is the REST origin used when RELAYS is unset.

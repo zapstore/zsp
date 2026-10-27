@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zapstore/zsp/tests/integration/fixture"
+	"github.com/zapstore/zsp/v2/tests/integration/fixture"
 )
 
 const (

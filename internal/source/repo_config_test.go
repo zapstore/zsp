@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/v2/internal/config"
 )
 
 func TestFetchRepoConfig(t *testing.T) {

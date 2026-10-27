@@ -7,7 +7,7 @@ import (
 	"net"
 
 	"github.com/nbd-wtf/go-nostr"
-	"github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/v2/internal/config"
 )
 
 func socketPath(raw string) (string, bool) {

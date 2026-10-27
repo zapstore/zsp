@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zapstore/zsp/internal/config"
-	"github.com/zapstore/zsp/internal/sanitize"
+	"github.com/zapstore/zsp/v2/internal/config"
+	"github.com/zapstore/zsp/v2/internal/sanitize"
 )
 
 // gitlabArchRegex extracts architecture from GitLab asset names like "APK (arm64-v8a)"

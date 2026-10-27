@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/v2/internal/config"
 )
 
 const repoConfigPath = "zapstore.yaml"

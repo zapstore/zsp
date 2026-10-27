@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/zapstore/zsp/internal/sanitize"
+	"github.com/zapstore/zsp/v2/internal/sanitize"
 )
 
 var (

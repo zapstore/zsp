@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zapstore/zsp"
+	"github.com/zapstore/zsp/v2"
 )
 
 func TestCheckNextStep(t *testing.T) {

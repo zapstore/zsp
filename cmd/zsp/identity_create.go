@@ -15,10 +15,10 @@ import (
 
 	gonostr "github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
-	"github.com/zapstore/zsp/internal/config"
-	"github.com/zapstore/zsp/internal/identity"
-	nostrpkg "github.com/zapstore/zsp/internal/nostr"
-	"github.com/zapstore/zsp/internal/ui"
+	"github.com/zapstore/zsp/v2/internal/config"
+	"github.com/zapstore/zsp/v2/internal/identity"
+	nostrpkg "github.com/zapstore/zsp/v2/internal/nostr"
+	"github.com/zapstore/zsp/v2/internal/ui"
 	"golang.org/x/term"
 )
 

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zapstore/zsp"
+	"github.com/zapstore/zsp/v2"
 )
 
 func TestWizardMetadataDescription(t *testing.T) {

@@ -10,9 +10,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/zapstore/zsp/internal/apk"
-	"github.com/zapstore/zsp/internal/sanitize"
-	"github.com/zapstore/zsp/internal/source"
+	"github.com/zapstore/zsp/v2/internal/apk"
+	"github.com/zapstore/zsp/v2/internal/sanitize"
+	"github.com/zapstore/zsp/v2/internal/source"
 )
 
 // Fetch resolves and verifies usable APK candidates. The caller owns each

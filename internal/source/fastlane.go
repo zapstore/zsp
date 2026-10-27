@@ -12,8 +12,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/zapstore/zsp/internal/config"
-	"github.com/zapstore/zsp/internal/localpath"
+	"github.com/zapstore/zsp/v2/internal/config"
+	"github.com/zapstore/zsp/v2/internal/localpath"
 )
 
 const fastlaneMetadataPath = "fastlane/metadata/android"

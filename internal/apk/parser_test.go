@@ -20,7 +20,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zapstore/zsp/internal/media"
+	"github.com/zapstore/zsp/v2/internal/media"
 )
 
 func TestReadZipFileRejectsOversizedResource(t *testing.T) {

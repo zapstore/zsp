@@ -18,8 +18,8 @@ import (
 
 	"github.com/PaesslerAG/jsonpath"
 	"github.com/PuerkitoBio/goquery"
-	"github.com/zapstore/zsp/internal/config"
-	"github.com/zapstore/zsp/internal/sanitize"
+	"github.com/zapstore/zsp/v2/internal/config"
+	"github.com/zapstore/zsp/v2/internal/sanitize"
 )
 
 // webCache stores HTTP validators for a versionless direct URL. Content-Length

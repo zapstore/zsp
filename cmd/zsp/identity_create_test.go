@@ -20,9 +20,9 @@ import (
 
 	gonostr "github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
-	"github.com/zapstore/zsp/internal/identity"
-	nostrpkg "github.com/zapstore/zsp/internal/nostr"
-	"github.com/zapstore/zsp/internal/ui"
+	"github.com/zapstore/zsp/v2/internal/identity"
+	nostrpkg "github.com/zapstore/zsp/v2/internal/nostr"
+	"github.com/zapstore/zsp/v2/internal/ui"
 )
 
 // forceTTY overrides the isTTY seam for the duration of the test.

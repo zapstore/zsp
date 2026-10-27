@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const zspModule = "github.com/zapstore/zsp"
+const zspModule = "github.com/zapstore/zsp/v2"
 
 // zspModuleRoot is the directory containing this zsp module's go.mod and cmd/zsp.
 func zspModuleRoot() (string, error) {

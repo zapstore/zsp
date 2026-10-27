@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/zapstore/zsp"
-	"github.com/zapstore/zsp/internal/config"
-	"github.com/zapstore/zsp/internal/source"
-	"github.com/zapstore/zsp/internal/ui"
+	"github.com/zapstore/zsp/v2"
+	"github.com/zapstore/zsp/v2/internal/config"
+	"github.com/zapstore/zsp/v2/internal/source"
+	"github.com/zapstore/zsp/v2/internal/ui"
 	"gopkg.in/yaml.v3"
 )
 

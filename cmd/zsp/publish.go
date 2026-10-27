@@ -9,11 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/zapstore/zsp"
-	"github.com/zapstore/zsp/internal/cli"
-	"github.com/zapstore/zsp/internal/config"
-	"github.com/zapstore/zsp/internal/hotbox"
-	"github.com/zapstore/zsp/internal/ui"
+	"github.com/zapstore/zsp/v2"
+	"github.com/zapstore/zsp/v2/internal/cli"
+	"github.com/zapstore/zsp/v2/internal/config"
+	"github.com/zapstore/zsp/v2/internal/hotbox"
+	"github.com/zapstore/zsp/v2/internal/ui"
 	"golang.org/x/term"
 )
 

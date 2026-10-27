@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/zapstore/zsp/internal/source"
+	"github.com/zapstore/zsp/v2/internal/source"
 )
 
 func TestSelectFetchedAPKs(t *testing.T) {

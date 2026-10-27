@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	internalconfig "github.com/zapstore/zsp/internal/config"
+	internalconfig "github.com/zapstore/zsp/v2/internal/config"
 	"gopkg.in/yaml.v3"
 )
 

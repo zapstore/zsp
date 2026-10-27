@@ -5,8 +5,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/zapstore/zsp"
-	"github.com/zapstore/zsp/internal/sanitize"
+	"github.com/zapstore/zsp/v2"
+	"github.com/zapstore/zsp/v2/internal/sanitize"
 )
 
 // ProgressReporter translates library progress events into terminal output.

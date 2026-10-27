@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zapstore/zsp"
-	"github.com/zapstore/zsp/internal/cli"
-	"github.com/zapstore/zsp/internal/ui"
+	"github.com/zapstore/zsp/v2"
+	"github.com/zapstore/zsp/v2/internal/cli"
+	"github.com/zapstore/zsp/v2/internal/ui"
 )
 
 func TestLoadPublicConfigRejectsAPKArgument(t *testing.T) {

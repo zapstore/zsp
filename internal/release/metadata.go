@@ -6,11 +6,11 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/zapstore/zsp/internal/apk"
-	internalconfig "github.com/zapstore/zsp/internal/config"
-	"github.com/zapstore/zsp/internal/netpolicy"
-	"github.com/zapstore/zsp/internal/source"
-	"github.com/zapstore/zsp/internal/spdx"
+	"github.com/zapstore/zsp/v2/internal/apk"
+	internalconfig "github.com/zapstore/zsp/v2/internal/config"
+	"github.com/zapstore/zsp/v2/internal/netpolicy"
+	"github.com/zapstore/zsp/v2/internal/source"
+	"github.com/zapstore/zsp/v2/internal/spdx"
 )
 
 func preparePublishMetadata(ctx context.Context, config PublishConfig, candidate *APK, parsed *apk.APKInfo) (PublishConfig, *internalconfig.Config, []string, error) {

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/zapstore/zsp/internal/sanitize"
+	"github.com/zapstore/zsp/v2/internal/sanitize"
 )
 
 // ErrIncompleteResults means a relay returned a full result page, so matching

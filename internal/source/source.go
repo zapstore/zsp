@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/v2/internal/config"
 )
 
 // unsupportedArchRegex matches APK filenames that explicitly indicate unsupported architectures.

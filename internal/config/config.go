@@ -13,7 +13,7 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
-	"github.com/zapstore/zsp/internal/netpolicy"
+	"github.com/zapstore/zsp/v2/internal/netpolicy"
 	"gopkg.in/yaml.v3"
 )
 

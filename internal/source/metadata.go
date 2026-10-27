@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
-	"github.com/zapstore/zsp/internal/config"
-	"github.com/zapstore/zsp/internal/sanitize"
-	"github.com/zapstore/zsp/internal/spdx"
+	"github.com/zapstore/zsp/v2/internal/config"
+	"github.com/zapstore/zsp/v2/internal/sanitize"
+	"github.com/zapstore/zsp/v2/internal/spdx"
 	"gopkg.in/yaml.v3"
 )
 

@@ -1,6 +1,6 @@
 // Package zsp provides the public API for validating and publishing Zapstore
 // releases. The implementation lives in internal/release; this file only
-// re-exports it so the import path stays github.com/zapstore/zsp.
+// re-exports it so the import path stays github.com/zapstore/zsp/v2.
 package zsp
 
 import (
@@ -8,7 +8,7 @@ import (
 	_ "embed"
 	"io"
 
-	"github.com/zapstore/zsp/internal/release"
+	"github.com/zapstore/zsp/v2/internal/release"
 )
 
 // Skill is the agent skill for writing and maintaining zapstore.yaml, as

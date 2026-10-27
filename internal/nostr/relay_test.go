@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zapstore/zsp/internal/sanitize"
+	"github.com/zapstore/zsp/v2/internal/sanitize"
 )
 
 func TestIsDuplicateError(t *testing.T) {

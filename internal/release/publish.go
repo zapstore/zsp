@@ -15,13 +15,13 @@ import (
 	"time"
 
 	gonostr "github.com/nbd-wtf/go-nostr"
-	"github.com/zapstore/zsp/internal/apk"
-	"github.com/zapstore/zsp/internal/blossom"
-	internalconfig "github.com/zapstore/zsp/internal/config"
-	"github.com/zapstore/zsp/internal/identity"
-	internalnostr "github.com/zapstore/zsp/internal/nostr"
-	"github.com/zapstore/zsp/internal/sanitize"
-	"github.com/zapstore/zsp/internal/source"
+	"github.com/zapstore/zsp/v2/internal/apk"
+	"github.com/zapstore/zsp/v2/internal/blossom"
+	internalconfig "github.com/zapstore/zsp/v2/internal/config"
+	"github.com/zapstore/zsp/v2/internal/identity"
+	internalnostr "github.com/zapstore/zsp/v2/internal/nostr"
+	"github.com/zapstore/zsp/v2/internal/sanitize"
+	"github.com/zapstore/zsp/v2/internal/source"
 )
 
 // Publish uploads one verified APK and publishes its NIP-82 events.

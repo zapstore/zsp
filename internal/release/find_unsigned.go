@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/zapstore/zsp/internal/apk"
+	"github.com/zapstore/zsp/v2/internal/apk"
 )
 
 // FindUnsigned walks dir and returns every valid unsigned APK, in walk order.

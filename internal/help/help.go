@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/zapstore/zsp/internal/cli"
-	"github.com/zapstore/zsp/internal/ui"
+	"github.com/zapstore/zsp/v2/internal/cli"
+	"github.com/zapstore/zsp/v2/internal/ui"
 )
 
 func renderBold(s string) string {

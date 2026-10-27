@@ -35,7 +35,7 @@ go mod tidy               # After dependency changes
 
 - Reference `internal/source/github.go` when adding new sources.
 - `zsp.go` is the only root Go file: it re-exports `internal/release` so the
-  import path stays `github.com/zapstore/zsp`. Put library code in
+  import path stays `github.com/zapstore/zsp/v2`. Put library code in
   `internal/release`, and add a forwarder in `zsp.go` for any new public name.
 - Outbound HTTP uses `internal/netpolicy`; local media paths use
   `internal/localpath`.

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/v2/internal/config"
 )
 
 // TestPlanMetadata tests the metadata source selection logic

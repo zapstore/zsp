@@ -26,11 +26,11 @@ import (
 	"github.com/nbd-wtf/go-nostr/nip19"
 	"gopkg.in/yaml.v3"
 
-	"github.com/zapstore/zsp/internal/apk"
-	"github.com/zapstore/zsp/internal/blossom"
-	"github.com/zapstore/zsp/internal/identity"
-	internalnostr "github.com/zapstore/zsp/internal/nostr"
-	"github.com/zapstore/zsp/internal/source"
+	"github.com/zapstore/zsp/v2/internal/apk"
+	"github.com/zapstore/zsp/v2/internal/blossom"
+	"github.com/zapstore/zsp/v2/internal/identity"
+	internalnostr "github.com/zapstore/zsp/v2/internal/nostr"
+	"github.com/zapstore/zsp/v2/internal/source"
 )
 
 var (

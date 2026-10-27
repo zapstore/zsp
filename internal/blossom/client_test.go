@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
-	nostrpkg "github.com/zapstore/zsp/internal/nostr"
+	nostrpkg "github.com/zapstore/zsp/v2/internal/nostr"
 )
 
 // testSigner is a minimal nostrpkg.Signer backed by an ephemeral key, so

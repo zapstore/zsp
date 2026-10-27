@@ -4,10 +4,10 @@ import (
 	"context"
 	"time"
 
-	"github.com/zapstore/zsp/internal/apk"
-	internalconfig "github.com/zapstore/zsp/internal/config"
-	"github.com/zapstore/zsp/internal/identity"
-	internalnostr "github.com/zapstore/zsp/internal/nostr"
+	"github.com/zapstore/zsp/v2/internal/apk"
+	internalconfig "github.com/zapstore/zsp/v2/internal/config"
+	"github.com/zapstore/zsp/v2/internal/identity"
+	internalnostr "github.com/zapstore/zsp/v2/internal/nostr"
 )
 
 // CheckOptions selects the relays and channel Check asks about.

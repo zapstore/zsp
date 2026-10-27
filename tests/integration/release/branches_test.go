@@ -247,10 +247,7 @@ func TestWizardPublishBranches(t *testing.T) {
 		t.Fatalf("downgrade = %s", code)
 	}
 	publishArgs(t, app.work, env, "--channel", "beta", "-s", low)
-	beta := query(t, nostr.Filter{Kinds: []int{kindRelease}, Authors: []string{app.pubkey}, Tags: nostr.TagMap{"c": []string{"beta"}}})
-	if len(beta) != 1 {
-		t.Fatalf("beta releases = %d", len(beta))
-	}
+	queryUntil(t, nostr.Filter{Kinds: []int{kindRelease}, Authors: []string{app.pubkey}, Tags: nostr.TagMap{"c": []string{"beta"}}}, 1)
 
 	before := appEventID(t, app.id)
 	next := app.sign(t, 4)

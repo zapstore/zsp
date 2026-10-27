@@ -31,7 +31,7 @@ import (
 	"github.com/srwiley/rasterx"
 	"golang.org/x/image/draw"
 
-	"github.com/zapstore/zsp/internal/media"
+	"github.com/zapstore/zsp/v2/internal/media"
 )
 
 const (

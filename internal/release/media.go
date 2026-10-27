@@ -12,12 +12,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zapstore/zsp/internal/apk"
-	"github.com/zapstore/zsp/internal/localpath"
-	"github.com/zapstore/zsp/internal/media"
-	"github.com/zapstore/zsp/internal/netpolicy"
-	"github.com/zapstore/zsp/internal/sanitize"
-	"github.com/zapstore/zsp/internal/source"
+	"github.com/zapstore/zsp/v2/internal/apk"
+	"github.com/zapstore/zsp/v2/internal/localpath"
+	"github.com/zapstore/zsp/v2/internal/media"
+	"github.com/zapstore/zsp/v2/internal/netpolicy"
+	"github.com/zapstore/zsp/v2/internal/sanitize"
+	"github.com/zapstore/zsp/v2/internal/source"
 )
 
 const maxMediaSize = 20 << 20

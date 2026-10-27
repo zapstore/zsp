@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
-	"github.com/zapstore/zsp/internal/apk"
-	"github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/v2/internal/apk"
+	"github.com/zapstore/zsp/v2/internal/config"
 )
 
 // filterExactTag returns tags where tag[0] exactly matches the key.

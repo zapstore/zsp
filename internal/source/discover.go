@@ -5,7 +5,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/v2/internal/config"
 )
 
 // AvailableSources reports metadata sources that can fill a listing for this

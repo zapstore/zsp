@@ -12,7 +12,7 @@ import (
 	"time"
 
 	nostr "github.com/nbd-wtf/go-nostr"
-	zsp "github.com/zapstore/zsp"
+	zsp "github.com/zapstore/zsp/v2"
 )
 
 const (

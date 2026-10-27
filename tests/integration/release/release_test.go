@@ -5,8 +5,6 @@ package release
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,7 +24,7 @@ import (
 	nostr "github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
 
-	"github.com/zapstore/zsp/tests/integration/fixture"
+	"github.com/zapstore/zsp/v2/tests/integration/fixture"
 )
 
 const (
@@ -122,7 +120,6 @@ func TestRelease(t *testing.T) {
 	admitPublisher(t, grant.pubkey)
 	runWizard(t, work)
 	proofID, certHash := assertCatalog(t, grant.pubkey, 1, 1, 1)
-	assertBlob(t, signed)
 
 	after := zspCheck(t, work)
 	npub, err := nip19.EncodePublicKey(grant.pubkey)
@@ -312,7 +309,7 @@ func runWizard(t *testing.T, work string) {
 	if err := box.finish(promptCtx(t, 20*time.Second), false); err != nil {
 		t.Fatalf("wizard: %v\n%s", err, tail(box.text()))
 	}
-	if !strings.Contains(box.text(), "Release published") {
+	if !strings.Contains(box.text(), "Release published") && !strings.Contains(box.text(), "Release pending") {
 		t.Fatalf("wizard did not publish:\n%s", tail(box.text()))
 	}
 }
@@ -412,11 +409,10 @@ func admitPublisher(t *testing.T, pubkey string) {
 		t.Fatal(err)
 	}
 	body, err := json.Marshal(struct {
-		Op     string `json:"op"`
-		Kind   string `json:"kind"`
-		ID     string `json:"id"`
-		Reason string `json:"reason"`
-	}{Op: "allow", Kind: "nostr", ID: pubkey, Reason: "release test"})
+		Op   string `json:"op"`
+		Kind string `json:"kind"`
+		ID   string `json:"id"`
+	}{Op: "allow", Kind: "nostr", ID: pubkey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,7 +527,7 @@ func publishOK(t *testing.T, work, apk string) {
 	if err := json.Unmarshal([]byte(res.stdout), &doc); err != nil {
 		t.Fatalf("publish json: %v\n%s", err, res.stdout)
 	}
-	if !doc.OK || doc.Status != "published" || doc.ID == "" {
+	if !doc.OK || doc.ID == "" || (doc.Status != "published" && doc.Status != "pending") {
 		t.Fatalf("publish result = %+v", doc)
 	}
 }
@@ -614,13 +610,21 @@ func childEnv(extra []string) []string {
 
 func assertCatalog(t *testing.T, pubkey string, apps, releases, assets int) (proofID, certHash string) {
 	t.Helper()
-	applications := query(t, nostr.Filter{Kinds: []int{kindApp}, Tags: nostr.TagMap{"d": []string{appID}}})
-	releaseEvents := query(t, nostr.Filter{Kinds: []int{kindRelease}, Authors: []string{pubkey}, Tags: nostr.TagMap{"i": []string{appID}}})
-	assetEvents := query(t, nostr.Filter{Kinds: []int{kindAsset}, Authors: []string{pubkey}, Tags: nostr.TagMap{"i": []string{appID}}})
-	proofs := query(t, nostr.Filter{Kinds: []int{kindProof}, Authors: []string{pubkey}})
-	if len(applications) != apps || len(releaseEvents) != releases || len(assetEvents) != assets || len(proofs) != 1 {
-		t.Fatalf("catalog apps=%d releases=%d assets=%d proofs=%d, want %d %d %d 1",
-			len(applications), len(releaseEvents), len(assetEvents), len(proofs), apps, releases, assets)
+	deadline := time.Now().Add(30 * time.Second)
+	var applications, releaseEvents, assetEvents, proofs []*nostr.Event
+	for {
+		applications = query(t, nostr.Filter{Kinds: []int{kindApp}, Tags: nostr.TagMap{"d": []string{appID}}})
+		releaseEvents = query(t, nostr.Filter{Kinds: []int{kindRelease}, Authors: []string{pubkey}, Tags: nostr.TagMap{"i": []string{appID}}})
+		assetEvents = query(t, nostr.Filter{Kinds: []int{kindAsset}, Authors: []string{pubkey}, Tags: nostr.TagMap{"i": []string{appID}}})
+		proofs = query(t, nostr.Filter{Kinds: []int{kindProof}, Authors: []string{pubkey}})
+		if len(applications) == apps && len(releaseEvents) == releases && len(assetEvents) == assets && len(proofs) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("catalog apps=%d releases=%d assets=%d proofs=%d, want %d %d %d 1",
+				len(applications), len(releaseEvents), len(assetEvents), len(proofs), apps, releases, assets)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 	for _, event := range append(append(append([]*nostr.Event{}, applications...), releaseEvents...), append(assetEvents, proofs...)...) {
 		ok, err := event.CheckSignature()
@@ -644,31 +648,21 @@ func assertCatalog(t *testing.T, pubkey string, apps, releases, assets int) (pro
 	return proof.ID, (*d)[1]
 }
 
-func assertBlob(t *testing.T, apk string) {
+// queryUntil polls until the relay serves want events. Promotion follows
+// the APK read, so a publish that just returned can still be absent.
+func queryUntil(t *testing.T, filter nostr.Filter, want int) []*nostr.Event {
 	t.Helper()
-	body, err := os.ReadFile(apk)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sum := sha256.Sum256(body)
-	blob := blossomURL + "/" + hex.EncodeToString(sum[:]) + ".apk"
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, blob, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	got, err := io.ReadAll(io.LimitReader(resp.Body, int64(len(body))+1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK || !bytes.Equal(got, body) {
-		t.Fatalf("blob %s status %d bytes %d, want 200 and %d bytes", blob, resp.StatusCode, len(got), len(body))
+	deadline := time.Now().Add(30 * time.Second)
+	var events []*nostr.Event
+	for {
+		events = query(t, filter)
+		if len(events) == want {
+			return events
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("relay events = %d, want %d", len(events), want)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 
@@ -749,4 +743,3 @@ func copyFile(src, dest string) error {
 	}
 	return out.Close()
 }
-

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/v2/internal/config"
 )
 
 // forgeAuthHeaders returns the authentication headers for a request to

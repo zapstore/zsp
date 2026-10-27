@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	internalconfig "github.com/zapstore/zsp/internal/config"
-	"github.com/zapstore/zsp/internal/netpolicy"
+	internalconfig "github.com/zapstore/zsp/v2/internal/config"
+	"github.com/zapstore/zsp/v2/internal/netpolicy"
 )
 
 // ParseConfig parses canonical zapstore.yaml from r without performing network

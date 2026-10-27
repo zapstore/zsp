@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
 )
 
 const fixturePubkey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
@@ -76,6 +75,7 @@ func startLocalRelay(binary string) (relayURL, blossomURL, socketPath string, st
 		"RATE_INITIAL_TOKENS=100000",
 		"RATE_MAX_TOKENS=100000",
 		"RATE_TOKENS_PER_INTERVAL=100000",
+		"LEAF_MODEL_DIR=" + leafModelDir(),
 	})
 	if err := cmd.Start(); err != nil {
 		os.RemoveAll(dir)
@@ -170,6 +170,19 @@ func stopRelay(cmd *exec.Cmd, logs *strings.Builder) {
 		<-done
 		fmt.Fprintf(os.Stderr, "relay did not stop\n%s", logs.String())
 	}
+}
+
+// leafModelDir is the shared search-model directory. A fresh DATA_DIR would
+// download it again and then delete it with the temp relay.
+func leafModelDir() string {
+	if dir := strings.TrimSpace(os.Getenv("LEAF_MODEL_DIR")); dir != "" {
+		return dir
+	}
+	relayDir := strings.TrimSpace(os.Getenv("RELAY_DIR"))
+	if relayDir == "" {
+		return ""
+	}
+	return filepath.Join(relayDir, ".tools", "leaf-ir-v1")
 }
 
 func mergeEnv(base, extra []string) []string {

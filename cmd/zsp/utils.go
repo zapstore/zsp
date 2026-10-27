@@ -8,9 +8,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/zapstore/zsp"
-	"github.com/zapstore/zsp/internal/apk"
-	"github.com/zapstore/zsp/internal/cli"
+	"github.com/zapstore/zsp/v2"
+	"github.com/zapstore/zsp/v2/internal/apk"
+	"github.com/zapstore/zsp/v2/internal/cli"
 )
 
 type apkMetadataDocument struct {

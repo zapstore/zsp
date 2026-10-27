@@ -10,8 +10,8 @@ import (
 	"testing"
 
 	gonostr "github.com/nbd-wtf/go-nostr"
-	"github.com/zapstore/zsp/internal/apk"
-	"github.com/zapstore/zsp/internal/config"
+	"github.com/zapstore/zsp/v2/internal/apk"
+	"github.com/zapstore/zsp/v2/internal/config"
 )
 
 func TestBuildPreviewDataUsesFinalChannelAndPublicFilename(t *testing.T) {

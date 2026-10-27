@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
-	nostrpkg "github.com/zapstore/zsp/internal/nostr"
+	nostrpkg "github.com/zapstore/zsp/v2/internal/nostr"
 )
 
 const (

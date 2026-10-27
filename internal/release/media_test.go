@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zapstore/zsp/internal/apk"
+	"github.com/zapstore/zsp/v2/internal/apk"
 )
 
 func TestPrepareMediaUsesAPKIcon(t *testing.T) {

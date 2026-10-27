@@ -3,54 +3,57 @@
 package publish
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"testing"
 	"time"
 
-	"github.com/zapstore/zsp/tests/integration/fixture"
+	"github.com/zapstore/zsp/v2/tests/integration/fixture"
 )
 
 const fixturePubkey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 
-func startLocalRelay() (relayURL, blossomURL string, stop func(), err error) {
+func startLocalRelay() (relayURL, blossomURL, policySocket string, stop func(), err error) {
 	stop = func() {}
 	binary, cleanup, err := fixture.Relay()
 	if err != nil {
-		return "", "", stop, err
+		return "", "", "", stop, err
 	}
 
 	dir, err := os.MkdirTemp("", "zsp-publish-relay-*")
 	if err != nil {
 		cleanup()
-		return "", "", stop, err
+		return "", "", "", stop, err
 	}
 
 	relayAddr, err := freeAddress()
 	if err != nil {
 		cleanup()
 		os.RemoveAll(dir)
-		return "", "", stop, err
+		return "", "", "", stop, err
 	}
 	blossomAddr, err := freeAddress()
 	if err != nil {
 		cleanup()
 		os.RemoveAll(dir)
-		return "", "", stop, err
+		return "", "", "", stop, err
 	}
 	analyticsAddr, err := freeAddress()
 	if err != nil {
 		cleanup()
 		os.RemoveAll(dir)
-		return "", "", stop, err
+		return "", "", "", stop, err
 	}
 	dashboardAddr, err := freeAddress()
 	if err != nil {
 		cleanup()
 		os.RemoveAll(dir)
-		return "", "", stop, err
+		return "", "", "", stop, err
 	}
 
 	var logs strings.Builder
@@ -82,11 +85,12 @@ func startLocalRelay() (relayURL, blossomURL string, stop func(), err error) {
 		"RATE_INITIAL_TOKENS=100000",
 		"RATE_MAX_TOKENS=100000",
 		"RATE_TOKENS_PER_INTERVAL=100000",
+		"LEAF_MODEL_DIR=" + leafModelDir(),
 	})
 	if err := cmd.Start(); err != nil {
 		cleanup()
 		os.RemoveAll(dir)
-		return "", "", stop, fmt.Errorf("start relay: %w", err)
+		return "", "", "", stop, fmt.Errorf("start relay: %w", err)
 	}
 	stop = func() {
 		stopRelay(cmd, &logs)
@@ -95,13 +99,18 @@ func startLocalRelay() (relayURL, blossomURL string, stop func(), err error) {
 	}
 	if err := waitTCP(relayAddr, &logs); err != nil {
 		stop()
-		return "", "", func() {}, err
+		return "", "", "", func() {}, err
 	}
 	if err := waitTCP(blossomAddr, &logs); err != nil {
 		stop()
-		return "", "", func() {}, err
+		return "", "", "", func() {}, err
 	}
-	return "ws://" + relayAddr, "http://" + blossomAddr, stop, nil
+	socketPath := filepath.Join(dir, "relay.sock")
+	if err := waitUnix(socketPath, &logs); err != nil {
+		stop()
+		return "", "", "", func() {}, err
+	}
+	return "ws://" + relayAddr, "http://" + blossomAddr, socketPath, stop, nil
 }
 
 func freeAddress() (string, error) {
@@ -116,8 +125,54 @@ func freeAddress() (string, error) {
 	return address, nil
 }
 
+func waitUnix(path string, logs *strings.Builder) error {
+	deadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("unix", path, 50*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return fmt.Errorf("relay socket %s did not appear\n%s", path, logs.String())
+}
+
+func admitPublisher(t *testing.T, pubkey, socket string) {
+	t.Helper()
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(struct {
+		Op   string `json:"op"`
+		Kind string `json:"kind"`
+		ID   string `json:"id"`
+	}{Op: "allow", Kind: "nostr", ID: pubkey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write(append(body, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	var resp struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.OK {
+		t.Fatal("admit " + pubkey + ": " + resp.Error)
+	}
+}
+
 func waitTCP(address string, logs *strings.Builder) error {
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", address, 50*time.Millisecond)
 		if err == nil {
@@ -146,6 +201,19 @@ func stopRelay(cmd *exec.Cmd, logs *strings.Builder) {
 		<-done
 		fmt.Fprintf(os.Stderr, "relay did not stop\n%s", logs.String())
 	}
+}
+
+// leafModelDir is the shared search-model directory. A fresh DATA_DIR would
+// download it again and then delete it with the temp relay.
+func leafModelDir() string {
+	if dir := strings.TrimSpace(os.Getenv("LEAF_MODEL_DIR")); dir != "" {
+		return dir
+	}
+	relayDir := strings.TrimSpace(os.Getenv("RELAY_DIR"))
+	if relayDir == "" {
+		return ""
+	}
+	return filepath.Join(relayDir, ".tools", "leaf-ir-v1")
 }
 
 func mergeEnv(base, extra []string) []string {
