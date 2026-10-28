@@ -5,13 +5,15 @@
 // Private key material and credentials must never appear in output. Everything
 // else is preserved so errors stay actionable: this package removes only
 // credential-bearing URL components, recorded secret values, key-shaped
-// tokens, authorization header values, control characters, and the user's home
-// directory.
+// tokens, authorization header values, and control characters. Absolute
+// filesystem paths are rewritten relative to the working directory. A path
+// that cannot be made relative still hides the home directory as ~.
 package sanitize
 
 import (
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -81,7 +83,8 @@ var yamlValuePattern = regexp.MustCompile("(cannot unmarshal \\S+) `[^`]*`")
 
 // Text returns text with private material redacted: registered secrets, URL
 // credentials/query/fragment, nsec keys, authorization values, credential
-// assignments, control characters, and the user's home directory.
+// assignments, and control characters. Absolute filesystem paths are
+// rewritten relative to the working directory.
 func Text(text string) string {
 	if text == "" {
 		return ""
@@ -179,10 +182,137 @@ func isControl(r rune) bool {
 	return r < 0x20 || r == 0x7f
 }
 
+// redactHome rewrites absolute filesystem paths relative to the working
+// directory. URLs are left alone. A path that cannot be made relative still
+// hides the home directory as ~.
 func redactHome(text string) string {
+	if text == "" {
+		return ""
+	}
+	cwd, err := os.Getwd()
+	if err != nil || cwd == "" {
+		return tildeHome(text)
+	}
+	cwd, err = filepath.Abs(cwd)
+	if err != nil {
+		return tildeHome(text)
+	}
+	var b strings.Builder
+	b.Grow(len(text))
+	i := 0
+	for i < len(text) {
+		start, end, ok := nextAbsPath(text, i)
+		if !ok {
+			b.WriteString(text[i:])
+			break
+		}
+		b.WriteString(text[i:start])
+		raw := text[start:end]
+		path, suffix := trimPathSuffix(raw)
+		b.WriteString(displayPath(cwd, path))
+		b.WriteString(suffix)
+		i = end
+	}
+	return b.String()
+}
+
+// Path returns one filesystem path in the form Text shows. A URL is unchanged.
+func Path(path string) string {
+	if path == "" || strings.Contains(path, "://") {
+		return path
+	}
+	return redactHome(path)
+}
+
+func displayPath(cwd, path string) string {
+	rel, err := filepath.Rel(cwd, path)
+	if err != nil || rel == "" {
+		return tildeHome(path)
+	}
+	rel = filepath.ToSlash(rel)
+	switch {
+	case rel == ".":
+		return "."
+	case rel == ".." || strings.HasPrefix(rel, "../"):
+		return rel
+	case strings.HasPrefix(rel, "./"):
+		return rel
+	default:
+		return "./" + rel
+	}
+}
+
+func tildeHome(text string) string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return text
 	}
 	return strings.ReplaceAll(text, home, "~")
+}
+
+func nextAbsPath(text string, from int) (start, end int, ok bool) {
+	for i := from; i < len(text); i++ {
+		if !absPathAt(text, i) {
+			continue
+		}
+		j := i + 1
+		for j < len(text) && !isPathSpace(text[j]) {
+			j++
+		}
+		if j == i+1 {
+			continue
+		}
+		return i, j, true
+	}
+	return 0, 0, false
+}
+
+func absPathAt(text string, i int) bool {
+	if i >= len(text) {
+		return false
+	}
+	if text[i] == '/' || text[i] == '\\' {
+		if i > 0 && (text[i-1] == ':' || text[i-1] == '/' || text[i-1] == '\\') {
+			return false
+		}
+		return i == 0 || isPathBoundary(text[i-1])
+	}
+	if i+2 >= len(text) || text[i+1] != ':' {
+		return false
+	}
+	c := text[i]
+	if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') {
+		return false
+	}
+	if text[i+2] != '\\' && text[i+2] != '/' {
+		return false
+	}
+	return i == 0 || isPathBoundary(text[i-1])
+}
+
+func isPathBoundary(c byte) bool {
+	return isPathSpace(c) || c == '(' || c == '"' || c == '\'' || c == '='
+}
+
+func isPathSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+func trimPathSuffix(raw string) (path, suffix string) {
+	end := len(raw)
+	for end > 0 {
+		switch raw[end-1] {
+		case ':', ',', ';', ')', ']', '}', '"', '\'', '>':
+			end--
+		case '.':
+			if end > 1 && raw[end-2] != '.' {
+				end--
+				continue
+			}
+			return raw[:end], raw[end:]
+		default:
+			return raw[:end], raw[end:]
+		}
+	}
+	return raw[:end], raw[end:]
 }

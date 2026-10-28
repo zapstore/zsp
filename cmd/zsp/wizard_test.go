@@ -95,6 +95,8 @@ func TestWizardConfigFromSource(t *testing.T) {
 		{name: "empty", source: " ", wantError: true},
 		{name: "insecure URL", source: "http://example.com/releases", wantError: true},
 		{name: "missing local file", source: "./missing.apk", wantError: true},
+		{name: "NIP-34 naddr", source: wizardTestNaddr, wantError: true},
+		{name: "NIP-34 viewer URL", source: "https://nostrhub.io/" + wizardTestNaddr, wantError: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -119,6 +121,37 @@ func TestWizardConfigFromSource(t *testing.T) {
 				t.Errorf("ReleaseSource = %q, want %q", gotReleaseSource, test.releaseSource)
 			}
 		})
+	}
+}
+
+// wizardTestNaddr is a kind 30617 repository announcement.
+const wizardTestNaddr = "naddr1qvzqqqrhnypzqg88e9f588nx7wyz4wt0ura23w3yd4hmztqrkr95utwyvgachjepqyd8wumn8ghj7emfwsh8x6rpddjhxur9v9ex2tnyd9uj7qq22d4kzar92dcx7arnhyhdwn"
+
+// TestWizardConfigFromSourceNamesTheAPKNeed confirms a NIP-34 repository is
+// refused with what the wizard actually needs, not as a bad URL.
+func TestWizardConfigFromSourceNamesTheAPKNeed(t *testing.T) {
+	_, err := wizardConfigFromSource("https://nostrhub.io/" + wizardTestNaddr)
+	if err == nil {
+		t.Fatal("wizardConfigFromSource() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "release") || !strings.Contains(err.Error(), wizardTestNaddr) {
+		t.Errorf("wizardConfigFromSource() error = %v", err)
+	}
+}
+
+// TestWizardVerifyRepositoryKeepsReachable confirms a repository that answers
+// is kept without a prompt, and that no repository is nothing to check.
+func TestWizardVerifyRepositoryKeepsReachable(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	for _, repository := range []string{"", "https://github.com/owner/app"} {
+		keep, err := wizardVerifyRepository(t.Context(), repository)
+		if err != nil || !keep {
+			t.Errorf("wizardVerifyRepository(%q) = %v, %v", repository, keep, err)
+		}
 	}
 }
 
@@ -225,6 +258,29 @@ func TestWizardNextReleaseChoicesDependOnZapstoreRelay(t *testing.T) {
 	}
 }
 
+func TestWizardLocalReleaseDropsIndexerChoice(t *testing.T) {
+	local := zsp.Config{Fetch: zsp.FetchConfig{ReleaseSource: &zsp.ReleaseSource{LocalPath: "/tmp/app.apk"}}}
+	remote := zsp.Config{Fetch: zsp.FetchConfig{Repository: "https://github.com/example/app"}}
+	if !wizardLocalRelease(local) || wizardLocalRelease(remote) {
+		t.Fatalf("local=%v remote=%v", wizardLocalRelease(local), wizardLocalRelease(remote))
+	}
+	if wizardLocalSourceNote(true) == "" || !strings.Contains(wizardLocalSourceNote(true), "public release source") {
+		t.Fatal("missing local source note")
+	}
+	if wizardLocalSourceNote(false) != "" {
+		t.Fatal("remote source should not explain a local file")
+	}
+	if strings.Contains(wizardNothingToPublish("Video Razor", "/tmp/app.apk", true), "/tmp/app.apk") {
+		t.Fatal("local publish note named the file")
+	}
+	if !strings.Contains(wizardNothingToPublish("Video Razor", "https://github.com/example/app", false), "https://github.com/example/app") {
+		t.Fatal("remote publish note dropped the source")
+	}
+	if strings.Contains(wizardClaimedNote("/tmp/app.apk", true), "/tmp/app.apk") {
+		t.Fatal("local claim note named the file")
+	}
+}
+
 func TestHasZapstoreRelay(t *testing.T) {
 	for relays, want := range map[string]bool{
 		"wss://relay.zapstore.dev":                      true,
@@ -266,6 +322,19 @@ func TestKeystoreProofSignerSignsVerifiableProof(t *testing.T) {
 	proof := &identity.IdentityProof{CertHash: signed.CertificateHash, Signature: base64.StdEncoding.EncodeToString(signed.Signature), CreatedAt: createdAt, Expiry: expiry}
 	if result := identity.VerifyIdentityProofWithCert(proof, nil, publicKey, certificate); !result.Valid {
 		t.Fatalf("proof does not verify: %v", result.Error)
+	}
+}
+
+func TestWizardSourceDefaultRelativizesLocalPath(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := wizardSourceDefault(zsp.Config{Fetch: zsp.FetchConfig{ReleaseSource: &zsp.ReleaseSource{
+		LocalPath: filepath.Join(cwd, "app", "build", "outputs", "apk", "release", "app-release.apk"),
+	}}})
+	if got != "./app/build/outputs/apk/release/app-release.apk" {
+		t.Fatalf("wizardSourceDefault() = %q", got)
 	}
 }
 

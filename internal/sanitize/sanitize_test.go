@@ -97,15 +97,38 @@ func TestTextStripsControlCharacters(t *testing.T) {
 	}
 }
 
-func TestTextRedactsHomeDirectory(t *testing.T) {
+func TestTextShowsPathsRelativeToWorkingDir(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(cwd, "testdata", "app.apk")
+	got := Text("found " + path)
+	if strings.Contains(got, cwd) || !strings.Contains(got, "testdata/app.apk") {
+		t.Fatalf("Text() = %q, want a path relative to the working directory", got)
+	}
+	if strings.Contains(got, "~") {
+		t.Fatalf("Text() = %q, want no home shorthand", got)
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		t.Skip("no home directory")
+		return
 	}
-	path := filepath.Join(home, "private", "app.apk")
-	got := Text("open " + path + ": no such file")
-	if strings.Contains(got, home) || !strings.Contains(got, "~") {
-		t.Fatalf("Text() = %q, want home directory redacted", got)
+	outside := filepath.Join(home, "private", "app.apk")
+	got = Text("open " + outside + ": no such file")
+	if strings.Contains(got, home) || strings.Contains(got, "~/") {
+		t.Fatalf("Text() = %q, want a relative path and no home directory", got)
+	}
+	if !strings.Contains(got, "private/app.apk") {
+		t.Fatalf("Text() = %q, want private/app.apk", got)
+	}
+}
+
+func TestTextLeavesURLsAbsolute(t *testing.T) {
+	const raw = "HTTP 404 Not Found: https://relay.example/path"
+	if got := Text(raw); got != raw {
+		t.Fatalf("Text() = %q, want the URL unchanged", got)
 	}
 }
 

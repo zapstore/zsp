@@ -262,7 +262,28 @@ Paste a releases page (GitHub, GitLab, Codeberg, F-Droid…) or the path to an A
 
 A forge repository or releases page, an F-Droid package URL, a direct APK
 URL, and a local APK file or directory are all accepted. A forge URL becomes
-`repository`; anything else becomes `release_source`.
+`repository`; anything else becomes `release_source`. A NIP-34 repository, in
+any of the forms `ParseGitRemote` reads, is refused here: it holds code, not
+releases, so it belongs in `zapstore.yaml` beside a release source. The
+refusal names the `naddr` to put there.
+
+Before anything else, the wizard checks the run's `repository`, whatever it
+came from. The check is a ref listing with no credentials, which is the only
+question that matters: whether a reader can clone it. A forge URL is listed
+at its repository root; a NIP-34 repository is listed as `nostr://<naddr>`,
+which needs ngit. A repository with no branches or tags passes, because it
+answered. A run with no `repository` is not checked, and nothing is printed
+when the check passes.
+
+A repository that does not answer is kept only when the developer says it is
+right, because Zapstore lists an app whose repository it cannot read as
+closed source. The panel says which of three things happened, since they
+call for different fixes: `Not a git repository` for a value that names no
+remote, `The repository didn't answer` for one git could not list, and
+`Couldn't check the repository` when git, or the ngit helper an `naddr`
+needs, is not installed and the remote was never asked. A private repository
+asks for credentials, which is reported as such. `Keep this repository?`
+defaults to No, and No or Esc returns to "Where is your APK?".
 
 When `./zapstore.yaml` exists, the wizard loads it, prefills the answer from
 its source, and uses it for the run; a local file wins over a committed
@@ -375,13 +396,18 @@ That's all Zapstore needs. New releases from <source> keep appearing,
 now linked to your Nostr profile.
 ```
 
+A local release source says to publish each new release with `zsp publish`
+instead. Zapstore cannot fetch a file on this machine.
+
 For an unlisted app it ends with
 `Your proof goes out with the first release`. Cancelling says
 `No proof was changed.`
 
 ### Publish
 
-A listed app publishes nothing here; its proof is enough.
+A listed app publishes nothing here; its proof is enough. A public source
+says Zapstore keeps the app up to date from that source. A local file does
+not: that line is `Nothing to publish.`
 
 An unlisted app needs its first release to carry the proof:
 
@@ -409,8 +435,8 @@ How should new releases of <name> reach Zapstore?
   Set up CI/CD publishing (advanced)
 ```
 
-The first choice appears only when `RELAYS` includes `relay.zapstore.dev`,
-because only Zapstore's indexer publishes for developers. It shows:
+The first choice appears only when `RELAYS` includes `relay.zapstore.dev`
+and the release source is public: a repository or a remote URL. It shows:
 
 ```text
 ✓ Zapstore will keep <name> up to date
@@ -418,8 +444,10 @@ because only Zapstore's indexer publishes for developers. It shows:
   Wrote zapstore.yaml. Commit it and push it. An agent can improve it.
 ```
 
-Otherwise the first choice is `Publish them yourself with zsp publish`,
-which shows:
+A local file is not a public source. The prompt says Zapstore publishes
+from a public release source, and a file on this machine is not one.
+Without `relay.zapstore.dev`, or with a local file, the first choice is
+`Publish them yourself with zsp publish`, which shows:
 
 ```text
 ✓ You'll publish new releases of <name>
@@ -460,7 +488,7 @@ do not belong here.
 
 | Field | Meaning |
 | --- | --- |
-| `repository` | HTTPS forge URL or NIP-34 `naddr`; source and metadata origin |
+| `repository` | HTTPS forge URL or NIP-34 repository; source and metadata origin |
 | `release_source` | URL, local APK path or glob, or structured source |
 | `release_filter` | Regex on release names or tags |
 | `match` | Regex on APK filenames |
@@ -482,7 +510,10 @@ do not belong here.
 
 `release_source` and `match` are the source configuration; `repository` is
 not part of its identity. Without `release_source`, a supported forge
-`repository` supplies releases. F-Droid and IzzyOnDroid are `release_source`
+`repository` supplies releases. A NIP-34 `repository` is accepted in any of
+the forms `ParseGitRemote` reads and stored as its canonical `naddr`, so one
+repository is spelled one way whatever the developer pasted; it holds no
+releases, so it requires `release_source`. F-Droid and IzzyOnDroid are `release_source`
 type `fdroid`, never inferred from `repository`. An omitted
 `prerelease_channel` excludes prereleases; a set value includes them and
 names their channel, which may be `main`.
@@ -914,6 +945,12 @@ type Error interface {
     Retryable() bool
 }
 
+type GitRemote struct {
+    Repository string // canonical value for zapstore.yaml: a bare naddr or a forge repository root
+    URL        string // what git is asked about: nostr://<naddr> or the HTTPS root
+    Nostr      bool   // a NIP-34 repository, served by ngit
+}
+
 var (
     ErrInvalidConfig        = errors.New("config is invalid")
     ErrSourceFailed         = errors.New("source failed")
@@ -932,6 +969,10 @@ var (
     ErrPublishRejected      = errors.New("relay publication rejected")
     ErrRateLimited          = errors.New("rate limited")
     ErrTemporaryFailure     = errors.New("temporary failure")
+
+    ErrNotRepository = errors.New("not a repository")
+    ErrGitMissing    = errors.New("git is not installed")
+    ErrUnreachable   = errors.New("repository is unreachable")
 )
 
 type BlobResult struct {
@@ -953,6 +994,8 @@ type RelayResult struct {
 }
 
 func LoadConfig(path string) (Config, error)
+func ParseGitRemote(repository string) (GitRemote, error)
+func Reachable(ctx context.Context, repository string) error
 func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*APK, error)
 func (apk *APK) Close() error
 func Check(ctx context.Context, config PublishConfig, apk *APK, options CheckOptions) (*CheckResult, error)
@@ -968,6 +1011,31 @@ func Publish(ctx context.Context, config PublishConfig, apk *APK, options Publis
 - `LoadConfig` validates without network and resolves local paths from the
   file's directory. A caller that builds `Config` directly uses absolute
   paths. The library never fetches repository configuration.
+- `ParseGitRemote` resolves a declared `repository` to the remote that serves
+  it. A NIP-34 repository is a pubkey and an identifier, so any value
+  carrying them names one and is reduced to a single canonical `naddr`: a
+  kind 30617 `naddr`, or an `npub` followed by the repository's path as
+  `<npub>/<identifier>` with optional relay hints between them, as in
+  `<npub>/relay.example.com/<identifier>`. The form may be bare, a `nostr://`
+  URL, or any viewer link, including one this code has never heard of, since
+  no viewer serves git at the address it shows and the host is never
+  consulted. A segment after the identifier is a viewer's own page and is
+  ignored. An `npub` with no identifier is refused by name, and a viewer's
+  short link that carries neither an `npub` nor an `naddr` is not a NIP-34
+  repository, because only that viewer can resolve it. Any other value must
+  be an HTTPS URL with no userinfo, no fragment, and no loopback host,
+  reduced to its repository root on GitHub, GitLab, and Gitea; any other host
+  is kept as written. A value that names no remote is `ErrNotRepository`.
+- `Reachable` lists that remote's refs. It carries no credentials and reads
+  no user git configuration, so it answers whether a reader can clone the
+  repository, not whether this machine can. It needs `git` on `PATH`, and
+  `git-remote-nostr` for a NIP-34 repository; without them the remote is
+  never asked and the error is `ErrGitMissing`, which is not a verdict on the
+  repository. A refusal is `ErrUnreachable`, including the credential prompt
+  a forge sends for a private or absent repository. A repository with no
+  branches or tags is reachable. `Timeout` is how long a listing may take:
+  90 seconds for a NIP-34 repository, which ngit asks of relays before it
+  reaches a server, and 20 for a forge.
 - `Fetch` takes `FetchConfig`, `Publish` takes `PublishConfig`. Each
   validates its argument and does not change it. Both need an options
   value: `FetchOptions{}` verifies with no progress; `PublishOptions{}`

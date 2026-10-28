@@ -22,6 +22,7 @@ import (
 	"github.com/zapstore/zsp/v2/internal/config"
 	"github.com/zapstore/zsp/v2/internal/identity"
 	nostrpkg "github.com/zapstore/zsp/v2/internal/nostr"
+	"github.com/zapstore/zsp/v2/internal/sanitize"
 	"github.com/zapstore/zsp/v2/internal/source"
 	"github.com/zapstore/zsp/v2/internal/ui"
 )
@@ -84,6 +85,13 @@ func runWizard(ctx context.Context) int {
 		run, err = wizardResolveRun(ctx, strings.TrimSpace(answer), defaultSource, local, localPath)
 		if err != nil {
 			return wizardError("App discovery stopped", err)
+		}
+		keep, err := wizardVerifyRepository(ctx, run.config.Fetch.Repository)
+		if err != nil {
+			return wizardError("App discovery stopped", err)
+		}
+		if !keep {
+			continue
 		}
 
 		spinner := ui.NewSpinner("Finding and inspecting APK releases...")
@@ -161,7 +169,7 @@ func runWizard(ctx context.Context) int {
 		}
 		if listed {
 			ui.WritePanel(os.Stdout, "success", "You're the verified developer of "+appName, nil, []string{
-				"That's all Zapstore needs. New releases from " + location + " keep appearing, now linked to your Nostr profile.",
+				wizardClaimedNote(location, wizardLocalRelease(run.config)),
 			})
 		} else {
 			ui.PrintInfo("Your proof goes out with the first release")
@@ -169,13 +177,14 @@ func runWizard(ctx context.Context) int {
 	}
 	defer state.close()
 
+	localSource := wizardLocalRelease(run.config)
 	steps.StartStep("🚀 Publish")
 	if listed {
-		ui.PrintInfo("Nothing to publish: Zapstore keeps " + appName + " up to date from " + location + ".")
+		ui.PrintInfo(wizardNothingToPublish(appName, location, localSource))
 	} else if code := wizardFirstRelease(ctx, run, selected, state, appName, version); code != 0 || !state.published {
 		return code
 	}
-	return wizardNextReleases(ctx, state, appName, run.wroteYAML, run.hadYAML)
+	return wizardNextReleases(ctx, state, appName, run.wroteYAML, run.hadYAML, localSource)
 }
 
 func isWizardCancel(err error) bool {
@@ -223,7 +232,7 @@ func loadWizardConfig(path string) (zsp.Config, string, error) {
 func wizardSourceDefault(cfg zsp.Config) string {
 	if source := cfg.Fetch.ReleaseSource; source != nil {
 		if source.LocalPath != "" {
-			return source.LocalPath
+			return sanitize.Path(source.LocalPath)
 		}
 		if source.URL != "" {
 			return source.URL
@@ -324,6 +333,62 @@ func parseWizardRepoConfig(data []byte, repository string) (zsp.Config, bool) {
 	return cfg, true
 }
 
+// wizardVerifyRepository asks git whether the repository about to be written
+// is there. An app whose repository cannot be read is listed as closed
+// source, so an unreachable one is kept only when the developer says it is
+// right. The answer is whether to keep it; false re-asks for the source.
+func wizardVerifyRepository(ctx context.Context, repository string) (bool, error) {
+	if repository == "" {
+		return true, nil
+	}
+	err := wizardProbeRepository(ctx, repository)
+	switch {
+	case err == nil:
+		return true, nil
+	case isWizardCancel(err) || ctx.Err() != nil:
+		return false, ctx.Err()
+	}
+	ui.WritePanel(os.Stderr, "warning", wizardRepositoryWarning(err),
+		[]ui.KeyValue{{Key: "Repository", Value: repository}},
+		[]string{sanitize.ErrMessage(err), "An app whose repository Zapstore can't read is listed as closed source"})
+	keep, err := ui.ConfirmBack(ctx, "Keep this repository?",
+		"No returns to the source, so you can correct it.", false)
+	if errors.Is(err, ui.ErrBack) {
+		return false, nil
+	}
+	return keep, err
+}
+
+// wizardProbeRepository lists the repository's refs under the time limit its
+// kind allows: a NIP-34 repository is asked of relays and takes longer than a
+// forge.
+func wizardProbeRepository(ctx context.Context, repository string) error {
+	remote, err := zsp.ParseGitRemote(repository)
+	if err != nil {
+		return err
+	}
+	probe, cancel := context.WithTimeout(ctx, remote.Timeout())
+	defer cancel()
+	spinner := ui.NewSpinner("Checking the repository " + repository + "...")
+	spinner.Start()
+	defer spinner.Stop()
+	return remote.Reachable(probe)
+}
+
+// wizardRepositoryWarning says what happened, which decides what the
+// developer can do about it: a probe that never ran is not a verdict on the
+// repository.
+func wizardRepositoryWarning(err error) string {
+	switch {
+	case errors.Is(err, zsp.ErrGitMissing):
+		return "Couldn't check the repository"
+	case errors.Is(err, zsp.ErrNotRepository):
+		return "Not a git repository"
+	default:
+		return "The repository didn't answer"
+	}
+}
+
 // wizardConfigFromSource turns the answer into a source: a local APK file or
 // directory, a forge repository, or any other release source URL.
 func wizardConfigFromSource(answer string) (zsp.FetchConfig, error) {
@@ -345,6 +410,11 @@ func wizardConfigFromSource(answer string) (zsp.FetchConfig, error) {
 		if strings.HasPrefix(answer, ".") || strings.HasPrefix(answer, "/") || strings.HasPrefix(answer, "~") {
 			return zsp.FetchConfig{}, fmt.Errorf("no file at %s", answer)
 		}
+	}
+	// A NIP-34 repository holds code, not releases, so it cannot answer this
+	// question. It belongs in zapstore.yaml beside a release source.
+	if remote, err := zsp.ParseGitRemote(answer); err == nil && remote.Nostr {
+		return zsp.FetchConfig{}, fmt.Errorf("a NIP-34 repository has no APK releases: give the APK file or its release URL, and keep %s as the repository in zapstore.yaml", remote.Repository)
 	}
 	value, err := validateSuggestionSource(answer)
 	if err != nil {
@@ -882,12 +952,12 @@ func wizardPublishNow(ctx context.Context, run wizardRun, selected *zsp.APK, sta
 }
 
 // wizardNextReleases is the last question: Zapstore publishes new releases
-// when RELAYS includes its relay, else the developer does; or the
-// developer's CI does. Esc on a CI/CD prompt returns to it.
-func wizardNextReleases(ctx context.Context, state *wizardIdentityState, appName string, wroteYAML, hadYAML bool) int {
-	zapstore := hasZapstoreRelay(relaysFromEnv())
+// when RELAYS includes its relay and the release source is public, else the
+// developer does; or the developer's CI does. Esc on a CI/CD prompt returns to it.
+func wizardNextReleases(ctx context.Context, state *wizardIdentityState, appName string, wroteYAML, hadYAML, local bool) int {
+	zapstore := hasZapstoreRelay(relaysFromEnv()) && !local
 	for {
-		choice, err := ui.SelectField("How should new releases of "+appName+" reach Zapstore?", "", wizardNextReleaseChoices(zapstore))
+		choice, err := ui.SelectField("How should new releases of "+appName+" reach Zapstore?", wizardLocalSourceNote(local), wizardNextReleaseChoices(zapstore))
 		if err != nil {
 			return wizardError("Setup stopped", err)
 		}
@@ -925,6 +995,32 @@ func wizardNextReleaseChoices(zapstore bool) []string {
 		return []string{"Let Zapstore publish them for you (recommended)", wizardChoiceCICD}
 	}
 	return []string{"Publish them yourself with zsp publish", wizardChoiceCICD}
+}
+
+// wizardLocalRelease reports a release source the indexer cannot fetch.
+func wizardLocalRelease(cfg zsp.Config) bool {
+	return cfg.Fetch.ReleaseSource != nil && cfg.Fetch.ReleaseSource.LocalPath != ""
+}
+
+func wizardClaimedNote(location string, local bool) string {
+	if local {
+		return "That's all Zapstore needs. Publish each new release with zsp publish, shown as developed by you."
+	}
+	return "That's all Zapstore needs. New releases from " + location + " keep appearing, now linked to your Nostr profile."
+}
+
+func wizardNothingToPublish(appName, location string, local bool) string {
+	if local {
+		return "Nothing to publish."
+	}
+	return "Nothing to publish: Zapstore keeps " + appName + " up to date from " + location + "."
+}
+
+func wizardLocalSourceNote(local bool) string {
+	if !local {
+		return ""
+	}
+	return "Zapstore publishes from a public release source. A file on this machine is not one."
 }
 
 // wizardDelegation names the CI's key as the delegate in a new proof. It
