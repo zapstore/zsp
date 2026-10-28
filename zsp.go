@@ -8,6 +8,7 @@ import (
 	_ "embed"
 	"io"
 
+	"github.com/zapstore/zsp/v2/internal/gitremote"
 	"github.com/zapstore/zsp/v2/internal/release"
 )
 
@@ -57,6 +58,8 @@ type (
 	// Error is an operation error that tells callers whether identical input
 	// may succeed when retried.
 	Error = release.Error
+	// GitRemote is the git remote behind a declared repository.
+	GitRemote = gitremote.Remote
 )
 
 // Public error classes support errors.Is classification.
@@ -79,6 +82,25 @@ var (
 	ErrRateLimited          = release.ErrRateLimited
 	ErrTemporaryFailure     = release.ErrTemporaryFailure
 )
+
+// Repository remote error classes support errors.Is classification.
+var (
+	ErrNotRepository = gitremote.ErrNotRepository
+	ErrGitMissing    = gitremote.ErrGitMissing
+	ErrUnreachable   = gitremote.ErrUnreachable
+)
+
+// ParseGitRemote resolves a declared repository to the git remote that serves
+// it: a NIP-34 naddr, wherever it appears, or an HTTPS forge repository root.
+func ParseGitRemote(repository string) (GitRemote, error) {
+	return gitremote.Parse(repository)
+}
+
+// Reachable reports whether the remote behind repository answers a ref
+// listing. A failure is ErrNotRepository, ErrGitMissing, or ErrUnreachable.
+func Reachable(ctx context.Context, repository string) error {
+	return gitremote.Reachable(ctx, repository)
+}
 
 // ParseConfig reads a complete zapstore.yaml document.
 func ParseConfig(r io.Reader) (Config, error) { return release.ParseConfig(r) }

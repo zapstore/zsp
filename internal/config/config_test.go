@@ -109,6 +109,18 @@ func TestParse(t *testing.T) {
 			},
 		},
 		{
+			name: "nip-34 viewer link becomes its naddr",
+			yaml: `
+release_source: ./app.apk
+repository: https://gitworkshop.dev/npub1w4uswmv6lu9yel005l3qgheysmr7tk9uvwluddznju3nuxalevvs2d0jr5/relay.ngit.dev/nostr-agents
+`,
+			check: func(c *Config) bool {
+				return c.Repository == "naddr1qqxxummnw3ez6ct8v4h8gucpz3mhxue69uhhyetvv9ujumn8d96zuer9wcpzqateqake4lc2fn77lflzq30jfpk8uhvtccalc66989er8cdmljceqvzqqqrhnyvqrmeh" &&
+					c.NIP34Repo != nil && c.NIP34Repo.Identifier == "nostr-agents" &&
+					len(c.NIP34Repo.Relays) == 1 && c.NIP34Repo.Relays[0] == "wss://relay.ngit.dev"
+			},
+		},
+		{
 			name: "minimal local",
 			yaml: `release_source: ./build/app.apk`,
 			check: func(c *Config) bool {

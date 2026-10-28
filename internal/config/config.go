@@ -286,21 +286,21 @@ func Parse(r io.Reader) (*Config, error) {
 	return &cfg, nil
 }
 
-// parseRepository parses the repository field, which can be a URL or NIP-34 naddr.
+// parseRepository parses the repository field, which can be a forge URL or a
+// NIP-34 repository in any of its forms. A NIP-34 repository is kept as its
+// canonical naddr, so one listing spells it one way however it was written.
 func (c *Config) parseRepository() error {
 	if c.Repository == "" {
 		return nil
 	}
-
-	// Check if it's an naddr
-	if strings.HasPrefix(c.Repository, "naddr1") {
-		pointer, err := ParseNaddr(c.Repository)
-		if err != nil {
-			return fmt.Errorf("invalid repository naddr: %w", err)
-		}
-		c.NIP34Repo = pointer
+	naddr, pointer, ok, err := ParseNostrRepository(c.Repository)
+	if !ok {
+		return nil
 	}
-
+	if err != nil {
+		return fmt.Errorf("invalid repository: %w", err)
+	}
+	c.Repository, c.NIP34Repo = naddr, pointer
 	return nil
 }
 
@@ -386,6 +386,128 @@ func ParseNaddr(naddrStr string) (*NIP34RepoPointer, error) {
 		Identifier: ep.Identifier,
 		Relays:     ep.Relays,
 	}, nil
+}
+
+// EncodeNaddr writes a NIP-34 repository pointer as an naddr, so a pointer
+// read from any other form has one canonical spelling.
+func EncodeNaddr(pointer *NIP34RepoPointer) (string, error) {
+	if pointer == nil || pointer.Pubkey == "" || pointer.Identifier == "" {
+		return "", fmt.Errorf("a repository pointer needs a pubkey and an identifier")
+	}
+	return nip19.EncodeEntity(pointer.Pubkey, 30617, pointer.Identifier, pointer.Relays)
+}
+
+// ParseNostrRepository reads a NIP-34 repository from value, however it is
+// written: the naddr itself, ngit's `nostr://<npub>/<identifier>` with or
+// without relay hints, or any viewer link carrying either. The host is never
+// consulted, so a viewer this code has never heard of works. It returns the
+// canonical naddr and its pointer. ok is false when value holds neither an
+// naddr nor an npub; it is true with an error when one is there and the rest
+// does not name a repository.
+func ParseNostrRepository(value string) (naddr string, pointer *NIP34RepoPointer, ok bool, err error) {
+	value = strings.TrimSpace(value)
+	if found, has := findBech32(value, "naddr1"); has {
+		pointer, err := ParseNaddr(found)
+		if err != nil {
+			return "", nil, true, err
+		}
+		return found, pointer, true, nil
+	}
+	npub, has := findBech32(value, "npub1")
+	if !has {
+		return "", nil, false, nil
+	}
+	pointer, err = pointerFromPath(npub, value)
+	if err != nil {
+		return "", nil, true, err
+	}
+	naddr, err = EncodeNaddr(pointer)
+	if err != nil {
+		return "", nil, true, err
+	}
+	return naddr, pointer, true, nil
+}
+
+// pointerFromPath reads the repository path that follows an npub:
+// `<npub>/<identifier>`, with relay hints between them as in
+// `<npub>/relay.example.com/<identifier>`.
+func pointerFromPath(npub, value string) (*NIP34RepoPointer, error) {
+	pubkey, err := decodeNpub(npub)
+	if err != nil {
+		return nil, err
+	}
+	rest := value[strings.Index(strings.ToLower(value), npub)+len(npub):]
+	if cut := strings.IndexAny(rest, "?#"); cut >= 0 {
+		rest = rest[:cut]
+	}
+	rest = strings.Trim(rest, "/")
+	var relays []string
+	for _, segment := range strings.Split(rest, "/") {
+		if segment == "" {
+			continue
+		}
+		// A relay hint is a host and an identifier is a name. Where either
+		// reading is possible, the last segment is the identifier: a viewer
+		// may append a page after it, never after a hint.
+		if strings.Contains(segment, ".") && segment != lastSegment(rest) {
+			relays = append(relays, "wss://"+segment)
+			continue
+		}
+		return &NIP34RepoPointer{Pubkey: pubkey, Identifier: segment, Relays: relays}, nil
+	}
+	return nil, fmt.Errorf("npub names no repository: add the identifier, as %s/<repository>", npub)
+}
+
+func lastSegment(path string) string {
+	if index := strings.LastIndex(path, "/"); index >= 0 {
+		return path[index+1:]
+	}
+	return path
+}
+
+// decodeNpub returns the hex public key of an npub.
+func decodeNpub(npub string) (string, error) {
+	prefix, data, err := nip19.Decode(npub)
+	if err != nil {
+		return "", fmt.Errorf("decode npub: %w", err)
+	}
+	pubkey, ok := data.(string)
+	if prefix != "npub" || !ok || pubkey == "" {
+		return "", fmt.Errorf("expected npub, got %s", prefix)
+	}
+	return pubkey, nil
+}
+
+// findBech32 returns the first bech32 string in value that starts with
+// prefix. A URL carries it in a path segment, so the token ends at the first
+// character outside the charset.
+func findBech32(value, prefix string) (string, bool) {
+	lowered := strings.ToLower(value)
+	for start := 0; ; {
+		index := strings.Index(lowered[start:], prefix)
+		if index < 0 {
+			return "", false
+		}
+		index += start
+		end := index + len(prefix)
+		for end < len(value) && isBech32(value[end]) {
+			end++
+		}
+		if token := lowered[index:end]; len(token) > len(prefix) {
+			return token, true
+		}
+		start = end
+	}
+}
+
+// isBech32 reports whether c is a bech32 data character. The charset omits
+// "1", "b", "i", and "o", so a path segment after the token is not read as
+// part of it.
+func isBech32(c byte) bool {
+	if c >= 'A' && c <= 'Z' {
+		c += 'a' - 'A'
+	}
+	return strings.IndexByte("qpzry9x8gf2tvdw0s3jn54khce6mua7l", c) >= 0
 }
 
 // parseReleaseSource reads the release_source field, which is a string or a

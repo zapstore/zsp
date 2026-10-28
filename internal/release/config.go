@@ -200,15 +200,16 @@ func fetchInternalConfig(config FetchConfig) (*internalconfig.Config, error) {
 		Repository: config.Repository, ReleaseFilter: config.ReleaseFilter, Match: config.Match,
 		PrereleaseChannel: config.PrereleaseChannel, BaseDir: config.baseDir,
 	}
-	if strings.HasPrefix(config.Repository, "naddr1") {
+	// A NIP-34 repository is written in several forms and kept as its naddr.
+	// It holds code, not releases, so it never supplies the APK.
+	if naddr, pointer, ok, err := internalconfig.ParseNostrRepository(config.Repository); ok {
+		if err != nil {
+			return nil, wrapOperationError(ErrInvalidConfig, err, false, "validate repository"+causeDetail(err))
+		}
 		if config.ReleaseSource == nil {
 			return nil, operationErr(ErrInvalidConfig, false, "a NIP-34 repository requires release_source")
 		}
-		pointer, err := internalconfig.ParseNaddr(config.Repository)
-		if err != nil {
-			return nil, wrapOperationError(ErrInvalidConfig, err, false, "validate repository naddr"+causeDetail(err))
-		}
-		internal.NIP34Repo = pointer
+		internal.Repository, internal.NIP34Repo = naddr, pointer
 	}
 	if config.ReleaseSource != nil {
 		releaseSource, err := internalconfig.NormalizeReleaseSource(*toInternalReleaseSource(config.ReleaseSource))
