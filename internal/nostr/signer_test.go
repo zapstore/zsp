@@ -3,16 +3,20 @@ package nostr
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 	gonostr "github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
+	"github.com/nbd-wtf/go-nostr/nip44"
 	"github.com/zapstore/zsp/v2/internal/sanitize"
 )
 
@@ -288,6 +292,140 @@ func TestBunkerSignerCloseIsIdempotentAndEndsPool(t *testing.T) {
 	var missing *BunkerSigner
 	if err := missing.Close(); err != nil {
 		t.Fatalf("nil Close: %v", err)
+	}
+}
+
+// The relay is already connected for every sign after the handshake. Signing
+// several events checks that a later request is not lost.
+func TestBunkerSignerSignsOnAnOpenRelay(t *testing.T) {
+	secret := gonostr.GeneratePrivateKey()
+	pub, err := gonostr.GetPublicKey(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientPub, err := gonostr.GetPublicKey(localBunkerClientKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := nip44.GenerateConversationKey(clientPub, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sub string
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+			if err != nil {
+				return
+			}
+			defer conn.Close(websocket.StatusNormalClosure, "")
+			ctx := r.Context()
+			for {
+				var msg []json.RawMessage
+				if err := wsjson.Read(ctx, conn, &msg); err != nil || len(msg) < 2 {
+					return
+				}
+				var kind string
+				if json.Unmarshal(msg[0], &kind) != nil {
+					return
+				}
+				switch kind {
+				case "REQ":
+					if json.Unmarshal(msg[1], &sub) != nil {
+						return
+					}
+					_ = wsjson.Write(ctx, conn, []any{"EOSE", sub})
+				case "EVENT":
+					var ev gonostr.Event
+					if json.Unmarshal(msg[1], &ev) != nil {
+						return
+					}
+					plain, err := nip44.Decrypt(ev.Content, conversation)
+					if err != nil {
+						return
+					}
+					var req struct {
+						ID     string   `json:"id"`
+						Method string   `json:"method"`
+						Params []string `json:"params"`
+					}
+					if json.Unmarshal([]byte(plain), &req) != nil {
+						return
+					}
+					var result string
+					switch req.Method {
+					case "connect":
+						result = "ack"
+					case "get_public_key":
+						result = pub
+					case "sign_event":
+						if len(req.Params) != 1 {
+							return
+						}
+						var signed gonostr.Event
+						if json.Unmarshal([]byte(req.Params[0]), &signed) != nil || signed.Sign(secret) != nil {
+							return
+						}
+						raw, err := json.Marshal(signed)
+						if err != nil {
+							return
+						}
+						result = string(raw)
+					default:
+						return
+					}
+					body, err := json.Marshal(struct {
+						ID     string `json:"id"`
+						Result string `json:"result"`
+					}{req.ID, result})
+					if err != nil {
+						return
+					}
+					enc, err := nip44.Encrypt(string(body), conversation)
+					if err != nil {
+						return
+					}
+					reply := gonostr.Event{
+						Kind:      gonostr.KindNostrConnect,
+						CreatedAt: gonostr.Now(),
+						Content:   enc,
+						Tags:      gonostr.Tags{{"p", clientPub}},
+					}
+					if reply.Sign(secret) != nil {
+						return
+					}
+					_ = wsjson.Write(ctx, conn, []any{"OK", ev.ID, true, ""})
+					_ = wsjson.Write(ctx, conn, []any{"EVENT", sub, reply})
+				}
+			}
+		}),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	raw := "bunker://" + pub + "?relay=" + url.QueryEscape("ws://"+ln.Addr().String()) + "&secret=s"
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	signer, err := NewBunkerSigner(ctx, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = signer.Close() })
+
+	for range 3 {
+		ev := &gonostr.Event{Kind: 1, CreatedAt: gonostr.Now(), Content: "hi"}
+		if err := signer.Sign(ctx, ev); err != nil {
+			t.Fatal(err)
+		}
+		if ev.PubKey != pub {
+			t.Fatalf("pubkey = %s, want %s", ev.PubKey, pub)
+		}
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -11,10 +12,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip04"
 	"github.com/nbd-wtf/go-nostr/nip19"
+	"github.com/nbd-wtf/go-nostr/nip44"
 	"github.com/nbd-wtf/go-nostr/nip46"
 	"github.com/zapstore/zsp/v2/internal/sanitize"
 )
@@ -144,11 +149,24 @@ var ErrBunkerSecretUsed = errors.New("this bunker URL's secret appears to have b
 
 // BunkerSigner signs events via NIP-46 remote signer. It owns the relay pool
 // and subscription behind the bunker connection; Close releases them.
+//
+// It does not use nip46.BunkerClient. That client's RPC signals "the relay is
+// connected" on an unbuffered channel with a non-blocking send. When the relay
+// is already open the send can happen before RPC starts waiting, the signal is
+// dropped, and RPC waits until ctx ends. The indexer publish context has no
+// deadline, so one lost signal stops the indexer. The reply is delivered on a
+// buffered channel here, and the reader never blocks on it.
 type BunkerSigner struct {
-	bunker    *nip46.BunkerClient
-	pool      *nostr.SimplePool
-	cancel    context.CancelFunc
-	publicKey string
+	pool         *nostr.SimplePool
+	cancel       context.CancelFunc
+	publicKey    string
+	clientKey    string
+	target       string
+	relays       []string
+	conversation [32]byte
+	sharedSecret []byte
+	listeners    sync.Map // request id -> chan nip46.Response, buffer 1
+	serial       atomic.Uint64
 }
 
 // NewBunkerSigner creates a signer from a bunker:// URL. The connection
@@ -172,23 +190,52 @@ func NewBunkerSigner(ctx context.Context, bunkerURL string) (*BunkerSigner, erro
 	if err != nil {
 		return nil, newOpError("bunker client key", err)
 	}
-	// nip46.RPC waits until the context ends when every relay dial fails.
-	// The CLI context ends on SIGINT, so a stopped hotbox would hang publish.
+	// A closed local bunker fails here. The dial has its own short timeout, so a
+	// stopped hotbox does not wait out the caller's context.
 	if err := probeBunkerRelays(ctx, bunkerURL); err != nil {
 		return nil, newOpError("connect to bunker", err)
 	}
 
-	// nip46.NewBunker ties its subscription to the context it is given, so it
-	// gets the signer's own context, not the handshake's.
+	// The subscription outlives the handshake. Canceling the handshake context
+	// must not tear it down.
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	pool := nostr.NewSimplePool(runCtx)
-	signer := &BunkerSigner{pool: pool, cancel: cancel}
-	signer.bunker = nip46.NewBunker(runCtx, clientSecretKey, targetPubkey, bunkerRelays(bunkerURL), pool, func(string) {})
-
+	clientPublicKey, err := nostr.GetPublicKey(clientSecretKey)
+	if err != nil {
+		cancel()
+		return nil, newOpError("bunker client key", err)
+	}
+	conversation, err := nip44.GenerateConversationKey(targetPubkey, clientSecretKey)
+	if err != nil {
+		cancel()
+		return nil, newOpError("bunker conversation key", err)
+	}
+	sharedSecret, err := nip04.ComputeSharedSecret(targetPubkey, clientSecretKey)
+	if err != nil {
+		cancel()
+		return nil, newOpError("bunker conversation key", err)
+	}
+	signer := &BunkerSigner{
+		pool:         nostr.NewSimplePool(runCtx),
+		cancel:       cancel,
+		clientKey:    clientSecretKey,
+		target:       targetPubkey,
+		relays:       bunkerRelays(bunkerURL),
+		conversation: conversation,
+		sharedSecret: sharedSecret,
+	}
 	handshakeCtx, cancelHandshake := context.WithTimeout(ctx, bunkerTimeout)
 	defer cancelHandshake()
 
-	_, err = signer.bunker.RPC(handshakeCtx, "connect", []string{targetPubkey, bunkerURLSecret(bunkerURL)})
+	// The reply to connect can arrive as soon as the request is published.
+	// Wait until the relay has stored the subscription first.
+	select {
+	case <-signer.listen(runCtx, clientPublicKey):
+	case <-handshakeCtx.Done():
+		signer.Close()
+		return nil, newOpError("connect to bunker", handshakeCtx.Err())
+	}
+
+	_, err = signer.rpc(handshakeCtx, "connect", []string{targetPubkey, bunkerURLSecret(bunkerURL)})
 	// An "already connected" reply means the secret was already used, which is
 	// fine when this client key made the original connection.
 	if err != nil && !replyContains(err, "already connected") {
@@ -196,7 +243,7 @@ func NewBunkerSigner(ctx context.Context, bunkerURL string) (*BunkerSigner, erro
 		return nil, newOpError("connect to bunker", preferContextErr(handshakeCtx, err))
 	}
 
-	pubkey, err := signer.bunker.GetPublicKey(handshakeCtx)
+	pubkey, err := signer.rpc(handshakeCtx, "get_public_key", nil)
 	if err != nil {
 		signer.Close()
 		err = preferContextErr(handshakeCtx, err)
@@ -436,10 +483,142 @@ func (s *BunkerSigner) PublicKey() string {
 
 func (s *BunkerSigner) Sign(ctx context.Context, event *nostr.Event) error {
 	event.PubKey = s.publicKey
-	if err := s.bunker.SignEvent(ctx, event); err != nil {
+	body, err := json.Marshal(event)
+	if err != nil {
+		return newOpError("sign event", err)
+	}
+	resp, err := s.rpc(ctx, "sign_event", []string{string(body)})
+	if err != nil {
 		return newOpError("sign event", preferContextErr(ctx, err))
 	}
+	if err := json.Unmarshal([]byte(resp), event); err != nil {
+		return newOpError("sign event", err)
+	}
+	if !event.CheckID() {
+		return newOpError("sign event", errors.New("bunker returned an event whose id does not match"))
+	}
+	if ok, err := event.CheckSignature(); !ok {
+		if err == nil {
+			err = errors.New("invalid signature")
+		}
+		return newOpError("sign event", err)
+	}
 	return nil
+}
+
+// listen reads NIP-46 responses until ctx ends. The returned channel is
+// closed when the relay reports the subscription is stored. A reply is
+// delivered with a non-blocking send: the request channel has a buffer of
+// one, and a caller that already gave up must not stall this loop.
+func (s *BunkerSigner) listen(ctx context.Context, clientPublicKey string) <-chan struct{} {
+	since := nostr.Now()
+	stored := make(chan struct{})
+	events := s.pool.SubscribeManyNotifyEOSE(ctx, s.relays, nostr.Filter{
+		Tags:  nostr.TagMap{"p": []string{clientPublicKey}},
+		Kinds: []int{nostr.KindNostrConnect},
+		Since: &since,
+	}, stored)
+	go func() {
+		for ie := range events {
+			if ie.Event == nil || ie.Kind != nostr.KindNostrConnect {
+				continue
+			}
+			plain, err := nip44.Decrypt(ie.Content, s.conversation)
+			if err != nil {
+				plain, err = nip04.Decrypt(ie.Content, s.sharedSecret)
+				if err != nil {
+					continue
+				}
+			}
+			var resp nip46.Response
+			if json.Unmarshal([]byte(plain), &resp) != nil || resp.ID == "" {
+				continue
+			}
+			waiter, ok := s.listeners.Load(resp.ID)
+			if !ok {
+				continue
+			}
+			select {
+			case waiter.(chan nip46.Response) <- resp:
+			default:
+			}
+		}
+	}()
+	return stored
+}
+
+// rpc sends one NIP-46 request and waits for the matching response.
+func (s *BunkerSigner) rpc(ctx context.Context, method string, params []string) (string, error) {
+	if len(s.relays) == 0 {
+		return "", errors.New("bunker URL has no relay")
+	}
+	id := fmt.Sprintf("zsp-%d", s.serial.Add(1))
+	req, err := json.Marshal(nip46.Request{ID: id, Method: method, Params: params})
+	if err != nil {
+		return "", err
+	}
+	content, err := nip44.Encrypt(string(req), s.conversation)
+	if err != nil {
+		return "", err
+	}
+	evt := nostr.Event{
+		Content:   content,
+		CreatedAt: nostr.Now(),
+		Kind:      nostr.KindNostrConnect,
+		Tags:      nostr.Tags{{"p", s.target}},
+	}
+	if err := evt.Sign(s.clientKey); err != nil {
+		return "", err
+	}
+
+	waiter := make(chan nip46.Response, 1)
+	s.listeners.Store(id, waiter)
+	defer s.listeners.Delete(id)
+
+	ready := make(chan struct{}, 1)
+	failed := make(chan struct{})
+	var remaining atomic.Int32
+	var connected atomic.Bool
+	remaining.Store(int32(len(s.relays)))
+	for _, raw := range s.relays {
+		go func(url string) {
+			relay, err := s.pool.EnsureRelay(url)
+			if err != nil {
+				if remaining.Add(-1) == 0 && !connected.Load() {
+					close(failed)
+				}
+				return
+			}
+			connected.Store(true)
+			select {
+			case ready <- struct{}{}:
+			default:
+			}
+			_ = relay.Publish(ctx, evt)
+		}(raw)
+	}
+
+	select {
+	case <-ready:
+	case <-failed:
+		select {
+		case <-ready:
+		default:
+			return "", errors.New("couldn't connect to any relay")
+		}
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case resp := <-waiter:
+		if resp.Error != "" {
+			return "", fmt.Errorf("response error: %s", resp.Error)
+		}
+		return resp.Result, nil
+	}
 }
 
 // Close ends the bunker websocket and its relay subscription. It is safe to
