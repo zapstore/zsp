@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -264,6 +265,51 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 	if err != nil || !acceptedPublication(forcedResult) || forcedResult.Events.Application == "" {
 		t.Fatalf("overwrite application: result=%+v error=%v", forcedResult, err)
 	}
+
+	// The catalog key publishes only the next release. It names the developer's
+	// kind 32267, and that event stays the only one for the app.
+	catalogSecret := strings.Repeat("0", 63) + "1"
+	catalogPubkey, err := gonostr.GetPublicKey(catalogSecret)
+	if err != nil || catalogPubkey != fixturePubkey {
+		t.Fatalf("catalog key: %s %v", catalogPubkey, err)
+	}
+	joinAPK := buildE2EAPK(t, apkDirectory, keystore, 48)
+	joinFetch := config.Fetch
+	joinSource := *joinFetch.ReleaseSource
+	joinSource.LocalPath = joinAPK
+	joinFetch.ReleaseSource = &joinSource
+	joinCandidate := fetchOneE2EAPK(t, joinFetch)
+	t.Setenv("SIGN_WITH", nsecKey(t, catalogSecret))
+	joinResult, err := zsp.Publish(t.Context(), config.Publish, joinCandidate, zsp.PublishOptions{
+		BlossomURL:      blossomURL,
+		Relays:          []string{policySocket},
+		SkipProofCheck:  true,
+		JoinExistingApp: true,
+	})
+	if err != nil || !acceptedPublication(joinResult) {
+		t.Fatalf("join existing app: result=%+v error=%v", joinResult, err)
+	}
+	if joinResult.Events.Application != "" {
+		t.Fatalf("join existing app published an application event %q", joinResult.Events.Application)
+	}
+	assertJoinedRelease(t, relayURL, joinResult.Events.Release, ownerPubkey)
+
+	// A whole listing from the catalog key would replace the developer's app
+	// event, so the relay refuses it.
+	wholeAPK := buildE2EAPK(t, apkDirectory, keystore, 49)
+	wholeFetch := config.Fetch
+	wholeSource := *wholeFetch.ReleaseSource
+	wholeSource.LocalPath = wholeAPK
+	wholeFetch.ReleaseSource = &wholeSource
+	whole := fetchOneE2EAPK(t, wholeFetch)
+	if _, err := zsp.Publish(t.Context(), config.Publish, whole, zsp.PublishOptions{
+		BlossomURL:     blossomURL,
+		Relays:         []string{policySocket},
+		SkipProofCheck: true,
+	}); err == nil {
+		t.Fatal("the relay accepted a whole catalog listing over the developer's app event")
+	}
+	assertJoinedRelease(t, relayURL, joinResult.Events.Release, ownerPubkey)
 }
 
 func unusedLoopbackAddress(t *testing.T) string {
@@ -550,6 +596,49 @@ func assertRelayPublication(
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("relay events: applications=%d releases=%d assets=%d", len(applications), len(releases), len(assets))
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+func assertJoinedRelease(t *testing.T, relayURL, releaseID, author string) {
+	t.Helper()
+	const appID = "com.example.zspe2e"
+	want := "32267:" + author + ":" + appID
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		relay, err := gonostr.RelayConnect(ctx, relayURL)
+		if err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		releases, err := relay.QuerySync(ctx, gonostr.Filter{IDs: []string{releaseID}})
+		if err != nil {
+			relay.Close()
+			cancel()
+			t.Fatal(err)
+		}
+		apps, err := relay.QuerySync(ctx, gonostr.Filter{
+			Kinds: []int{kindAppMetadata},
+			Tags:  gonostr.TagMap{"d": []string{appID}},
+		})
+		relay.Close()
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var named string
+		if len(releases) == 1 {
+			if tag := releases[0].Tags.Find("a"); tag != nil && len(tag) >= 2 {
+				named = tag[1]
+			}
+		}
+		if named == want && len(apps) == 1 && apps[0].PubKey == author {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("release %s names %q, %d app events; want %s and one app event from the developer", releaseID, named, len(apps), want)
 		}
 		time.Sleep(200 * time.Millisecond)
 	}

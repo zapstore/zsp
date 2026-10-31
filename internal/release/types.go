@@ -105,6 +105,15 @@ type APK struct {
 	LineageHashes   []string `json:"lineage_hashes,omitempty"`
 	Architectures   []string `json:"architectures"`
 
+	// CertificateSubject is the signing certificate's subject as Go prints it:
+	// RDNs most specific first, joined by commas without spaces.
+	CertificateSubject string `json:"certificate_subject,omitempty"`
+	// SourceStampHash and FrostingHash are the SHA-256 (hex, lowercase) of the
+	// signing block's source stamp certificate and Play frosting key, or empty.
+	// Google Play adds both to what it delivers.
+	SourceStampHash string `json:"source_stamp_hash,omitempty"`
+	FrostingHash    string `json:"frosting_hash,omitempty"`
+
 	ownership   *apkOwnership
 	fetchConfig FetchConfig
 	verified    verifiedAPK
@@ -163,11 +172,18 @@ type Progress struct {
 
 // PublishOptions controls proof checks, event construction, and publication.
 type PublishOptions struct {
-	Channel              string         `json:"channel"`
-	BlossomURL           string         `json:"blossom_url"`
-	Relays               []string       `json:"relays"`
-	Commit               string         `json:"commit"`
-	SkipAppEvent         bool           `json:"skip_app_event"`
+	Channel      string   `json:"channel"`
+	BlossomURL   string   `json:"blossom_url"`
+	Relays       []string `json:"relays"`
+	Commit       string   `json:"commit"`
+	SkipAppEvent bool     `json:"skip_app_event"`
+	// JoinExistingApp publishes only the release when the relays already hold
+	// a kind 32267 for the app from another key: the release's `a` tag names
+	// that event, so its metadata and its comment coordinate stay. The relay
+	// accepts it only when that key is the app's active developer. With no
+	// such event the app event is published as usual. A failed lookup stops
+	// the publish.
+	JoinExistingApp      bool           `json:"join_existing_app"`
 	SkipMediaCompression bool           `json:"skip_media_compression"`
 	SkipProofCheck       bool           `json:"skip_proof_check"`
 	OverwriteRelease     bool           `json:"overwrite_release"`

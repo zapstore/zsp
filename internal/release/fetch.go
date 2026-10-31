@@ -157,22 +157,29 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 		}
 		ownership := newAPKOwnership(path, tempDir, managed)
 		ownership.clearHTTPCache = clearHTTPCache
+		var subject string
+		if parsed.Certificate != nil {
+			subject = parsed.Certificate.Subject.String()
+		}
 		results = append(results, &APK{
-			Hash:            parsed.SHA256,
-			Filename:        candidate.Name,
-			SourceURL:       eventSourceURL,
-			Size:            parsed.FileSize,
-			AppID:           parsed.PackageID,
-			VersionName:     parsed.VersionName,
-			VersionCode:     parsed.VersionCode,
-			MinSDK:          parsed.MinSDK,
-			TargetSDK:       parsed.TargetSDK,
-			Name:            parsed.Label,
-			CertificateHash: parsed.CertFingerprint,
-			LineageHashes:   append([]string(nil), parsed.SigningAncestors...),
-			Architectures:   append([]string(nil), parsed.Architectures...),
-			ownership:       ownership,
-			fetchConfig:     cloneFetchConfig(config),
+			Hash:               parsed.SHA256,
+			Filename:           candidate.Name,
+			SourceURL:          eventSourceURL,
+			Size:               parsed.FileSize,
+			AppID:              parsed.PackageID,
+			VersionName:        parsed.VersionName,
+			VersionCode:        parsed.VersionCode,
+			MinSDK:             parsed.MinSDK,
+			TargetSDK:          parsed.TargetSDK,
+			Name:               parsed.Label,
+			CertificateHash:    parsed.CertFingerprint,
+			LineageHashes:      append([]string(nil), parsed.SigningAncestors...),
+			Architectures:      append([]string(nil), parsed.Architectures...),
+			CertificateSubject: subject,
+			SourceStampHash:    parsed.SourceStampHash,
+			FrostingHash:       parsed.FrostingHash,
+			ownership:          ownership,
+			fetchConfig:        cloneFetchConfig(config),
 			verified: verifiedAPK{
 				hash:            parsed.SHA256,
 				filename:        candidate.Name,

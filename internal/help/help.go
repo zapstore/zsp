@@ -262,7 +262,9 @@ func UtilsHelp() string {
 
 	b.WriteString(renderGreyDark("  extract-apk prints metadata for one signed APK as JSON. The icon is") + "\n")
 	b.WriteString(renderGreyDark("  standard base64 in the icon field. --icon-path writes that icon to a") + "\n")
-	b.WriteString(renderGreyDark("  file and leaves icon out of the JSON.") + "\n\n")
+	b.WriteString(renderGreyDark("  file and leaves icon out of the JSON. certificate_subject is the signer's") + "\n")
+	b.WriteString(renderGreyDark("  subject. source_stamp_hash and frosting_hash appear when the signing") + "\n")
+	b.WriteString(renderGreyDark("  block has a source stamp or Play frosting.") + "\n\n")
 	b.WriteString(renderGreyDark("  find-unsigned walks a directory and prints each valid unsigned APK,") + "\n")
 	b.WriteString(renderGreyDark("  one path per line. A signed or invalid file is omitted.") + "\n\n")
 

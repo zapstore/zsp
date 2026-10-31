@@ -325,8 +325,8 @@ func (p *Publisher) FetchIdentityProofs(ctx context.Context, certHashes []string
 }
 
 // FetchApplicationEvents returns deduplicated application events for appID on
-// every completed relay query. It names no author: a catalog relay serves only
-// the selected listing, so the caller filters by signer.
+// every completed relay query. It names no author: a catalog relay serves every
+// signer's listing, so the caller filters by signer.
 func (p *Publisher) FetchApplicationEvents(ctx context.Context, appID string) ([]*nostr.Event, []error, error) {
 	byID := make(map[string]*nostr.Event)
 	var warnings []error
@@ -507,21 +507,17 @@ type PublishedReleases struct {
 	// VersionCode and ReleasedAt come from the authorized publishers.
 	VersionCode int64
 	ReleasedAt  time.Time
-	// OtherVersionCode comes from any other signer, such as the catalog key
-	// when its listing is the one a catalog relay selects.
-	OtherVersionCode int64
 }
 
 // FetchPublishedReleases reads the releases and assets for appID by app id
-// alone: a catalog relay serves only the selected listing, whoever signed it.
-// A release links assets from any authorized publisher, so a delegate's
+// alone: a catalog relay serves every signer's listing, so the caller filters
+// by signer. A release links assets from any authorized publisher, so a delegate's
 // release can link an owner's asset.
 func (p *Publisher) FetchPublishedReleases(ctx context.Context, publishers map[string]struct{}, appID string, certificateHashes []string, channel string) (PublishedReleases, []error, error) {
 	if channel == "" {
 		channel = "main"
 	}
 	own := make(map[string]*nostr.Event)
-	other := make(map[string]*nostr.Event)
 	var warnings []error
 	completed := 0
 	for _, relayURL := range p.relayURLs {
@@ -548,8 +544,6 @@ func (p *Publisher) FetchPublishedReleases(ctx context.Context, publishers map[s
 				}
 				if _, ok := publishers[event.PubKey]; ok {
 					own[event.ID] = event
-				} else {
-					other[event.ID] = event
 				}
 			}
 		}
@@ -562,7 +556,6 @@ func (p *Publisher) FetchPublishedReleases(ctx context.Context, publishers map[s
 	}
 	var result PublishedReleases
 	result.VersionCode, result.ReleasedAt = highestLinkedReleaseVersion(own, certificateHashes, channel)
-	result.OtherVersionCode, _ = highestLinkedReleaseVersion(other, certificateHashes, channel)
 	return result, warnings, nil
 }
 

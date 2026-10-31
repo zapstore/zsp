@@ -116,7 +116,6 @@ func Check(ctx context.Context, config PublishConfig, candidate *APK, options Ch
 	}
 	result.PublishedVersionCode = published.VersionCode
 	result.Warnings = append(result.Warnings, safeRelayQueryWarnings("published release", releaseWarnings)...)
-	result.Warnings = append(result.Warnings, hiddenListingWarning(verified.versionCode, published.OtherVersionCode)...)
 	return result, nil
 }
 

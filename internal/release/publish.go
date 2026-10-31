@@ -153,7 +153,6 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 		result.Warnings = append(result.Warnings, safeRelayQueryWarnings("published release", warnings)...)
 		publishedVersionCode = published.VersionCode
 		existingReleaseTimestamp = published.ReleasedAt
-		result.Warnings = append(result.Warnings, hiddenListingWarning(parsed.VersionCode, published.OtherVersionCode)...)
 		if parsed.VersionCode < publishedVersionCode {
 			return nil, operationErr(ErrReleaseDowngrade, false, "release downgrade from %d to %d", publishedVersionCode, parsed.VersionCode)
 		}
@@ -172,6 +171,24 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 	}
 	result.Warnings = append(result.Warnings, metadataWarnings...)
 	var media mediaPlan
+	var joinedAuthor string
+	if options.JoinExistingApp && !options.SkipAppEvent {
+		appEvents, appWarnings, appErr := publisher.FetchApplicationEvents(ctx, parsed.PackageID)
+		result.Warnings = append(result.Warnings, safeRelayQueryWarnings("application event", appWarnings)...)
+		if appErr != nil {
+			// Publishing the app event without knowing would replace the
+			// developer's, so a failed lookup stops here.
+			if contextErr := contextOperationError(ctx.Err(), "find existing application event"); contextErr != nil {
+				return nil, contextErr
+			}
+			sentinel, retryable := relayQueryErrorClassification(appErr)
+			return nil, wrapOperationError(sentinel, appErr, retryable, "find existing application event"+causeDetail(appErr))
+		}
+		joinedAuthor = otherApplicationAuthor(appEvents, parsed.PackageID, signer.PublicKey())
+	}
+	if joinedAuthor != "" {
+		options.SkipAppEvent = true
+	}
 	if !options.SkipAppEvent {
 		var mediaWarnings []string
 		media, mediaWarnings, err = prepareMedia(ctx, preparedConfig, parsed, blossomURL, !options.SkipMediaCompression)
@@ -199,6 +216,14 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 	})
 	if options.SkipAppEvent {
 		events.AppMetadata = nil
+		if joinedAuthor != "" {
+			coordinate := "32267:" + joinedAuthor + ":" + parsed.PackageID
+			for index, tag := range events.Release.Tags {
+				if len(tag) >= 2 && tag[0] == "a" && strings.HasPrefix(tag[1], "32267:") {
+					events.Release.Tags[index] = gonostr.Tag{"a", coordinate}
+				}
+			}
+		}
 	} else if !options.OverwriteAppEvent {
 		appEvents, appWarnings, appErr := publisher.FetchApplicationEvents(ctx, parsed.PackageID)
 		if appErr != nil {
@@ -704,16 +729,6 @@ func buildC1Proof(ctx context.Context, proofSigner ProofSigner, signer internaln
 	return event, nil
 }
 
-// hiddenListingWarning warns when another signer's listing outranks this
-// release: a catalog relay shows the greater version_code, and a tie goes to
-// the developer.
-func hiddenListingWarning(versionCode, otherVersionCode int64) []string {
-	if versionCode >= otherVersionCode {
-		return nil
-	}
-	return []string{fmt.Sprintf("the catalog shows another listing at version_code %d; this release stays hidden until you publish version_code %d or higher", otherVersionCode, otherVersionCode)}
-}
-
 func newestAuthorizedApplication(events []*gonostr.Event, appID string, authorized map[string]struct{}) *gonostr.Event {
 	var newest *gonostr.Event
 	for _, event := range events {
@@ -907,4 +922,25 @@ func reportPublish(options PublishOptions, operation, phase, target string, comp
 	if options.OnProgress != nil {
 		options.OnProgress(Progress{Operation: operation, Phase: phase, Target: target, Completed: completed, Total: total})
 	}
+}
+
+// otherApplicationAuthor returns the author of the newest kind 32267 for the
+// app that another key signed, or "" when there is none.
+func otherApplicationAuthor(events []*gonostr.Event, appID, signer string) string {
+	var newest *gonostr.Event
+	for _, event := range events {
+		if event == nil || event.Kind != internalnostr.KindAppMetadata || event.PubKey == signer {
+			continue
+		}
+		if tag := event.Tags.Find("d"); tag == nil || len(tag) < 2 || tag[1] != appID {
+			continue
+		}
+		if newest == nil || event.CreatedAt > newest.CreatedAt {
+			newest = event
+		}
+	}
+	if newest == nil {
+		return ""
+	}
+	return newest.PubKey
 }

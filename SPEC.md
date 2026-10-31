@@ -674,7 +674,12 @@ not survive the process. HTTP validators do.
 2. Fetch, verify, and select one APK.
 3. Resolve `SIGN_WITH` into one signer.
 4. Unless `SkipProofCheck`: the proof check and the release guard below.
-5. Gather metadata and media.
+5. With `JoinExistingApp` and no `SkipAppEvent`, look for a kind `32267` for
+   the app id from another key. If one exists, behave as `SkipAppEvent` and
+   set the release's `a` tag to `32267:<that key>:<app id>`. The newest such
+   event wins. A failed lookup stops the publish, so a developer's app event is
+   never replaced by accident.
+   Gather metadata and media.
 6. Build the unsigned events. Without `SkipAppEvent`, fetch the signer's
    current kind `32267`; if the new one matches after dropping
    `created_at`, `id`, and `sig` and sorting tags, drop it and warn
@@ -901,6 +906,7 @@ type PublishOptions struct {
     Channel              string
     Commit               string
     SkipAppEvent         bool
+    JoinExistingApp      bool
     SkipMediaCompression bool
     SkipProofCheck       bool
     OverwriteRelease     bool

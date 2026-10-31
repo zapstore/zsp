@@ -22,9 +22,16 @@ type apkMetadataDocument struct {
 	Label           string   `json:"label"`
 	Architectures   []string `json:"architectures"`
 	CertificateHash string   `json:"certificate_hash"`
-	Hash            string   `json:"hash"`
-	Size            int64    `json:"size"`
-	Icon            string   `json:"icon,omitempty"`
+	// CertificateSubject is the signing certificate's subject, as Go prints it:
+	// RDNs most specific first, joined by commas without spaces.
+	CertificateSubject string `json:"certificate_subject"`
+	// SourceStampHash and FrostingHash are the SHA-256 of the signing block's
+	// source stamp certificate and frosting key. Google Play adds both.
+	SourceStampHash string `json:"source_stamp_hash,omitempty"`
+	FrostingHash    string `json:"frosting_hash,omitempty"`
+	Hash            string `json:"hash"`
+	Size            int64  `json:"size"`
+	Icon            string `json:"icon,omitempty"`
 }
 
 func utilsCommand(ctx context.Context, opts *cli.Options) int {
@@ -47,7 +54,11 @@ func extractAPKCommand(ctx context.Context, opts *cli.Options) int {
 		PackageID: info.PackageID, VersionName: info.VersionName, VersionCode: info.VersionCode,
 		MinSDK: info.MinSDK, TargetSDK: info.TargetSDK, Label: info.Label,
 		Architectures: info.Architectures, CertificateHash: info.CertFingerprint,
+		SourceStampHash: info.SourceStampHash, FrostingHash: info.FrostingHash,
 		Hash: info.SHA256, Size: info.FileSize,
+	}
+	if info.Certificate != nil {
+		doc.CertificateSubject = info.Certificate.Subject.String()
 	}
 	if doc.Architectures == nil {
 		doc.Architectures = []string{}

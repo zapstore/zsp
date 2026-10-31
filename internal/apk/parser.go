@@ -84,6 +84,15 @@ type APKInfo struct {
 	// verified rotation lineage.
 	SigningAncestors []string
 
+	// SourceStampHash is the SHA-256 (hex, lowercase) of the source stamp
+	// certificate in the signing block, or empty. Google Play adds a stamp to
+	// the APKs it delivers.
+	SourceStampHash string
+
+	// FrostingHash is the SHA-256 (hex, lowercase) of the Play frosting public
+	// key in the signing block, or empty.
+	FrostingHash string
+
 	// certificates is the verified chain, oldest first, ending at Certificate.
 	certificates []*x509.Certificate
 
@@ -163,6 +172,8 @@ func Parse(ctx context.Context, apkPath string) (info *APKInfo, err error) {
 	info.Certificate = sig.cert
 	info.CertFingerprint = sig.fingerprint()
 	info.SigningAncestors = sig.ancestors
+	info.SourceStampHash = sig.stamp
+	info.FrostingHash = sig.frosting
 	info.certificates = sig.chain
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -667,6 +678,8 @@ type verifiedSignature struct {
 	cert      *x509.Certificate
 	ancestors []string            // SHA-256 hex fingerprints, oldest to newest, excluding cert
 	chain     []*x509.Certificate // oldest first, ending at cert
+	stamp     string              // SHA-256 hex of the source stamp certificate, or empty
+	frosting  string              // SHA-256 hex of the frosting key, or empty
 }
 
 func (s *verifiedSignature) fingerprint() string {
@@ -722,7 +735,17 @@ func verifySignature(apkPath string) (*verifiedSignature, error) {
 		return nil, fmt.Errorf("verify signature: %w", err)
 	}
 
-	return &verifiedSignature{cert: cert, ancestors: ancestors, chain: signingChain(res, cert)}, nil
+	sig := &verifiedSignature{cert: cert, ancestors: ancestors, chain: signingChain(res, cert)}
+	if block := res.SigningBlockResult; block != nil {
+		if block.SourceStamp != nil && block.SourceStamp.Cert != nil {
+			sum := sha256.Sum256(block.SourceStamp.Cert.Raw)
+			sig.stamp = hex.EncodeToString(sum[:])
+		}
+		if block.Frosting != nil {
+			sig.frosting = strings.ToLower(block.Frosting.KeySha256)
+		}
+	}
+	return sig, nil
 }
 
 // signingChain is the verified lineage, oldest first, ending at current.

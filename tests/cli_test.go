@@ -62,6 +62,31 @@ func TestCLI(t *testing.T) {
 		requireErrorEnvelope(t, result, 1, "utils", "invalid_apk")
 	})
 
+	t.Run("utils extract-apk reports the signer", func(t *testing.T) {
+		apk, err := filepath.Abs(filepath.Join("..", "testdata", "apks", "amber-arm64-v8a-v6.3.0.apk"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := runZSP(t, context.Background(), "utils", "extract-apk", "--json", "--icon-path", filepath.Join(t.TempDir(), "icon.png"), apk)
+		if result.exitCode != 0 {
+			t.Fatalf("exit=%d stdout=%.200q stderr=%q", result.exitCode, result.stdout, result.stderr)
+		}
+		var out struct {
+			APK map[string]any `json:"apk"`
+		}
+		if err := json.Unmarshal([]byte(result.stdout), &out); err != nil {
+			t.Fatalf("stdout is not JSON: %v", err)
+		}
+		if got := out.APK["certificate_subject"]; got != "CN=greenart7c3" {
+			t.Errorf("certificate_subject = %v, want CN=greenart7c3", got)
+		}
+		for _, key := range []string{"source_stamp_hash", "frosting_hash"} {
+			if _, present := out.APK[key]; present {
+				t.Errorf("%s is present for an APK with no source stamp or frosting", key)
+			}
+		}
+	})
+
 	t.Run("utils unknown operation", func(t *testing.T) {
 		result := runZSP(t, context.Background(), "utils", "unknown", "app.apk")
 		requireErrorEnvelope(t, result, 1, "utils", "invalid_arguments")
