@@ -852,6 +852,7 @@ type FetchOptions struct {
     SkipHTTPCache bool
     HTTPCacheDir  string
     MaxReleases   int
+    OnMoved       func(repository string)
 }
 
 type CheckOptions struct {
@@ -890,6 +891,48 @@ type APK struct {
     CertificateHash string
     LineageHashes   []string
     Architectures   []string
+
+    CertificateSubject string
+    SourceStampHash    string
+    FrostingHash       string
+
+    ReleaseTag        string
+    ReleaseName       string
+    ReleaseNotes      string
+    ReleasePrerelease bool
+}
+
+type ListOptions struct {
+    MaxReleases int
+}
+
+type ListedRelease struct {
+    Tag        string
+    Title      string
+    Notes      string
+    Prerelease bool
+    Date       time.Time
+    Assets     []ListedAsset
+}
+
+type ListedAsset struct {
+    Name   string
+    URL    string
+    Size   int64
+    SHA256 string
+}
+
+type ProbeOptions struct {
+    MaxBytes int64
+}
+
+type APKIdentity struct {
+    AppID           string
+    VersionName     string
+    VersionCode     int64
+    Architectures   []string
+    CertificateHash string
+    BytesRead       int64
 }
 
 type Progress struct {
@@ -975,6 +1018,8 @@ var (
     ErrPublishRejected      = errors.New("relay publication rejected")
     ErrRateLimited          = errors.New("rate limited")
     ErrTemporaryFailure     = errors.New("temporary failure")
+    ErrListUnsupported      = errors.New("source does not list releases")
+    ErrRangeUnsupported     = errors.New("server does not support range requests")
 
     ErrNotRepository = errors.New("not a repository")
     ErrGitMissing    = errors.New("git is not installed")
@@ -1003,6 +1048,8 @@ func LoadConfig(path string) (Config, error)
 func ParseGitRemote(repository string) (GitRemote, error)
 func Reachable(ctx context.Context, repository string) error
 func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*APK, error)
+func ListReleases(ctx context.Context, config FetchConfig, options ListOptions) ([]ListedRelease, error)
+func ProbeAPK(ctx context.Context, asset ListedAsset, options ProbeOptions) (*APKIdentity, error)
 func (apk *APK) Close() error
 func Check(ctx context.Context, config PublishConfig, apk *APK, options CheckOptions) (*CheckResult, error)
 func Publish(ctx context.Context, config PublishConfig, apk *APK, options PublishOptions) (*PublishResult, error)
@@ -1065,6 +1112,20 @@ func Publish(ctx context.Context, config PublishConfig, apk *APK, options Publis
 - `MaxReleases` is how many recent GitHub, GitLab, or Gitea releases to scan
   for a usable APK. Zero uses 10. A value below 0 or above 100 is
   `ErrInvalidConfig`. Other sources ignore it. The CLI does not set it.
+- `OnMoved` is called once, with the repository's new HTTPS URL, when a
+  GitHub, GitLab, or Gitea source's API answers with a permanent redirect
+  (301 or 308) and the repository's web page redirects to another path on
+  the same host. GitHub's API redirect names only the numeric repository id,
+  so the new name comes from the web page. The fetch follows the redirect and
+  does not fail because of it. A web page that does not redirect, redirects
+  to another host, or names the same path in another case reports nothing,
+  and the probe never fails a fetch. Other sources never call it. It is called
+  synchronously and must return quickly.
+- `ReleaseTag`, `ReleaseName`, `ReleaseNotes`, and `ReleasePrerelease` copy
+  the source release the APK came from: GitHub, GitLab, and Gitea report them,
+  and a local file or direct URL leaves them empty. `ReleaseNotes` is cut at
+  8 KiB on a rune boundary. They are for the caller to read and never change a
+  published event.
 - `Fetch` applies the `version_code` choice above. It returns that one APK,
   or the remaining files when the choice is not unique, in stable order,
   sorted by normalized source URL and filename; duplicates share one `APK`
@@ -1072,6 +1133,29 @@ func Publish(ctx context.Context, config PublishConfig, apk *APK, options Publis
   used in the asset event, empty for local files. `Name` is the APK's name
   and the fallback for `PublishConfig.Name`. `LineageHashes` is nil without
   a rotation. A probe before `Fetch` is only a hint; `Fetch` resolves again.
+- `ListReleases` returns the newest `MaxReleases` releases of a GitHub,
+  GitLab, or Gitea source, newest first, with each release's tag, title,
+  notes (cut at 8 KiB), pre-release flag, date, and APK assets. It applies
+  neither `release_filter`, `match`, nor the pre-release choice, so it shows
+  what they would hide. Drafts and upcoming releases are left out, and a release
+  with no APK is kept with no assets. `Size` and `SHA256` are what the forge
+  reports and may be zero or empty; GitHub reports a digest for each asset. It
+  downloads nothing, stores no HTTP validators, and reports a moved repository
+  through no callback. `MaxReleases` follows the same limits as in
+  `FetchOptions`. Any other source is `ErrListUnsupported`.
+- `ProbeAPK` reads an APK's identity without downloading it: the end of the
+  file for the archive index and signing block, and the entry holding the
+  manifest, each by byte-range request. Over APKs from 7 MB to 358 MB that
+  took 3 to 7 requests and under 1 MB each, 0.6 MB for the largest. The
+  result is the APK's claim, not a proof: nothing is hashed and no signature
+  digest is checked, and `CertificateHash` is the one `Fetch` would choose.
+  `Architectures` come from `lib/<abi>/` entries only. It only says whether an
+  APK is worth fetching; `Fetch` verifies. `Size` of zero is learned from the
+  server. A server that does not answer ranges is `ErrRangeUnsupported`; one
+  that makes the probe read more than `MaxBytes` (default 8 MiB) is
+  `ErrSourceFailed`; an APK that cannot be read, has no signature, or has
+  several current signers is `ErrInvalidAPK`. It sends no credentials, so it
+  reads only public assets.
 - `Publish` accepts only an open `*APK` from `Fetch`; anything else is
   `ErrAPKNotChecked`. On success `Status` is `published`, or `pending`
   when an accepting relay does not serve the release yet, and `ID` is the

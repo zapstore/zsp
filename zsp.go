@@ -33,6 +33,16 @@ type (
 	FetchOptions = release.FetchOptions
 	// APK is a downloaded and verified publication candidate.
 	APK = release.APK
+	// ListOptions controls ListReleases.
+	ListOptions = release.ListOptions
+	// ListedRelease is a release a forge lists, whether or not Fetch would pick it.
+	ListedRelease = release.ListedRelease
+	// ListedAsset is an APK a listed release carries.
+	ListedAsset = release.ListedAsset
+	// ProbeOptions controls ProbeAPK.
+	ProbeOptions = release.ProbeOptions
+	// APKIdentity is what an APK says about itself, read without downloading it.
+	APKIdentity = release.APKIdentity
 	// Progress reports a synchronous operation update.
 	Progress = release.Progress
 	// PublishOptions controls proof checks, event construction, and publication.
@@ -81,6 +91,8 @@ var (
 	ErrPublishRejected      = release.ErrPublishRejected
 	ErrRateLimited          = release.ErrRateLimited
 	ErrTemporaryFailure     = release.ErrTemporaryFailure
+	ErrListUnsupported      = release.ErrListUnsupported
+	ErrRangeUnsupported     = release.ErrRangeUnsupported
 )
 
 // Repository remote error classes support errors.Is classification.
@@ -118,6 +130,18 @@ func LoadConfig(path string) (Config, error) { return release.LoadConfig(path) }
 // Fetch downloads and verifies the APK candidates for config.
 func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*APK, error) {
 	return release.Fetch(ctx, config, options)
+}
+
+// ListReleases returns the newest releases of config's forge with the APKs each
+// carries, applying neither release_filter, match nor the pre-release choice.
+func ListReleases(ctx context.Context, config FetchConfig, options ListOptions) ([]ListedRelease, error) {
+	return release.ListReleases(ctx, config, options)
+}
+
+// ProbeAPK reads the identity of a listed APK with byte-range requests, without
+// downloading it. The result is the APK's claim and is not verified.
+func ProbeAPK(ctx context.Context, asset ListedAsset, options ProbeOptions) (*APKIdentity, error) {
+	return release.ProbeAPK(ctx, asset, options)
 }
 
 // Check reports whether candidate can be published, without publishing.
