@@ -40,12 +40,12 @@ func TestChangelogSection(t *testing.T) {
 		"```\n## [0.1.0]\nnot a heading\n```\n\n- real item\n\n" +
 		"## [0.9.0] - 2023-01-01\n\n### Fixed\n\n- old\n"
 	tests := []struct {
-		name       string
-		text       string
-		versions   []string
-		want       string
-		changelog  bool
-		found      bool
+		name      string
+		text      string
+		versions  []string
+		want      string
+		changelog bool
+		found     bool
 	}{
 		{
 			name: "plain notes",
