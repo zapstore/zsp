@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/zapstore/zsp/v2/internal/apk"
 	"github.com/zapstore/zsp/v2/internal/sanitize"
@@ -33,6 +34,7 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 		SkipHTTPCache:      options.SkipHTTPCache,
 		MaxReleases:        options.MaxReleases,
 		CacheDir:           options.HTTPCacheDir,
+		OnMoved:            options.OnMoved,
 	})
 	if err != nil {
 		return nil, wrapOperationError(ErrInvalidConfig, err, false, "create source"+causeDetail(err))
@@ -178,6 +180,10 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 			CertificateSubject: subject,
 			SourceStampHash:    parsed.SourceStampHash,
 			FrostingHash:       parsed.FrostingHash,
+			ReleaseTag:         release.TagName,
+			ReleaseName:        release.Name,
+			ReleaseNotes:       truncateReleaseNotes(release.Changelog),
+			ReleasePrerelease:  release.PreRelease,
 			ownership:          ownership,
 			fetchConfig:        cloneFetchConfig(config),
 			verified: verifiedAPK{
@@ -607,6 +613,23 @@ func releaseMatches(release *source.Release, filter string) bool {
 	return err == nil && (expression.MatchString(release.Version) ||
 		expression.MatchString(release.TagName) ||
 		expression.MatchString(release.Name))
+}
+
+// maxReleaseNotesBytes caps the release notes copied onto an APK for callers
+// to read. The full text still reaches a published release.
+const maxReleaseNotesBytes = 8 << 10
+
+// truncateReleaseNotes cuts notes at a rune boundary no longer than
+// maxReleaseNotesBytes.
+func truncateReleaseNotes(notes string) string {
+	if len(notes) <= maxReleaseNotesBytes {
+		return notes
+	}
+	cut := maxReleaseNotesBytes
+	for cut > 0 && !utf8.RuneStart(notes[cut]) {
+		cut--
+	}
+	return notes[:cut]
 }
 
 func report(options FetchOptions, operation, phase, target string, completed, total int64) {

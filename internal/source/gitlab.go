@@ -68,6 +68,7 @@ type GitLab struct {
 	IncludePreReleases bool
 	maxReleases        int
 	pendingCache       *gitlabCache
+	moved              *movedProbe
 }
 
 // NewGitLab creates a new GitLab source.
@@ -99,6 +100,10 @@ func newGitLab(cfg *config.Config, opts Options) (*GitLab, error) {
 		downloadClient: newDownloadHTTPClient(tor),
 		filter:         filter,
 		cacheDir:       sourceCacheDir(opts.CacheDir, "gitlab"),
+		moved: newMovedProbe(opts.OnMoved, repoURL, repoPath, func(rawURL string) string {
+			_, path := config.GetGitLabRepoWithBase(rawURL)
+			return path
+		}),
 	}, nil
 }
 
@@ -161,6 +166,7 @@ func (g *GitLab) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		return nil, fmt.Errorf("fetch releases: %w", err)
 	}
 	defer resp.Body.Close()
+	g.moved.observe(ctx, g.client, resp)
 
 	if err := checkHTTPStatus(resp, "GitLab API"); err != nil {
 		return nil, describeNotFound(err, fmt.Sprintf("no releases found or project %s not accessible", g.repoPath))

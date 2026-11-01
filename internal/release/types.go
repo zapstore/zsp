@@ -87,6 +87,12 @@ type FetchOptions struct {
 	// MaxReleases is how many recent GitHub, GitLab, or Gitea releases to
 	// scan for a usable APK. Zero uses the default of 10. The maximum is 100.
 	MaxReleases int `json:"max_releases,omitempty"`
+	// OnMoved is called once with the repository's new URL when its forge
+	// permanently redirects the configured repository to another path, as
+	// after a rename or a transfer. The fetch follows the redirect and does
+	// not fail because of it. It is called synchronously and must return
+	// quickly. Only GitHub, GitLab, and Gitea sources report it.
+	OnMoved func(repository string) `json:"-"`
 }
 
 // APK is a downloaded and verified publication candidate.
@@ -113,6 +119,15 @@ type APK struct {
 	// Google Play adds both to what it delivers.
 	SourceStampHash string `json:"source_stamp_hash,omitempty"`
 	FrostingHash    string `json:"frosting_hash,omitempty"`
+
+	// ReleaseTag, ReleaseName, ReleaseNotes, and ReleasePrerelease describe the
+	// source release the APK came from, as its forge reports them. They are
+	// empty or false for a source with no releases, such as a local file or a
+	// direct URL. They inform a caller and never reach a published event.
+	ReleaseTag        string `json:"release_tag,omitempty"`
+	ReleaseName       string `json:"release_name,omitempty"`
+	ReleaseNotes      string `json:"release_notes,omitempty"`
+	ReleasePrerelease bool   `json:"release_prerelease,omitempty"`
 
 	ownership   *apkOwnership
 	fetchConfig FetchConfig
@@ -283,4 +298,6 @@ var (
 	ErrPublishRejected      = errors.New("relay publication rejected")
 	ErrRateLimited          = errors.New("rate limited")
 	ErrTemporaryFailure     = errors.New("temporary failure")
+	ErrListUnsupported      = errors.New("source does not list releases")
+	ErrRangeUnsupported     = errors.New("server does not support range requests")
 )

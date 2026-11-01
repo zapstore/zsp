@@ -38,6 +38,7 @@ type GitHub struct {
 	IncludePreReleases bool // Set to true to include pre-releases (--pre-release)
 	maxReleases        int
 	pendingCache       *githubCache
+	moved              *movedProbe
 }
 
 // NewGitHub creates a new GitHub source.
@@ -69,6 +70,7 @@ func newGitHub(cfg *config.Config, opts Options) (*GitHub, error) {
 		downloadClient: newDownloadHTTPClient(tor),
 		filter:         filter,
 		cacheDir:       sourceCacheDir(opts.CacheDir, "github"),
+		moved:          newMovedProbe(opts.OnMoved, url, repoPath, config.GetGitHubRepo),
 	}, nil
 }
 
@@ -213,6 +215,7 @@ func (g *GitHub) FetchLatestRelease(ctx context.Context) (*Release, error) {
 		return nil, fmt.Errorf("fetch latest release: %w", err)
 	}
 	defer resp.Body.Close()
+	g.moved.observe(ctx, g.client, resp)
 
 	if resp.StatusCode == http.StatusNotModified {
 		return nil, ErrNotModified
@@ -265,6 +268,7 @@ func (g *GitHub) fetchLatestFromList(ctx context.Context) (*Release, error) {
 		return nil, fmt.Errorf("fetch releases: %w", err)
 	}
 	defer resp.Body.Close()
+	g.moved.observe(ctx, g.client, resp)
 
 	if err := g.checkStatus(resp); err != nil {
 		return nil, err

@@ -86,6 +86,12 @@ type Options struct {
 	// user cache directory.
 	CacheDir string
 
+	// OnMoved is called once per source with the repository's new URL when
+	// its forge answers with a permanent redirect to another repository path.
+	// The fetch itself follows the redirect and is unaffected. It runs
+	// synchronously and must return quickly.
+	OnMoved func(repository string)
+
 	// TorTransport builds the transport used for the one-shot Tor retry on
 	// HTTP 403. It is called at most once per source. Nil dials the local
 	// SOCKS5 proxy.

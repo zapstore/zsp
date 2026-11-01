@@ -21,6 +21,7 @@ type Gitea struct {
 	filter             *releaseFilter
 	IncludePreReleases bool // Set to true to include pre-releases (--pre-release)
 	maxReleases        int
+	moved              *movedProbe
 }
 
 // NewGitea creates a new Gitea source.
@@ -56,6 +57,10 @@ func newGitea(cfg *config.Config, opts Options) (*Gitea, error) {
 		client:         newSecureHTTPClient(30*time.Second, tor),
 		downloadClient: newDownloadHTTPClient(tor),
 		filter:         filter,
+		moved: newMovedProbe(opts.OnMoved, repoURL, repoPath, func(rawURL string) string {
+			_, path := config.GetGiteaRepo(rawURL)
+			return path
+		}),
 	}, nil
 }
 
@@ -112,6 +117,7 @@ func (g *Gitea) fetchLatestFromList(ctx context.Context) (*Release, error) {
 		return nil, fmt.Errorf("fetch releases: %w", err)
 	}
 	defer resp.Body.Close()
+	g.moved.observe(ctx, g.client, resp)
 
 	if err := checkHTTPStatus(resp, "Gitea API"); err != nil {
 		return nil, describeNotFound(err, fmt.Sprintf("no releases found for %s/%s", g.owner, g.repo))

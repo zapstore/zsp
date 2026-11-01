@@ -2,7 +2,9 @@ package release
 
 import (
 	"reflect"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/zapstore/zsp/v2/internal/source"
 )
@@ -272,5 +274,22 @@ func TestFilterCandidatesPrecedence(t *testing.T) {
 				t.Fatalf("filterCandidates() = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestTruncateReleaseNotes(t *testing.T) {
+	short := "Fixes a crash."
+	if got := truncateReleaseNotes(short); got != short {
+		t.Fatalf("short notes = %q, want unchanged", got)
+	}
+
+	// A three-byte rune straddles the cap, so the cut must move back to its start.
+	long := strings.Repeat("a", maxReleaseNotesBytes-1) + "€€"
+	got := truncateReleaseNotes(long)
+	if len(got) > maxReleaseNotesBytes || !utf8.ValidString(got) {
+		t.Fatalf("truncated notes: %d bytes, valid UTF-8 %v; want at most %d bytes and valid", len(got), utf8.ValidString(got), maxReleaseNotesBytes)
+	}
+	if want := strings.Repeat("a", maxReleaseNotesBytes-1); got != want {
+		t.Fatalf("truncated notes kept %d bytes, want the %d bytes before the split rune", len(got), len(want))
 	}
 }
