@@ -641,7 +641,9 @@ In order:
    `armeabi`, `armeabi-v7a`) or an unsigned APK. Matching is
    case-insensitive and token-aware.
 4. More than ten left: fail and ask for a narrower `match`.
-5. Download the rest.
+5. Read each candidate's identity by range request when the source is a
+   GitHub, Gitea, or GitLab release and at least two candidates are 2 MiB or
+   larger (see Probing), then download the rest.
 6. Verify signatures v1, v2, and v3. Reject malformed signatures, multiple
    current signers, Wear OS APKs, and APKs with native code but no
    `arm64-v8a`. Reject a missing, non-numeric, or non-positive
@@ -653,6 +655,26 @@ In order:
 The current certificate is separate from its lineage. Validated v3
 ancestors are listed oldest to newest only when a rotation exists and never
 include the current certificate.
+
+### Probing
+
+Before downloading, `Fetch` reads each large candidate's identity as
+`ProbeAPK` does, with the forge's credentials, four at a time and at most
+4 MiB each, so that it need not download a candidate that cannot be chosen.
+Candidates are grouped by app id and certificate. Within a group, a candidate
+is not downloaded while another that declares `arm64-v8a` beats it:
+
+- the other has a greater `version_code`;
+- it names ABIs and not `arm64-v8a`;
+- at one `version_code` the other is arm64-only and it is fat.
+
+A candidate with no ABI named is never ranked below one it might outrank, since
+`Parse` may still find arm64 code by its ELF header. A candidate whose identity
+could not be read, such as one on a server that ignores ranges, is downloaded as
+before. The probe only predicts: when the downloads of a group all fail
+verification, the best remaining candidates of that group are downloaded in
+turn. The result is the selection below, over fewer downloads. Probing sends
+progress with `Phase` `"inspect"`.
 
 Publication selects one result. For every source, keep the greatest
 `version_code` whose native code includes `arm64-v8a`, or, when none does,
@@ -1168,7 +1190,7 @@ func Publish(ctx context.Context, config PublishConfig, apk *APK, options Publis
   proof, and asks for an app event with the APK's app id from any author.
   It resolves `SIGN_WITH` only for its public key. Relay failures are
   warnings unless every relay fails, which is a retryable error.
-- `OnProgress` is called synchronously for source requests, downloads,
+- `OnProgress` is called synchronously for source requests, probes, downloads,
   verification, uploads, and publication, and must return quickly. A
   candidate-rejection diagnostic has `Phase` `"warning"`, the text in
   `Target`, and zero counts.

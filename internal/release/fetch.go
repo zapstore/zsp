@@ -87,10 +87,13 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 	if clearer, ok := src.(source.CacheClearer); ok {
 		clearHTTPCache = clearer.ClearHTTPCache
 	}
-	for _, candidate := range candidates {
+	plan := planDownloads(ctx, src, candidates, options)
+	// attempt downloads and verifies one candidate. It reports whether the
+	// candidate passed verification, which includes being a copy of one that
+	// did. An error ends the fetch.
+	attempt := func(candidate *source.Asset) (bool, error) {
 		if err := ctx.Err(); err != nil {
-			closeAPKs(results)
-			return nil, contextOperationError(err, "fetch")
+			return false, contextOperationError(err, "fetch")
 		}
 		displayName := safeAssetName(candidate.Name)
 		report(options, "fetch", "download", displayName, 0, candidate.Size)
@@ -98,10 +101,10 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 		managed := false
 		tempDir := ""
 		if path == "" {
+			var err error
 			tempDir, err = os.MkdirTemp("", "zsp-fetch-*")
 			if err != nil {
-				closeAPKs(results)
-				return nil, wrapOperationError(ErrSourceFailed, err, false, "create temporary directory"+causeDetail(err))
+				return false, wrapOperationError(ErrSourceFailed, err, false, "create temporary directory"+causeDetail(err))
 			}
 			path, err = src.Download(ctx, candidate, tempDir, func(done, total int64) {
 				report(options, "fetch", "download", displayName, done, total)
@@ -109,12 +112,11 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 			if err != nil {
 				_ = os.RemoveAll(tempDir)
 				if ctx.Err() != nil {
-					closeAPKs(results)
-					return nil, contextOperationError(ctx.Err(), "fetch")
+					return false, contextOperationError(ctx.Err(), "fetch")
 				}
 				lastDownloadError = err
 				report(options, "fetch", "warning", displayName+": download failed", 0, 0)
-				continue
+				return false, nil
 			}
 			managed = true
 		}
@@ -124,7 +126,7 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 				_ = os.RemoveAll(tempDir)
 			}
 			report(options, "fetch", "warning", displayName+": APK exceeds the size limit", 0, 0)
-			continue
+			return false, nil
 		}
 		parsed, parseErr := apk.Parse(ctx, path)
 		if parseErr != nil {
@@ -132,25 +134,24 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 				_ = os.RemoveAll(tempDir)
 			}
 			if ctx.Err() != nil {
-				closeAPKs(results)
-				return nil, contextOperationError(ctx.Err(), "fetch")
+				return false, contextOperationError(ctx.Err(), "fetch")
 			}
 			report(options, "fetch", "warning", displayName+": invalid or unsigned APK", 0, 0)
-			continue
+			return false, nil
 		}
 		if parsed.IsWatch() || !parsed.IsArm64() {
 			if managed {
 				_ = os.RemoveAll(tempDir)
 			}
 			report(options, "fetch", "warning", displayName+": unsupported Android platform", 0, 0)
-			continue
+			return false, nil
 		}
 		if _, duplicate := seen[parsed.SHA256]; duplicate {
 			if managed {
 				_ = os.RemoveAll(tempDir)
 			}
 			report(options, "fetch", "warning", displayName+": duplicate APK omitted", 0, 0)
-			continue
+			return true, nil
 		}
 		seen[parsed.SHA256] = struct{}{}
 		eventSourceURL := candidate.URL
@@ -201,6 +202,19 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 				releasedAt:      release.CreatedAt,
 			},
 		})
+		return true, nil
+	}
+	for queue := plan.first(); len(queue) > 0; queue = plan.retry() {
+		for _, candidate := range queue {
+			passed, err := attempt(candidate)
+			if err != nil {
+				closeAPKs(results)
+				return nil, err
+			}
+			if passed {
+				plan.verified(candidate)
+			}
+		}
 	}
 	if len(results) == 0 {
 		if lastDownloadError != nil {
