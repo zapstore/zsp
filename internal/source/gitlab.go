@@ -426,6 +426,15 @@ func (g *GitLab) convertRelease(glRelease *gitlabRelease) *Release {
 	}
 }
 
+// OpenRange opens an asset for ranged reading, with GitLab's token attached when
+// the asset is hosted on a GitLab host, as Download does.
+func (g *GitLab) OpenRange(ctx context.Context, asset *Asset, budget int64) (*RangeReader, error) {
+	if asset.URL == "" {
+		return nil, fmt.Errorf("asset has no download URL")
+	}
+	return OpenRange(ctx, asset.URL, asset.Size, budget, forgeAuthHeaders(config.SourceGitLab, asset.URL))
+}
+
 // Download downloads an asset from GitLab, using the shared DownloadHTTP
 // retry/size/stall pipeline while preserving GitLab-specific handling of the
 // external-redirect interstitial page (see doAssetDownload).

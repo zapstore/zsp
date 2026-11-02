@@ -354,6 +354,15 @@ func (g *GitHub) convertRelease(ghRelease *githubRelease) *Release {
 	}
 }
 
+// OpenRange opens an asset for ranged reading, with GitHub's token attached when
+// the asset is hosted on a GitHub host, as Download does.
+func (g *GitHub) OpenRange(ctx context.Context, asset *Asset, budget int64) (*RangeReader, error) {
+	if asset.URL == "" {
+		return nil, fmt.Errorf("asset has no download URL")
+	}
+	return OpenRange(ctx, asset.URL, asset.Size, budget, forgeAuthHeaders(config.SourceGitHub, asset.URL))
+}
+
 // Download downloads an asset from GitHub, using the shared DownloadHTTP
 // pipeline (size limit, redirect validation, stall detection, bounded
 // retries, digest check) with GitHub's bearer token attached when the asset

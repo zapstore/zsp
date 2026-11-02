@@ -65,6 +65,16 @@ type Source interface {
 	Download(ctx context.Context, asset *Asset, destDir string, progress DownloadProgress) (string, error)
 }
 
+// RangeOpener is implemented by sources that can read part of an asset without
+// downloading it, sending the credentials Download would send. The caller reads
+// the asset's identity from the returned reader and decides from that whether the
+// asset is worth downloading. A server that does not answer range requests, or
+// that needs more than budget bytes, makes reading it fail; the caller then
+// downloads the asset. A zero budget uses [DefaultRangeBudget].
+type RangeOpener interface {
+	OpenRange(ctx context.Context, asset *Asset, budget int64) (*RangeReader, error)
+}
+
 // Options contains options for creating a source.
 type Options struct {
 	// BaseDir is the base directory for resolving relative paths.

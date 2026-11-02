@@ -173,6 +173,15 @@ func (g *Gitea) convertRelease(gtRelease *giteaRelease) *Release {
 	}
 }
 
+// OpenRange opens an asset for ranged reading, with Gitea's token attached when
+// the asset is hosted on a Gitea host, as Download does.
+func (g *Gitea) OpenRange(ctx context.Context, asset *Asset, budget int64) (*RangeReader, error) {
+	if asset.URL == "" {
+		return nil, fmt.Errorf("asset has no download URL")
+	}
+	return OpenRange(ctx, asset.URL, asset.Size, budget, forgeAuthHeaders(config.SourceGitea, asset.URL))
+}
+
 // Download downloads an asset from a Gitea-compatible forge, using the
 // shared DownloadHTTP pipeline (size limit, redirect validation, stall
 // detection, bounded retries) with Gitea's token attached when the asset is hosted on GITEA_HOST.
