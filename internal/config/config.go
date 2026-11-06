@@ -453,7 +453,10 @@ func pointerFromPath(npub, value string) (*NIP34RepoPointer, error) {
 			relays = append(relays, "wss://"+segment)
 			continue
 		}
-		return &NIP34RepoPointer{Pubkey: pubkey, Identifier: segment, Relays: relays}, nil
+		// A clone URL's identifier carries ".git", as a forge repository root
+		// does; the announcement itself is never named that.
+		identifier := strings.TrimSuffix(segment, ".git")
+		return &NIP34RepoPointer{Pubkey: pubkey, Identifier: identifier, Relays: relays}, nil
 	}
 	return nil, fmt.Errorf("npub names no repository: add the identifier, as %s/<repository>", npub)
 }
