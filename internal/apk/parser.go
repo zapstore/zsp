@@ -236,7 +236,8 @@ func (c *manifestCollector) EncodeToken(token xml.Token) error {
 		c.raw.label = attribute(start, "label")
 		c.raw.icon = attribute(start, "icon")
 	case "uses-feature":
-		if feature := attribute(start, "name"); feature != "" {
+		// required defaults to true. A phone app may declare TV or watch support as optional.
+		if feature := attribute(start, "name"); feature != "" && attribute(start, "required") != "false" {
 			c.features = append(c.features, feature)
 		}
 	}
@@ -1694,15 +1695,21 @@ func (a *APKInfo) IsArm64() bool {
 	return len(a.Architectures) == 0
 }
 
-// IsWatch returns true if the APK declares the standard Android watch device
-// feature used by Wear OS applications.
-func (a *APKInfo) IsWatch() bool {
+// OtherDevice names the device type the APK requires when that is not a phone or
+// tablet: "watch" for Wear OS, "TV" for Android TV, "car" for Android Automotive.
+// It is empty for an APK a phone can install.
+func (a *APKInfo) OtherDevice() string {
 	for _, feature := range a.Features {
-		if feature == "android.hardware.type.watch" {
-			return true
+		switch feature {
+		case "android.hardware.type.watch":
+			return "watch"
+		case "android.software.leanback", "android.software.leanback_only", "android.hardware.type.television":
+			return "TV"
+		case "android.hardware.type.automotive":
+			return "car"
 		}
 	}
-	return false
+	return ""
 }
 
 // String returns a human-readable summary of the APK.

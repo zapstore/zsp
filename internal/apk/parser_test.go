@@ -245,24 +245,41 @@ func TestIsArm64(t *testing.T) {
 	}
 }
 
-func TestIsWatch(t *testing.T) {
+func TestOtherDevice(t *testing.T) {
 	tests := []struct {
 		name     string
 		features []string
-		want     bool
+		want     string
 	}{
-		{"Wear OS watch", []string{"android.hardware.type.watch"}, true},
-		{"phone", []string{"android.hardware.camera"}, false},
-		{"no declared features", nil, false},
+		{"Wear OS watch", []string{"android.hardware.type.watch"}, "watch"},
+		{"Android TV", []string{"android.hardware.camera", "android.software.leanback"}, "TV"},
+		{"Android Automotive", []string{"android.hardware.type.automotive"}, "car"},
+		{"phone", []string{"android.hardware.camera"}, ""},
+		{"no declared features", nil, ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			info := &APKInfo{Features: tt.features}
-			if got := info.IsWatch(); got != tt.want {
-				t.Errorf("IsWatch() = %v, want %v", got, tt.want)
+			if got := info.OtherDevice(); got != tt.want {
+				t.Errorf("OtherDevice() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestOptionalFeaturesAreNotRequired(t *testing.T) {
+	var c manifestCollector
+	for _, el := range []xml.StartElement{
+		{Name: xml.Name{Local: "uses-feature"}, Attr: []xml.Attr{{Name: xml.Name{Local: "name"}, Value: "android.software.leanback"}, {Name: xml.Name{Local: "required"}, Value: "false"}}},
+		{Name: xml.Name{Local: "uses-feature"}, Attr: []xml.Attr{{Name: xml.Name{Local: "name"}, Value: "android.hardware.camera"}}},
+	} {
+		if err := c.EncodeToken(el); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !slices.Equal(c.features, []string{"android.hardware.camera"}) {
+		t.Fatalf("features = %v", c.features)
 	}
 }
 

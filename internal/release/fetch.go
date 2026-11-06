@@ -139,11 +139,15 @@ func Fetch(ctx context.Context, config FetchConfig, options FetchOptions) ([]*AP
 			report(options, "fetch", "warning", displayName+": invalid or unsigned APK", 0, 0)
 			return false, nil
 		}
-		if parsed.IsWatch() || !parsed.IsArm64() {
+		if device := parsed.OtherDevice(); device != "" || !parsed.IsArm64() {
 			if managed {
 				_ = os.RemoveAll(tempDir)
 			}
-			report(options, "fetch", "warning", displayName+": unsupported Android platform", 0, 0)
+			reason := "unsupported Android platform"
+			if device != "" {
+				reason = "built for " + device + ", not phones"
+			}
+			report(options, "fetch", "warning", displayName+": "+reason, 0, 0)
 			return false, nil
 		}
 		if _, duplicate := seen[parsed.SHA256]; duplicate {
