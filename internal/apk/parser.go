@@ -197,7 +197,7 @@ type manifestInfo struct {
 	MinSDK      int32
 	TargetSDK   int32
 	Label       string
-	// Icon is the icon resource resolved through the resource table, and
+	// Icon is the launcher icon resource resolved through the resource table, and
 	// IconRef the same icon as an unresolved "@<id>" reference. Either may be
 	// empty.
 	Icon     string
@@ -216,9 +216,30 @@ type manifestCollector struct {
 		label, icon                         string
 	}
 	features []string
+	// activityIcons is each activity's own icon by class name, for an alias
+	// that declares none.
+	activityIcons map[string]string
+	// component is the activity or activity-alias being read.
+	component *manifestComponent
+	// launcher is the first enabled component the launcher lists.
+	launcher *manifestComponent
+}
+
+// manifestComponent is an activity or activity-alias. main and category
+// track the intent filter being read; launches is set once one of its
+// filters is MAIN with LAUNCHER.
+type manifestComponent struct {
+	icon, target   string
+	enabled        bool
+	main, category bool
+	launches       bool
 }
 
 func (c *manifestCollector) EncodeToken(token xml.Token) error {
+	if end, ok := token.(xml.EndElement); ok {
+		c.endElement(end.Name.Local)
+		return nil
+	}
 	start, ok := token.(xml.StartElement)
 	if !ok {
 		return nil
@@ -240,9 +261,74 @@ func (c *manifestCollector) EncodeToken(token xml.Token) error {
 		if feature := attribute(start, "name"); feature != "" && attribute(start, "required") != "false" {
 			c.features = append(c.features, feature)
 		}
+	case "activity", "activity-alias":
+		c.component = &manifestComponent{
+			icon:    attribute(start, "icon"),
+			target:  c.className(attribute(start, "targetActivity")),
+			enabled: attribute(start, "enabled") != "false",
+		}
+		if start.Name.Local == "activity" && c.component.icon != "" {
+			if c.activityIcons == nil {
+				c.activityIcons = map[string]string{}
+			}
+			c.activityIcons[c.className(attribute(start, "name"))] = c.component.icon
+		}
+	case "intent-filter":
+		if c.component != nil {
+			c.component.main, c.component.category = false, false
+		}
+	case "action":
+		if c.component != nil && attribute(start, "name") == "android.intent.action.MAIN" {
+			c.component.main = true
+		}
+	case "category":
+		if c.component != nil && attribute(start, "name") == "android.intent.category.LAUNCHER" {
+			c.component.category = true
+		}
 	}
 
 	return nil
+}
+
+func (c *manifestCollector) endElement(name string) {
+	if c.component == nil {
+		return
+	}
+	switch name {
+	case "intent-filter":
+		if c.component.main && c.component.category {
+			c.component.launches = true
+		}
+	case "activity", "activity-alias":
+		if c.launcher == nil && c.component.launches && c.component.enabled {
+			c.launcher = c.component
+		}
+		c.component = nil
+	}
+}
+
+// className qualifies a manifest class name that starts with "." by the
+// package, as Android does.
+func (c *manifestCollector) className(name string) string {
+	if strings.HasPrefix(name, ".") {
+		return c.raw.packageID + name
+	}
+	return name
+}
+
+// icon is the icon the launcher shows: the first enabled MAIN/LAUNCHER
+// component's own icon, then an alias's target activity icon, then the
+// application icon.
+func (c *manifestCollector) icon() string {
+	if l := c.launcher; l != nil {
+		if l.icon != "" {
+			return l.icon
+		}
+		if icon := c.activityIcons[l.target]; l.target != "" && icon != "" {
+			return icon
+		}
+	}
+	return c.raw.icon
 }
 
 func (c *manifestCollector) Flush() error {
@@ -274,7 +360,7 @@ func (c *manifestCollector) result() (manifestInfo, error) {
 		MinSDK:      minSDK,
 		TargetSDK:   targetSDK,
 		Label:       c.raw.label,
-		Icon:        c.raw.icon,
+		Icon:        c.icon(),
 		Features:    c.features,
 	}, nil
 }
@@ -397,10 +483,11 @@ func (a *apkArchive) iconReference(manifest []byte) string {
 	if err := apkparser.ParseXml(bytes.NewReader(manifest), collector, nil); err != nil {
 		return ""
 	}
-	if !isResourceReference(collector.raw.icon) {
+	icon := collector.icon()
+	if !isResourceReference(icon) {
 		return ""
 	}
-	return collector.raw.icon
+	return icon
 }
 
 // isResourceReference reports whether a manifest value looks like an Android

@@ -283,6 +283,90 @@ func TestOptionalFeaturesAreNotRequired(t *testing.T) {
 	}
 }
 
+// component is a manifest element and its children as tokens.
+func component(name string, attrs map[string]string, children ...xml.Token) []xml.Token {
+	start := xml.StartElement{Name: xml.Name{Local: name}}
+	for key, value := range attrs {
+		start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Local: key}, Value: value})
+	}
+	tokens := append([]xml.Token{start}, children...)
+	return append(tokens, xml.EndElement{Name: start.Name})
+}
+
+func launcherFilter() []xml.Token {
+	var children []xml.Token
+	children = append(children, component("action", map[string]string{"name": "android.intent.action.MAIN"})...)
+	children = append(children, component("category", map[string]string{"name": "android.intent.category.LAUNCHER"})...)
+	return component("intent-filter", nil, children...)
+}
+
+func TestManifestCollectorLauncherIcon(t *testing.T) {
+	mainOnly := component("intent-filter", nil, component("action", map[string]string{"name": "android.intent.action.MAIN"})...)
+	tests := []struct {
+		name       string
+		components [][]xml.Token
+		want       string
+	}{
+		{
+			name:       "launcher without icon uses the application icon",
+			components: [][]xml.Token{component("activity", map[string]string{"name": "app.Main"}, launcherFilter()...)},
+			want:       "@app",
+		},
+		{
+			name:       "launcher activity icon",
+			components: [][]xml.Token{component("activity", map[string]string{"name": "app.Main", "icon": "@main"}, launcherFilter()...)},
+			want:       "@main",
+		},
+		{
+			name: "non-launcher activity icon is ignored",
+			components: [][]xml.Token{
+				component("activity", map[string]string{"name": "app.Settings", "icon": "@settings"}, mainOnly...),
+				component("activity", map[string]string{"name": "app.Main"}, launcherFilter()...),
+			},
+			want: "@app",
+		},
+		{
+			name: "disabled alias icon is ignored",
+			components: [][]xml.Token{
+				component("activity", map[string]string{"name": "app.Home"}),
+				component("activity-alias", map[string]string{"name": "app.Retro", "icon": "@retro", "enabled": "false", "targetActivity": "app.Home"}, launcherFilter()...),
+				component("activity-alias", map[string]string{"name": "app.Default", "icon": "@default", "targetActivity": "app.Home"}, launcherFilter()...),
+			},
+			want: "@default",
+		},
+		{
+			name: "alias inherits its target activity icon",
+			components: [][]xml.Token{
+				component("activity-alias", map[string]string{"name": "app.Default", "targetActivity": ".Home"}, launcherFilter()...),
+				component("activity", map[string]string{"name": "app.Home", "icon": "@home"}),
+			},
+			want: "@home",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			collector := manifestTokens(t, map[string]map[string]string{
+				"manifest":    {"package": "app", "versionCode": "1"},
+				"application": {"icon": "@app"},
+			})
+			for _, tokens := range tt.components {
+				for _, token := range tokens {
+					if err := collector.EncodeToken(token); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			info, err := collector.result()
+			if err != nil {
+				t.Fatalf("result() error = %v", err)
+			}
+			if info.Icon != tt.want {
+				t.Errorf("Icon = %q, want %q", info.Icon, tt.want)
+			}
+		})
+	}
+}
+
 // certFingerprintFromPEM reads an x509 PEM certificate and returns its
 // lowercase hex SHA-256 fingerprint, matching APKInfo.CertFingerprint's
 // format. Fixtures under testdata/*.x509.pem come from the AOSP apksig
