@@ -543,3 +543,13 @@ func writePEMCert(t *testing.T, path string, cert *x509.Certificate) {
 		t.Fatalf("WriteFile cert: %v", err)
 	}
 }
+
+func TestDefaultExpiryIsTwoYears(t *testing.T) {
+	const want = 63_072_000
+	if got := int64(DefaultExpiry / time.Second); got != want {
+		t.Fatalf("DefaultExpiryUnix = %d, want %d", got, want)
+	}
+	if DefaultExpiryUnix != want {
+		t.Fatalf("DefaultExpiryUnix = %d, want %d", DefaultExpiryUnix, want)
+	}
+}

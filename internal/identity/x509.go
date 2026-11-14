@@ -29,6 +29,9 @@ import (
 // DefaultExpiry is the default validity period for identity proofs.
 const DefaultExpiry = 2 * 365 * 24 * time.Hour // 2 years
 
+// DefaultExpiryUnix is DefaultExpiry as whole Unix seconds for expiry timestamps.
+const DefaultExpiryUnix = int64(DefaultExpiry / time.Second)
+
 // JKS magic bytes: 0xFEEDFEED
 var jksMagic = []byte{0xFE, 0xED, 0xFE, 0xED}
 
