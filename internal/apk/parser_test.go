@@ -902,6 +902,59 @@ func TestParseAdaptiveIconBackground(t *testing.T) {
 	}
 }
 
+// Lockday's adaptive background is a <shape> with a top-to-bottom gradient
+// from #2c1c82 to #6a45f0, not a vector or a bitmap.
+func TestParseAdaptiveIconShapeBackground(t *testing.T) {
+	path := filepath.Join("..", "..", "testdata", "apks", "lockday-1.9.0.apk")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		t.Skipf("test APK not found: %s", path)
+	}
+	info, err := Parse(t.Context(), path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	icon, _, err := image.Decode(bytes.NewReader(info.Icon))
+	if err != nil {
+		t.Fatalf("decode icon: %v", err)
+	}
+	if got := icon.Bounds().Dx(); got != 512 {
+		t.Errorf("icon width = %d, want 512", got)
+	}
+	top := color.NRGBAModel.Convert(icon.At(256, 2)).(color.NRGBA)
+	bottom := color.NRGBAModel.Convert(icon.At(256, 509)).(color.NRGBA)
+	if top.A != 0xff || bottom.A != 0xff {
+		t.Fatalf("icon edges alpha = %d, %d, want an opaque background", top.A, bottom.A)
+	}
+	if top.B > 0xa0 || bottom.B < 0xd0 {
+		t.Errorf("icon blue top %d, bottom %d, want dark #2c1c82-ish at the top turning #6a45f0-ish at the bottom", top.B, bottom.B)
+	}
+	// The check mark is a 4-unit stroke on a 108-unit viewport, about 24px
+	// here. Points 9px either side of its first segment's center are on it.
+	for _, p := range []image.Point{{229, 351}, {224, 359}, {234, 344}} {
+		if got := color.NRGBAModel.Convert(icon.At(p.X, p.Y)).(color.NRGBA); got.R > 0xa0 {
+			t.Errorf("check mark at %v = %v, want the #5a33d8 stroke", p, got)
+		}
+	}
+}
+
+func TestShapeGradientCoords(t *testing.T) {
+	tests := []struct {
+		angle float64
+		want  string
+	}{
+		{0, `x1="0" y1="50" x2="100" y2="50"`},
+		{45, `x1="0" y1="100" x2="100" y2="0"`},
+		{90, `x1="50" y1="100" x2="50" y2="0"`},
+		{270, `x1="50" y1="0" x2="50" y2="100"`},
+		{315, `x1="0" y1="0" x2="100" y2="100"`},
+	}
+	for _, tt := range tests {
+		if got := shapeGradientCoords(tt.angle, 100); got != tt.want {
+			t.Errorf("shapeGradientCoords(%g, 100) = %s, want %s", tt.angle, got, tt.want)
+		}
+	}
+}
+
 func TestToPNGBoundsDecoding(t *testing.T) {
 	var small bytes.Buffer
 	if err := png.Encode(&small, image.NewNRGBA(image.Rect(0, 0, 4, 4))); err != nil {

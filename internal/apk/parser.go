@@ -1062,35 +1062,35 @@ func (a *apkArchive) renderAdaptiveIcon(name string, requireBackground bool) ([]
 	return encodePNG(composeAdaptiveIcon(layers))
 }
 
-// adaptiveLayer renders one layer: an opaque color, a vector at
+// adaptiveLayer renders one layer: an opaque color, an XML drawable at
 // adaptiveLayerSize, or the widest bitmap of the resource.
 func (a *apkArchive) adaptiveLayer(value string) (image.Image, error) {
 	if parsed, ok := a.resolveColor(value); ok {
-		return image.NewUniform(color.RGBA{R: parsed.R, G: parsed.G, B: parsed.B, A: 0xff}), nil
+		return opaque(parsed), nil
 	}
 	paths := a.iconPaths("", value)
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("layer %q is missing", value)
 	}
 	var bitmaps []string
-	var vectorErr error
+	var drawableErr error
 	for _, name := range paths {
 		if !strings.EqualFold(path.Ext(name), ".xml") {
 			bitmaps = append(bitmaps, name)
 			continue
 		}
-		img, err := a.renderVector(name)
+		img, err := a.renderDrawable(name)
 		if err == nil {
 			return img, nil
 		}
-		if vectorErr == nil {
-			vectorErr = err
+		if drawableErr == nil {
+			drawableErr = err
 		}
 	}
 	data, _, err := a.widestBitmap(bitmaps)
 	if data == nil {
 		if err == nil {
-			err = vectorErr
+			err = drawableErr
 		}
 		if err == nil {
 			err = fmt.Errorf("layer %q has no drawable", value)
@@ -1215,13 +1215,118 @@ func (c *adaptiveIconCollector) Flush() error {
 	return nil
 }
 
-// renderVector renders a vector drawable at adaptiveLayerSize over
-// transparency.
-func (a *apkArchive) renderVector(name string) (*image.RGBA, error) {
+// renderDrawable renders an XML drawable layer: a shape when its root is
+// <shape>, otherwise a vector.
+func (a *apkArchive) renderDrawable(name string) (image.Image, error) {
 	data, err := a.readEntry(name, maxAPKResourceSize)
 	if err != nil {
-		return nil, fmt.Errorf("read vector resource: %w", err)
+		return nil, fmt.Errorf("read drawable resource: %w", err)
 	}
+	shape := shapeCollector{}
+	if err := apkparser.ParseXml(bytes.NewReader(data), &shape, a.table); err != nil {
+		return nil, fmt.Errorf("parse drawable resource %q: %w", name, err)
+	}
+	if shape.root != nil && shape.root.Name.Local == "shape" {
+		return a.renderShape(name, shape)
+	}
+	return a.renderVector(name, data)
+}
+
+// renderShape renders a rectangle shape drawable: a solid color, or a linear
+// gradient at adaptiveLayerSize. Corner radii are ignored because
+// composeAdaptiveIcon crops them away.
+func (a *apkArchive) renderShape(name string, shape shapeCollector) (image.Image, error) {
+	if kind := attribute(*shape.root, "shape"); kind != "" && kind != "0" {
+		return nil, fmt.Errorf("shape %q is not a rectangle", name)
+	}
+	if shape.gradient.gradient == nil {
+		if shape.solid == nil {
+			return nil, fmt.Errorf("shape %q has no fill", name)
+		}
+		value := attribute(*shape.solid, "color")
+		parsed, ok := a.resolveColor(value)
+		if !ok {
+			return nil, fmt.Errorf("shape %q color %q is unsupported", name, value)
+		}
+		return opaque(parsed), nil
+	}
+	gradient := *shape.gradient.gradient
+	if kind := attribute(gradient, "type"); kind != "" && kind != "0" {
+		return nil, fmt.Errorf("shape %q gradient type %q is unsupported", name, kind)
+	}
+	coords := shapeGradientCoords(floatAttribute(gradient, "angle", 0), adaptiveLayerSize)
+	def, err := a.svgGradientDef(name, "fill", "linearGradient", coords, gradient, shape.gradient.colorStops())
+	if err != nil {
+		return nil, err
+	}
+	svg := fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %[1]d %[1]d"><defs>%[2]s</defs><path d="M0 0H%[1]dV%[1]dH0Z" fill="url(#fill)"/></svg>`,
+		adaptiveLayerSize, def)
+	icon, err := oksvg.ReadIconStream(strings.NewReader(svg))
+	if err != nil {
+		return nil, fmt.Errorf("read shape SVG: %w", err)
+	}
+	return rasterize(icon), nil
+}
+
+// shapeGradientCoords places a shape's linear gradient on a size-pixel square.
+// Android measures angle counterclockwise from left-to-right, so 90 runs
+// bottom to top and 270 top to bottom. At multiples of 45 the gradient spans
+// corner to corner.
+func shapeGradientCoords(angle float64, size int) string {
+	rad := angle * math.Pi / 180
+	dx, dy := math.Cos(rad), -math.Sin(rad)
+	center := float64(size) / 2
+	half := (math.Abs(dx) + math.Abs(dy)) * center
+	// Rounding keeps float noise such as cos(90°) out of the SVG, and + 0
+	// turns -0 into 0.
+	at := func(v float64) float64 { return math.Round(v*1000)/1000 + 0 }
+	return fmt.Sprintf(`x1="%g" y1="%g" x2="%g" y2="%g"`,
+		at(center-dx*half), at(center-dy*half), at(center+dx*half), at(center+dy*half))
+}
+
+// shapeCollector reads a shape drawable: its root element, solid fill, and
+// gradient.
+type shapeCollector struct {
+	root     *xml.StartElement
+	solid    *xml.StartElement
+	gradient gradientCollector
+}
+
+func (c *shapeCollector) EncodeToken(token xml.Token) error {
+	start, ok := token.(xml.StartElement)
+	if !ok {
+		return nil
+	}
+	if c.root == nil {
+		c.root = &start
+	}
+	if start.Name.Local == "solid" && c.solid == nil {
+		c.solid = &start
+	}
+	return c.gradient.EncodeToken(token)
+}
+
+func (c *shapeCollector) Flush() error {
+	return nil
+}
+
+// opaque is a full-bleed layer of c. Adaptive icon backgrounds are opaque.
+func opaque(c color.NRGBA) *image.Uniform {
+	return image.NewUniform(color.RGBA{R: c.R, G: c.G, B: c.B, A: 0xff})
+}
+
+// rasterize draws an SVG icon at adaptiveLayerSize over transparency.
+func rasterize(icon *oksvg.SvgIcon) *image.RGBA {
+	img := image.NewRGBA(image.Rect(0, 0, adaptiveLayerSize, adaptiveLayerSize))
+	icon.SetTarget(0, 0, adaptiveLayerSize, adaptiveLayerSize)
+	scanner := rasterx.NewScannerGV(adaptiveLayerSize, adaptiveLayerSize, img, img.Bounds())
+	icon.Draw(rasterx.NewDasher(adaptiveLayerSize, adaptiveLayerSize, scanner), 1)
+	return img
+}
+
+// renderVector renders a vector drawable at adaptiveLayerSize over
+// transparency.
+func (a *apkArchive) renderVector(name string, data []byte) (*image.RGBA, error) {
 	collector := vectorSVGCollector{archive: a, size: adaptiveLayerSize}
 	if err := apkparser.ParseXml(bytes.NewReader(data), &collector, a.table); err != nil {
 		return nil, fmt.Errorf("parse vector resource %q: %w", name, err)
@@ -1244,10 +1349,7 @@ func (a *apkArchive) renderVector(name string) (*image.RGBA, error) {
 		}
 	}
 
-	img := image.NewRGBA(image.Rect(0, 0, adaptiveLayerSize, adaptiveLayerSize))
-	icon.SetTarget(0, 0, adaptiveLayerSize, adaptiveLayerSize)
-	scanner := rasterx.NewScannerGV(adaptiveLayerSize, adaptiveLayerSize, img, img.Bounds())
-	icon.Draw(rasterx.NewDasher(adaptiveLayerSize, adaptiveLayerSize, scanner), 1)
+	img := rasterize(icon)
 	// Gradients and theme colors render as nothing, which would hide a usable
 	// bitmap behind an empty layer.
 	if !hasVisiblePixel(img) {
@@ -1353,9 +1455,15 @@ func (c *vectorSVGCollector) EncodeToken(token xml.Token) error {
 				svgAttribute(attribute(token, "pathData"), ""),
 				c.paint("fill", attribute(token, "fillColor"), floatAttribute(token, "fillAlpha", 1)))
 			if stroke := attribute(token, "strokeColor"); stroke != "" {
-				fmt.Fprintf(&c.body, ` %s stroke-width="%g"`,
-					c.paint("stroke", stroke, floatAttribute(token, "strokeAlpha", 1)),
-					floatAttribute(token, "strokeWidth", 0))
+				// oksvg strokes in pixels after transforming the path, so
+				// the width is scaled here. SVG has one width, so a
+				// non-uniform scale uses the mean.
+				t := c.transform()
+				width := floatAttribute(token, "strokeWidth", 0) * math.Sqrt(math.Abs(t.A*t.D-t.B*t.C))
+				fmt.Fprintf(&c.body, ` %s stroke-width="%g" stroke-linecap="%s" stroke-linejoin="%s"`,
+					c.paint("stroke", stroke, floatAttribute(token, "strokeAlpha", 1)), width,
+					androidEnum(attribute(token, "strokeLineCap"), "butt", "round", "square"),
+					androidEnum(attribute(token, "strokeLineJoin"), "miter", "round", "bevel"))
 			}
 			c.body.WriteString("/>")
 			c.nonZero = append(c.nonZero, attribute(token, "fillType") != "1")
@@ -1376,6 +1484,16 @@ func (c *vectorSVGCollector) EncodeToken(token xml.Token) error {
 
 func (c *vectorSVGCollector) Flush() error {
 	return nil
+}
+
+// androidEnum names an enum attribute apkparser printed as its index. A
+// missing or unknown index is the first name, Android's default.
+func androidEnum(value string, names ...string) string {
+	i, err := strconv.Atoi(value)
+	if err != nil || i < 0 || i >= len(names) {
+		return names[0]
+	}
+	return names[i]
 }
 
 func (c *vectorSVGCollector) svg() (string, error) {
@@ -1452,14 +1570,27 @@ func (a *apkArchive) svgGradient(name, id string, transform rasterx.Matrix2D) (s
 		return "", fmt.Errorf("%q is not a gradient", name)
 	}
 	gradient := *collector.gradient
-	stops := collector.stops
-	if len(stops) == 0 {
-		for _, stop := range []gradientStop{{"startColor", 0}, {"centerColor", 0.5}, {"endColor", 1}} {
-			if value := attribute(gradient, stop.color); value != "" {
-				stops = append(stops, gradientStop{value, stop.offset})
-			}
-		}
+	switch attribute(gradient, "type") {
+	case "", "0":
+		x1, y1 := transform.Transform(floatAttribute(gradient, "startX", 0), floatAttribute(gradient, "startY", 0))
+		x2, y2 := transform.Transform(floatAttribute(gradient, "endX", 0), floatAttribute(gradient, "endY", 0))
+		coords := fmt.Sprintf(`x1="%g" y1="%g" x2="%g" y2="%g"`, x1, y1, x2, y2)
+		return a.svgGradientDef(name, id, "linearGradient", coords, gradient, collector.colorStops())
+	case "1":
+		cx, cy := transform.Transform(floatAttribute(gradient, "centerX", 0), floatAttribute(gradient, "centerY", 0))
+		// SVG has one radius, so a non-uniform scale uses the mean.
+		radius := floatAttribute(gradient, "gradientRadius", 0) * math.Sqrt(math.Abs(transform.A*transform.D-transform.B*transform.C))
+		coords := fmt.Sprintf(`cx="%g" cy="%g" r="%g"`, cx, cy, radius)
+		return a.svgGradientDef(name, id, "radialGradient", coords, gradient, collector.colorStops())
+	default:
+		return "", fmt.Errorf("gradient %q type %q is unsupported", name, attribute(gradient, "type"))
 	}
+}
+
+// svgGradientDef writes an SVG gradient element with the given id. coords
+// places it in pixels: x1, y1, x2, y2 for a linearGradient, or cx, cy, r for
+// a radialGradient.
+func (a *apkArchive) svgGradientDef(name, id, element, coords string, gradient xml.StartElement, stops []gradientStop) (string, error) {
 	if len(stops) == 0 {
 		return "", fmt.Errorf("gradient %q has no colors", name)
 	}
@@ -1470,25 +1601,8 @@ func (a *apkArchive) svgGradient(name, id string, transform rasterx.Matrix2D) (s
 	case "2":
 		spread = "reflect"
 	}
-
 	var svg strings.Builder
-	element := "linearGradient"
-	switch attribute(gradient, "type") {
-	case "", "0":
-		x1, y1 := transform.Transform(floatAttribute(gradient, "startX", 0), floatAttribute(gradient, "startY", 0))
-		x2, y2 := transform.Transform(floatAttribute(gradient, "endX", 0), floatAttribute(gradient, "endY", 0))
-		fmt.Fprintf(&svg, `<linearGradient id="%s" gradientUnits="userSpaceOnUse" spreadMethod="%s" x1="%g" y1="%g" x2="%g" y2="%g">`,
-			id, spread, x1, y1, x2, y2)
-	case "1":
-		element = "radialGradient"
-		cx, cy := transform.Transform(floatAttribute(gradient, "centerX", 0), floatAttribute(gradient, "centerY", 0))
-		// SVG has one radius, so a non-uniform scale uses the mean.
-		radius := floatAttribute(gradient, "gradientRadius", 0) * math.Sqrt(math.Abs(transform.A*transform.D-transform.B*transform.C))
-		fmt.Fprintf(&svg, `<radialGradient id="%s" gradientUnits="userSpaceOnUse" spreadMethod="%s" cx="%g" cy="%g" r="%g">`,
-			id, spread, cx, cy, radius)
-	default:
-		return "", fmt.Errorf("gradient %q type %q is unsupported", name, attribute(gradient, "type"))
-	}
+	fmt.Fprintf(&svg, `<%s id="%s" gradientUnits="userSpaceOnUse" spreadMethod="%s" %s>`, element, id, spread, coords)
 	for _, stop := range stops {
 		parsed, ok := a.resolveColor(stop.color)
 		if !ok {
@@ -1529,6 +1643,21 @@ func (c *gradientCollector) EncodeToken(token xml.Token) error {
 
 func (c *gradientCollector) Flush() error {
 	return nil
+}
+
+// colorStops returns the gradient's <item> stops, or else its start, center,
+// and end colors.
+func (c *gradientCollector) colorStops() []gradientStop {
+	if len(c.stops) > 0 || c.gradient == nil {
+		return c.stops
+	}
+	var stops []gradientStop
+	for _, stop := range []gradientStop{{"startColor", 0}, {"centerColor", 0.5}, {"endColor", 1}} {
+		if value := attribute(*c.gradient, stop.color); value != "" {
+			stops = append(stops, gradientStop{value, stop.offset})
+		}
+	}
+	return stops
 }
 
 func floatAttribute(start xml.StartElement, name string, fallback float64) float64 {
