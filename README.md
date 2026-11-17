@@ -1,6 +1,6 @@
 # zsp
 
-A fast CLI tool for publishing Android apps to Nostr relays. Used by [Zapstore](https://zapstore.dev).
+A CLI that publishes Android apps to Nostr relays for [Zapstore](https://zapstore.dev).
 
 ## Features
 
@@ -12,19 +12,17 @@ A fast CLI tool for publishing Android apps to Nostr relays. Used by [Zapstore](
 - **Nostr event signing** with an `nsec` or a NIP-46 bunker
 - **Relay publishing** of the application, release, asset, and C1 proof
 
-## Installation
+## Install
 
-### From Source
+Download a binary from [releases](https://github.com/zapstore/zsp/releases), or build from source:
 
 ```bash
 go install github.com/zapstore/zsp/v2/cmd/zsp@latest
 ```
 
-### Pre-built Binaries
+In a checkout, `make build` builds `dist/zsp-<os>-<arch>` and links it as `./zsp`. `make help` lists every target.
 
-Download from [releases](https://github.com/zapstore/zsp/releases).
-
-## Quick Start
+## Use
 
 Run the wizard yourself:
 

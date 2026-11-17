@@ -2,7 +2,7 @@
 
 CLI and Go library for publishing Android apps to the Zapstore catalog.
 
-[`SPEC.md`](SPEC.md) is the authority for behavior. If this file conflicts,
+`SPEC.md` is the authority for behavior. If this file conflicts,
 `SPEC.md` wins. The contracts it depends on are in
 [`../product/specs/`](../product/specs/).
 

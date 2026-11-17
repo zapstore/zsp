@@ -37,3 +37,6 @@ testdata/catalog/
 
 # Build
 dist/
+
+# Specs stay local
+SPEC.md
