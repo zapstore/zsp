@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,7 +28,18 @@ const (
 
 	// RelayTimeout is the timeout for relay operations.
 	RelayTimeout = 30 * time.Second
+	// ProfileRelayTimeout bounds one relay's answer to a profile query.
+	ProfileRelayTimeout = 5 * time.Second
 )
+
+// DefaultProfileRelays are the upstream relays used to resolve a developer's
+// kind 0 before the catalog relay has copied it. They match the webapp profile
+// lookup and the relay's RELAY_PROFILE_RELAYS default.
+var DefaultProfileRelays = []string{
+	"wss://purplepag.es",
+	"wss://relay.nostr.band",
+	"wss://relay.vertexlab.io",
+}
 
 // Publisher handles publishing events to relays.
 type Publisher struct {
@@ -448,17 +460,34 @@ func relayInfoURL(relayURL string) (string, error) {
 	return parsed.String(), nil
 }
 
-// ProfileName returns the display_name or name from a signed kind 0 profile.
-func (p *Publisher) ProfileName(ctx context.Context, pubkey string) string {
+// DeveloperProfile returns the newest signed kind 0 for pubkey. Relays are
+// queried in parallel, each for at most ProfileRelayTimeout, except those in
+// unreachable. The catalog relays are asked; DefaultProfileRelays are added
+// only when every catalog relay is DefaultRelay, so a private setup never
+// sends the pubkey to a public relay. warnings lists relays that failed; err
+// is set only when every relay failed.
+func (p *Publisher) DeveloperProfile(ctx context.Context, pubkey string, unreachable []string) (*nostr.Event, []error, error) {
 	if pubkey == "" {
-		return ""
+		return nil, nil, nil
 	}
-	for _, relayURL := range p.relayURLs {
-		events, err := p.queryRelayMultiple(ctx, relayURL, nostr.Filter{Kinds: []int{0}, Authors: []string{pubkey}, Limit: 1})
+	relays := p.profileRelays(unreachable)
+	filter := nostr.Filter{Kinds: []int{0}, Authors: []string{pubkey}, Limit: 1}
+	found := make([][]*nostr.Event, len(relays))
+	errs := make([]error, len(relays))
+	var wg sync.WaitGroup
+	for i, relayURL := range relays {
+		wg.Go(func() { found[i], errs[i] = p.queryRelay(ctx, relayURL, filter, ProfileRelayTimeout) })
+	}
+	wg.Wait()
+
+	var warnings []error
+	var latest *nostr.Event
+	for i, err := range errs {
 		if err != nil {
+			warnings = append(warnings, relayFailure(relays[i], err))
 			continue
 		}
-		for _, event := range events {
+		for _, event := range found[i] {
 			if event == nil || event.PubKey != pubkey {
 				continue
 			}
@@ -466,21 +495,33 @@ func (p *Publisher) ProfileName(ctx context.Context, pubkey string) string {
 			if signatureErr != nil || !valid {
 				continue
 			}
-			var profile struct {
-				DisplayName string `json:"display_name"`
-				Name        string `json:"name"`
-			}
-			if json.Unmarshal([]byte(event.Content), &profile) == nil {
-				if profile.DisplayName != "" {
-					return profile.DisplayName
-				}
-				if profile.Name != "" {
-					return profile.Name
-				}
+			if latest == nil || event.CreatedAt > latest.CreatedAt {
+				latest = event
 			}
 		}
 	}
-	return ""
+	if latest != nil {
+		return latest, warnings, nil
+	}
+	if len(warnings) == len(relays) {
+		return nil, warnings, relayQueryError("profile", warnings)
+	}
+	return nil, warnings, nil
+}
+
+func (p *Publisher) profileRelays(unreachable []string) []string {
+	relays := append([]string(nil), p.relayURLs...)
+	if p.onDefaultRelays() {
+		relays = append(relays, DefaultProfileRelays...)
+	}
+	relays = uniqueRelayURLs(relays)
+	return slices.DeleteFunc(relays, func(relayURL string) bool { return slices.Contains(unreachable, relayURL) })
+}
+
+func (p *Publisher) onDefaultRelays() bool {
+	return !slices.ContainsFunc(p.relayURLs, func(relayURL string) bool {
+		return strings.TrimRight(relayURL, "/") != DefaultRelay
+	})
 }
 
 func uniqueRelayURLs(values []string) []string {
@@ -630,7 +671,11 @@ func relayQueryError(operation string, warnings []error) error {
 
 // queryRelayMultiple queries a single relay and returns all matching events.
 func (p *Publisher) queryRelayMultiple(ctx context.Context, relayURL string, filter nostr.Filter) ([]*nostr.Event, error) {
-	ctx, cancel := context.WithTimeout(ctx, RelayTimeout)
+	return p.queryRelay(ctx, relayURL, filter, RelayTimeout)
+}
+
+func (p *Publisher) queryRelay(ctx context.Context, relayURL string, filter nostr.Filter, timeout time.Duration) ([]*nostr.Event, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	if path, ok := socketPath(relayURL); ok {

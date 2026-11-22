@@ -66,6 +66,7 @@ func startLocalRelay(binary string) (relayURL, blossomURL, socketPath string, st
 		"RELAY_SOFTWARE=https://github.com/zapstore/relay",
 		"SIGN_WITH=1",
 		"DELTA_INTERVAL=1h",
+		"BLOSSOM_PRUNE_INTERVAL=1h",
 		"ANALYTICS_ADDRESS=" + analyticsAddr,
 		"BLOSSOM_HOSTNAME=127.0.0.1",
 		"BLOSSOM_ADDRESS=" + blossomAddr,

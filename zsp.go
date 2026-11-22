@@ -84,6 +84,7 @@ var (
 	ErrAPKSelectionRequired = release.ErrAPKSelectionRequired
 	ErrProofRequired        = release.ErrProofRequired
 	ErrProofUnauthorized    = release.ErrProofUnauthorized
+	ErrProfileRequired      = release.ErrProfileRequired
 	ErrSigner               = release.ErrSigner
 	ErrAlreadyPublished     = release.ErrAlreadyPublished
 	ErrReleaseDowngrade     = release.ErrReleaseDowngrade

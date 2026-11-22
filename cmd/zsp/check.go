@@ -63,18 +63,23 @@ func checkCommand(ctx context.Context, opts *cli.Options) int {
 }
 
 // checkNextStep is the first of: create or renew the proof, nothing to
-// publish, a human must provide or authorize SIGN_WITH, publish.
+// publish, a human must provide or authorize SIGN_WITH, a human must publish
+// the signer's Nostr profile before a new listing, publish.
 func checkNextStep(apk *zsp.APK, status *zsp.CheckResult, hotbox, zapstoreRelay bool, now time.Time) *cliNextStep {
 	version := fmt.Sprintf("%s (%d)", apk.VersionName, apk.VersionCode)
 	newer := apk.VersionCode > status.PublishedVersionCode
 	proof := status.Proof
 	renew := proof != nil && status.Signer != "" && proof.Owner == status.Signer && proof.ExpiresAt.Sub(now) < c1RenewalWindow
+	needsProfile := status.Signer != "" && !status.HasProfile && !status.Listed
 	if proof == nil || renew {
 		reason := "Prove the app is yours."
 		if renew {
 			reason = "Renew your proof; it expires " + proof.ExpiresAt.Format("2006-01-02") + "."
 		}
 		if hotbox && status.Signer != "" && newer {
+			if needsProfile {
+				return profileNextStep()
+			}
 			return &cliNextStep{Command: "zsp publish", Reason: reason + " Hotbox signs it while publishing version " + version + "."}
 		}
 		return &cliNextStep{Command: "zsp", Reason: reason, RequiresHuman: true}
@@ -92,7 +97,18 @@ func checkNextStep(apk *zsp.APK, status *zsp.CheckResult, hotbox, zapstoreRelay 
 		}
 		return &cliNextStep{Command: "zsp", Reason: reason, RequiresHuman: true}
 	}
+	if needsProfile {
+		return profileNextStep()
+	}
 	return &cliNextStep{Command: "zsp publish", Reason: "Publish version " + version + "."}
+}
+
+func profileNextStep() *cliNextStep {
+	return &cliNextStep{
+		Command:       "zsp",
+		Reason:        "Publish a Nostr profile (kind 0) with your name before listing this app.",
+		RequiresHuman: true,
+	}
 }
 
 func hasZapstoreRelay(relays []string) bool {
@@ -128,6 +144,7 @@ type checkDocument struct {
 	PublishedVersionCode int64           `json:"published_version_code"`
 	Signer               *string         `json:"signer"`
 	Authorized           bool            `json:"authorized"`
+	HasProfile           bool            `json:"has_profile"`
 	NextStep             *cliNextStep    `json:"next_step"`
 	Warnings             []string        `json:"warnings"`
 }
@@ -142,6 +159,7 @@ func newCheckDocument(apk *zsp.APK, status *zsp.CheckResult, step *cliNextStep, 
 		Listed:               status.Listed,
 		PublishedVersionCode: status.PublishedVersionCode,
 		Authorized:           status.Authorized,
+		HasProfile:           status.HasProfile,
 		NextStep:             step,
 		Warnings:             warnings,
 	}

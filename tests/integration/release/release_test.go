@@ -24,6 +24,7 @@ import (
 	nostr "github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
 
+	internalnostr "github.com/zapstore/zsp/v2/internal/nostr"
 	"github.com/zapstore/zsp/v2/tests/integration/fixture"
 )
 
@@ -109,6 +110,8 @@ func TestRelease(t *testing.T) {
 	}
 	writeProject(t, work, signed, grant)
 
+	admitPublisher(t, grant.pubkey)
+	seedProfile(t, grant.signWith)
 	before := zspCheck(t, work)
 	if before.Listed || before.Proof != nil || before.PublishedVersionCode != 0 {
 		t.Fatalf("check before publish = %+v", before)
@@ -117,7 +120,6 @@ func TestRelease(t *testing.T) {
 		t.Fatalf("next step before publish = %+v, want zsp publish", before.NextStep)
 	}
 
-	admitPublisher(t, grant.pubkey)
 	runWizard(t, work)
 	proofID, certHash := assertCatalog(t, grant.pubkey, 1, 1, 1)
 
@@ -428,6 +430,30 @@ func admitPublisher(t *testing.T, pubkey string) {
 	}
 	if !resp.OK {
 		t.Fatalf("admit %s: %s", pubkey, resp.Error)
+	}
+}
+
+// seedProfile publishes a kind 0 for signWith: a new listing needs one.
+func seedProfile(t *testing.T, signWith string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	signer, err := internalnostr.NewSigner(ctx, signWith)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer signer.Close()
+	event := &nostr.Event{Kind: 0, CreatedAt: nostr.Now(), Content: `{"name":"Release Test"}`}
+	if err := signer.Sign(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	relay, err := nostr.RelayConnect(ctx, relayURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	if err := relay.Publish(ctx, *event); err != nil {
+		t.Fatalf("seed profile for %s: %v", event.PubKey, err)
 	}
 }
 

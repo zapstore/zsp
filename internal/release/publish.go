@@ -189,6 +189,11 @@ func Publish(ctx context.Context, config PublishConfig, candidate *APK, options 
 	if joinedAuthor != "" {
 		options.SkipAppEvent = true
 	}
+	profileWarnings, err := requireProfileForNewListing(ctx, publisher, parsed.PackageID, signer.PublicKey(), options.SkipAppEvent, unreachable)
+	result.Warnings = append(result.Warnings, profileWarnings...)
+	if err != nil {
+		return nil, err
+	}
 	if !options.SkipAppEvent {
 		var mediaWarnings []string
 		media, mediaWarnings, err = prepareMedia(ctx, preparedConfig, parsed, blossomURL, !options.SkipMediaCompression)
@@ -922,6 +927,33 @@ func reportPublish(options PublishOptions, operation, phase, target string, comp
 	if options.OnProgress != nil {
 		options.OnProgress(Progress{Operation: operation, Phase: phase, Target: target, Completed: completed, Total: total})
 	}
+}
+
+// requireProfileForNewListing returns ErrProfileRequired when this publish
+// would list appID for the first time and pubkey has no kind 0. An update to a
+// listed app, or a publish that leaves the app event alone, needs no profile.
+func requireProfileForNewListing(ctx context.Context, publisher *internalnostr.Publisher, appID, pubkey string, skipAppEvent bool, unreachable []string) ([]string, error) {
+	if skipAppEvent {
+		return nil, nil
+	}
+	listed, appWarnings, err := publisher.HasAppEvents(ctx, appID)
+	warnings := safeRelayQueryWarnings("application event", appWarnings)
+	if err != nil {
+		return warnings, checkQueryError(ctx, err, "find app")
+	}
+	if listed {
+		return warnings, nil
+	}
+	profile, profileWarnings, err := publisher.DeveloperProfile(ctx, pubkey, unreachable)
+	warnings = append(warnings, safeRelayQueryWarnings("profile", profileWarnings)...)
+	if err != nil {
+		return warnings, checkQueryError(ctx, err, "check profile")
+	}
+	if profile == nil {
+		return warnings, operationErr(ErrProfileRequired, false,
+			"publish a Nostr profile (kind 0) before listing an app; set name and picture in any Nostr client")
+	}
+	return warnings, nil
 }
 
 // otherApplicationAuthor returns the author of the newest kind 32267 for the

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -147,5 +148,19 @@ func TestLoadPublicConfigCheckAcceptsAPK(t *testing.T) {
 	}
 	if _, err := loadPublicConfig(&cli.Options{Command: cli.CommandCheck, Args: []string{apk + ".missing.apk"}}); !errors.Is(err, zsp.ErrInvalidConfig) {
 		t.Fatalf("missing APK error = %v, want ErrInvalidConfig", err)
+	}
+}
+
+func TestProfileRequiredMapsToCodeSummaryAndNextStep(t *testing.T) {
+	err := fmt.Errorf("publish: %w", zsp.ErrProfileRequired)
+	code := publishErrorCode(err)
+	if code != "profile_required" {
+		t.Fatalf("publishErrorCode() = %q, want profile_required", code)
+	}
+	if summary := safeSummary(code); !strings.Contains(summary, "kind 0") {
+		t.Fatalf("safeSummary(%q) = %q, want it to name kind 0", code, summary)
+	}
+	if step := profileNextStep(); step.Command != "zsp" || !step.RequiresHuman || !strings.Contains(step.Reason, "kind 0") {
+		t.Fatalf("profileNextStep() = %+v, want a human step naming kind 0", step)
 	}
 }

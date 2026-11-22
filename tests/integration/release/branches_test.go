@@ -99,6 +99,7 @@ func TestUploadRejected(t *testing.T) {
 	app := newReleaseApp(t, "dev.zapstore.branchupload", "Branch Upload")
 	apk := app.sign(t, 2)
 	app.yaml(t, apk)
+	seedProfile(t, app.secret)
 	box := startWizard(t, app.work, []string{"SIGN_WITH=" + app.secret, "KEYSTORE_PASSWORD=" + keystorePass})
 	wizardToChoice(t, box, "", app.keystore)
 	mustSend(t, box, "\r")
@@ -157,6 +158,7 @@ func TestWizardStops(t *testing.T) {
 func TestPreviewRejectAndCancel(t *testing.T) {
 	reject := newReleaseApp(t, "dev.zapstore.branchreject", "Branch Reject")
 	reject.yaml(t, reject.sign(t, 2))
+	seedProfile(t, reject.secret)
 	box := startWizard(t, reject.work, []string{"SIGN_WITH=" + reject.secret, "KEYSTORE_PASSWORD=" + keystorePass})
 	wizardToChoice(t, box, "", reject.keystore)
 	mustSend(t, box, "\r")
@@ -168,6 +170,7 @@ func TestPreviewRejectAndCancel(t *testing.T) {
 
 	cancel := newReleaseApp(t, "dev.zapstore.branchcancel", "Branch Cancel")
 	cancel.yaml(t, cancel.sign(t, 2))
+	seedProfile(t, cancel.secret)
 	stopped := startWizard(t, cancel.work, []string{"SIGN_WITH=" + cancel.secret, "KEYSTORE_PASSWORD=" + keystorePass})
 	wizardToChoice(t, stopped, "", cancel.keystore)
 	mustSend(t, stopped, "\r")
@@ -184,6 +187,7 @@ func TestWizardPublishBranches(t *testing.T) {
 	first := app.sign(t, 2)
 	app.yaml(t, first)
 	admitPublisher(t, app.pubkey)
+	seedProfile(t, app.secret)
 	delegateSecret, delegate := newKey(t)
 	admitPublisher(t, delegate)
 	npub, err := nip19.EncodePublicKey(delegate)
