@@ -16,7 +16,7 @@ endif
 # v2.0.0 -> 2.0.0. Release asset names use this.
 RELVER := $(patsubst v%,%,$(VERSION))
 
-ifneq ($(filter release,$(MAKECMDGOALS)),)
+ifneq ($(filter release publish,$(MAKECMDGOALS)),)
 ifeq ($(VERSION),)
 $(error HEAD is not exactly a git tag; tag this commit, then run make release)
 endif
@@ -43,7 +43,7 @@ RELAY_DIR ?= $(abspath ../relay)
 HOTBOX_DIR ?= $(abspath ../hotbox)
 
 .DEFAULT_GOAL := help
-.PHONY: help build darwin-arm64 linux-arm64 linux-amd64 release clean test test-unit test-integration test-release
+.PHONY: help build darwin-arm64 linux-arm64 linux-amd64 release publish clean test test-unit test-integration test-release
 
 help: ## List targets
 	@awk 'BEGIN { FS = ":.*## " } /^[a-zA-Z0-9_.-]+:.*## / { printf "  %-20s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -75,8 +75,9 @@ linux-amd64: ## Linux amd64 → dist/ only
 		CC="zig cc -target x86_64-linux-gnu" \
 		CXX="zig c++ -target x86_64-linux-gnu"
 
-# Three binaries in dist/. Does not create the tag or the GitHub release.
-release: ## Three versioned binaries in dist/ (HEAD must be a tag)
+# Three binaries, their tarballs, and the Homebrew formula in dist/. Does not
+# create the tag or the GitHub release; `make publish` does the upload.
+release: ## Versioned binaries, tarballs, and zsp.rb in dist/ (HEAD must be a tag)
 	$(MAKE) darwin-arm64
 	$(MAKE) linux-arm64
 	$(MAKE) linux-amd64
@@ -84,9 +85,20 @@ release: ## Three versioned binaries in dist/ (HEAD must be a tag)
 	cp dist/$(NAME)-linux-arm64 dist/$(NAME)-$(RELVER)-linux-arm64
 	cp dist/$(NAME)-linux-amd64 dist/$(NAME)-$(RELVER)-linux-amd64
 	dist/$(NAME)-$(HOST_OS)-$(HOST_ARCH) --version | grep -qx "$(VERSION)"
+	scripts/tarball.sh dist/$(NAME)-darwin-arm64 dist/$(NAME)-$(RELVER)-darwin-arm64.tar.gz
+	scripts/tarball.sh dist/$(NAME)-linux-arm64 dist/$(NAME)-$(RELVER)-linux-arm64.tar.gz
+	scripts/tarball.sh dist/$(NAME)-linux-amd64 dist/$(NAME)-$(RELVER)-linux-amd64.tar.gz
+	scripts/brew-formula.sh $(RELVER) dist > dist/$(NAME).rb
 	@echo dist/$(NAME)-$(RELVER)-darwin-arm64
 	@echo dist/$(NAME)-$(RELVER)-linux-arm64
 	@echo dist/$(NAME)-$(RELVER)-linux-amd64
+	@echo dist/$(NAME)-$(RELVER)-darwin-arm64.tar.gz
+	@echo dist/$(NAME)-$(RELVER)-linux-arm64.tar.gz
+	@echo dist/$(NAME)-$(RELVER)-linux-amd64.tar.gz
+	@echo dist/$(NAME).rb
+
+publish: release ## Upload dist/ to the GitHub release and update the Homebrew tap (needs gh)
+	scripts/publish.sh $(VERSION) dist
 
 clean: ## Remove dist/ and symlinks
 	rm -rf dist

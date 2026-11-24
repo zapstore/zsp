@@ -14,13 +14,21 @@ A CLI that publishes Android apps to Nostr relays for [Zapstore](https://zapstor
 
 ## Install
 
-Download a binary from [releases](https://github.com/zapstore/zsp/releases), or build from source:
+With Homebrew (macOS arm64, Linux arm64 and x86-64):
+
+```bash
+brew install zapstore/tap/zsp
+```
+
+Or download a binary or tarball from [releases](https://github.com/zapstore/zsp/releases), or build from source:
 
 ```bash
 go install github.com/zapstore/zsp/v2/cmd/zsp@latest
 ```
 
 In a checkout, `make build` builds `dist/zsp-<os>-<arch>` and links it as `./zsp`. `make help` lists every target.
+
+To release: tag HEAD, then `make publish`. It builds the binaries, tarballs, and `dist/zsp.rb`, uploads them to the GitHub release, and commits the formula to `zapstore/homebrew-tap`. It needs `gh` signed in.
 
 ## Use
 
