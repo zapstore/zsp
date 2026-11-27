@@ -50,7 +50,7 @@ When the result has `"status": "pending"`, zsp is done. The relay accepted the e
 
 Leave the rest of `zapstore.yaml` when it already has `repository`, `release_source`, and `release_notes`. Do not read the yaml reference below in that case.
 
-`SIGN_WITH` must already be set. An npub cannot publish. When `HOTBOX_SOCKET` and `HOTBOX_PIN` are set, this run creates or renews the C1 proof. Listing an app for the first time also needs a Nostr profile (kind 0) for the signer; `error.code` `profile_required` and `zsp check` `has_profile: false` on an unlisted app mean they must publish one in any Nostr client. A listed app needs none. A `version_code` not greater than the published one will not publish unless they asked for `--overwrite-release`. If several APKs verify, add `--apk-hash <hash>` from `error.context.candidates`. When `error.next_step.requires_human` is true, tell them to run `zsp` themselves and stop. When there is nothing newer to publish, say so and stop.
+`SIGN_WITH` must already be set. An npub cannot publish. When `HOTBOX_SOCKET` and `HOTBOX_PIN` are set, this run creates or renews the C1 proof. A `version_code` not greater than the published one will not publish unless they asked for `--overwrite-release`. If several APKs verify, add `--apk-hash <hash>` from `error.context.candidates`. When `error.next_step.requires_human` is true, tell them to run `zsp` themselves and stop. When there is nothing newer to publish, say so and stop.
 
 The wizard may already have written `repository` or `release_source` and `metadata_sources`. Keep `metadata_sources` when the file sets it, including `[]`. Otherwise you write `zapstore.yaml`, and only when the file is missing or they asked to change it. Follow the format below. Do not invent fields.
 

@@ -26,23 +26,17 @@ func TestCheckNextStep(t *testing.T) {
 		reasonContain string
 	}{
 		{"no proof", zsp.CheckResult{}, false, true, "zsp", true, "Prove the app is yours"},
-		{"no proof with hotbox", zsp.CheckResult{Signer: owner, HasProfile: true}, true, true, "zsp publish", false, "Hotbox signs it"},
+		{"no proof with hotbox", zsp.CheckResult{Signer: owner}, true, true, "zsp publish", false, "Hotbox signs it"},
 		{"no proof with hotbox but no signer", zsp.CheckResult{}, true, true, "zsp", true, "Prove"},
 		{"own proof expiring", zsp.CheckResult{Proof: expiring, Signer: owner, Authorized: true, PublishedVersionCode: 120}, true, true, "zsp", true, "Renew your proof"},
-		{"own proof expiring with hotbox and new version", zsp.CheckResult{Proof: expiring, Signer: owner, Authorized: true, PublishedVersionCode: 110, HasProfile: true}, true, true, "zsp publish", false, "Renew"},
+		{"own proof expiring with hotbox and new version", zsp.CheckResult{Proof: expiring, Signer: owner, Authorized: true, PublishedVersionCode: 110}, true, true, "zsp publish", false, "Renew"},
 		{"already published", zsp.CheckResult{Proof: longProof, Listed: true, PublishedVersionCode: 120}, false, true, "", false, ""},
 		{"downgrade", zsp.CheckResult{Proof: longProof, Listed: true, PublishedVersionCode: 130, Signer: owner, Authorized: true}, false, true, "", false, ""},
 		{"newer, no signer, Zapstore indexes", zsp.CheckResult{Proof: longProof, Listed: true, PublishedVersionCode: 110}, false, true, "zsp", true, "next visit"},
 		{"newer, no signer, other relays", zsp.CheckResult{Proof: longProof, Listed: true, PublishedVersionCode: 110}, false, false, "zsp", true, "Set SIGN_WITH"},
-		{"newer, unauthorized signer", zsp.CheckResult{Proof: longProof, PublishedVersionCode: 110, Signer: other, HasProfile: true}, false, false, "zsp", true, "delegate"},
-		{"newer, delegate", zsp.CheckResult{Proof: longProof, PublishedVersionCode: 110, Signer: delegate, Authorized: true, HasProfile: true}, false, true, "zsp publish", false, "Publish version 1.2.0 (120)"},
-		{"claimed, never published", zsp.CheckResult{Proof: longProof, Signer: owner, Authorized: true, HasProfile: true}, false, true, "zsp publish", false, "Publish"},
-		{"listed, no profile", zsp.CheckResult{Proof: longProof, Listed: true, PublishedVersionCode: 110, Signer: owner, Authorized: true}, false, true, "zsp publish", false, "Publish version 1.2.0 (120)"},
-		{"unlisted, no profile", zsp.CheckResult{Proof: longProof, Signer: owner, Authorized: true}, false, true, "zsp", true, "kind 0"},
-		{"unlisted, no profile, no proof, hotbox", zsp.CheckResult{Signer: owner}, true, true, "zsp", true, "kind 0"},
-		{"listed, no profile, no proof, hotbox", zsp.CheckResult{Signer: owner, Listed: true}, true, true, "zsp publish", false, "Hotbox signs it"},
-		{"unlisted, no profile, unauthorized", zsp.CheckResult{Proof: longProof, Signer: other}, false, true, "zsp", true, "delegate"},
-		{"unlisted, no profile, no signer", zsp.CheckResult{Proof: longProof}, false, true, "zsp", true, "Set SIGN_WITH"},
+		{"newer, unauthorized signer", zsp.CheckResult{Proof: longProof, PublishedVersionCode: 110, Signer: other}, false, false, "zsp", true, "delegate"},
+		{"newer, delegate", zsp.CheckResult{Proof: longProof, PublishedVersionCode: 110, Signer: delegate, Authorized: true}, false, true, "zsp publish", false, "Publish version 1.2.0 (120)"},
+		{"claimed, never published", zsp.CheckResult{Proof: longProof, Signer: owner, Authorized: true}, false, true, "zsp publish", false, "Publish"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -76,12 +70,12 @@ func TestCheckDocumentIsMinimal(t *testing.T) {
 	if err := json.Unmarshal(encoded, &document); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"ok", "operation", "apk", "listed", "proof", "published_version_code", "signer", "authorized", "has_profile", "next_step", "warnings"} {
+	for _, key := range []string{"ok", "operation", "apk", "listed", "proof", "published_version_code", "signer", "authorized", "next_step", "warnings"} {
 		if _, ok := document[key]; !ok {
 			t.Errorf("missing %q in %s", key, encoded)
 		}
 	}
-	if len(document) != 11 {
+	if len(document) != 10 {
 		t.Errorf("unexpected keys in %s", encoded)
 	}
 	apkFields := document["apk"].(map[string]any)

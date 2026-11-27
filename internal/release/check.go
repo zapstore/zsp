@@ -25,7 +25,6 @@ type CheckResult struct {
 	PublishedVersionCode int64
 	Signer               string // SIGN_WITH public key, lowercase hex; empty when unset
 	Authorized           bool
-	HasProfile           bool
 	Warnings             []string
 }
 
@@ -79,19 +78,11 @@ func Check(ctx context.Context, config PublishConfig, candidate *APK, options Ch
 	}
 
 	publisher := internalnostr.NewPublisher(relayURLs)
-	if result.Signer != "" {
-		profile, profileWarnings, profileErr := publisher.DeveloperProfile(ctx, result.Signer, nil)
-		if profileErr != nil {
-			return nil, checkQueryError(ctx, profileErr, "check profile")
-		}
-		result.Warnings = append(result.Warnings, safeRelayQueryWarnings("profile", profileWarnings)...)
-		result.HasProfile = profile != nil
-	}
-	listed, appWarnings, err := publisher.HasAppEvents(ctx, verified.appID)
+	locations, appWarnings, err := publisher.FindAppEvents(ctx, verified.appID)
 	if err != nil {
 		return nil, checkQueryError(ctx, err, "find app")
 	}
-	result.Listed = listed
+	result.Listed = len(locations.ApplicationRelays) > 0
 	result.Warnings = append(result.Warnings, safeRelayQueryWarnings("application event", appWarnings)...)
 
 	if len(certificates) == 0 {

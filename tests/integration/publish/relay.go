@@ -3,7 +3,6 @@
 package publish
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -14,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	gonostr "github.com/nbd-wtf/go-nostr"
 	"github.com/zapstore/zsp/v2/tests/integration/fixture"
 )
 
@@ -78,7 +76,6 @@ func startLocalRelay() (relayURL, blossomURL, policySocket string, stop func(), 
 		"RELAY_SOFTWARE=https://github.com/zapstore/relay",
 		"SIGN_WITH=1",
 		"DELTA_INTERVAL=1h",
-		"BLOSSOM_PRUNE_INTERVAL=1h",
 		"ANALYTICS_ADDRESS=" + analyticsAddr,
 		"BLOSSOM_HOSTNAME=127.0.0.1",
 		"BLOSSOM_ADDRESS=" + blossomAddr,
@@ -171,25 +168,6 @@ func admitPublisher(t *testing.T, pubkey, socket string) {
 	}
 	if !resp.OK {
 		t.Fatal("admit " + pubkey + ": " + resp.Error)
-	}
-}
-
-// seedProfile publishes a kind 0 for secret: a new listing needs one.
-func seedProfile(t *testing.T, relayURL, secret string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
-	event := &gonostr.Event{Kind: 0, CreatedAt: gonostr.Now(), Content: `{"name":"Publish Test"}`}
-	if err := event.Sign(secret); err != nil {
-		t.Fatal(err)
-	}
-	relay, err := gonostr.RelayConnect(ctx, relayURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer relay.Close()
-	if err := relay.Publish(ctx, *event); err != nil {
-		t.Fatalf("seed profile for %s: %v", event.PubKey, err)
 	}
 }
 

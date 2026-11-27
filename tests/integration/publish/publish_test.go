@@ -83,7 +83,6 @@ func TestClientAPIPublishesThroughLocalRelay(t *testing.T) {
 	admitPublisher(t, ownerPubkey, policySocket)
 	admitPublisher(t, delegatePubkey, policySocket)
 	admitPublisher(t, indexerPubkey, policySocket)
-	seedProfile(t, relayURL, ownerSecret)
 
 	apkDirectory := t.TempDir()
 	keystore := filepath.Join(apkDirectory, "release.jks")

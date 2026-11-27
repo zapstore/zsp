@@ -291,7 +291,6 @@ var (
 	ErrAPKSelectionRequired = errors.New("APK selection required")
 	ErrProofRequired        = errors.New("active proof required")
 	ErrProofUnauthorized    = errors.New("signer is not authorized by the proof")
-	ErrProfileRequired      = errors.New("developer profile required")
 	ErrSigner               = errors.New("signer is unavailable")
 	ErrAlreadyPublished     = errors.New("release already published")
 	ErrReleaseDowngrade     = errors.New("release version code is a downgrade")

@@ -351,8 +351,6 @@ func writePublishError(opts *cli.Options, err error, candidates []*zsp.APK, part
 		body.NextStep = &cliNextStep{Command: "zsp", Reason: "Prove the app is yours.", RequiresHuman: true}
 	case "proof_unauthorized":
 		body.NextStep = &cliNextStep{Command: "zsp", Reason: "SIGN_WITH isn't the proof's owner or delegate. The owner can name it as delegate under CI/CD publishing.", RequiresHuman: true}
-	case "profile_required":
-		body.NextStep = profileNextStep()
 	case "apk_selection_required":
 		body.Context = map[string]any{"candidates": apkCandidates(candidates)}
 		body.NextStep = &cliNextStep{Command: command + " --apk-hash <hash>", Reason: "Select one verified APK by its hash."}
@@ -405,8 +403,6 @@ func publishErrorCode(err error) string {
 		return "proof_required"
 	case errors.Is(err, zsp.ErrProofUnauthorized):
 		return "proof_unauthorized"
-	case errors.Is(err, zsp.ErrProfileRequired):
-		return "profile_required"
 	case errors.Is(err, zsp.ErrSigner):
 		return "signer_unavailable"
 	case errors.Is(err, zsp.ErrUploadRejected):
@@ -438,8 +434,6 @@ func safeSummary(code string) string {
 	switch code {
 	case "proof_required":
 		return "No active proof was found for this certificate."
-	case "profile_required":
-		return "No Nostr profile (kind 0) was found for SIGN_WITH."
 	case "release_already_published":
 		return "This Android version code is already published."
 	case "release_downgrade":
