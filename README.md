@@ -28,7 +28,7 @@ go install github.com/zapstore/zsp/v2/cmd/zsp@latest
 
 In a checkout, `make build` builds `dist/zsp-<os>-<arch>` and links it as `./zsp`. `make help` lists every target.
 
-To release: tag HEAD, then `make publish`. It builds the binaries, tarballs, and `dist/zsp.rb`, uploads them to the GitHub release, and commits the formula to `zapstore/homebrew-tap`. It needs `gh` signed in.
+To release, from a clean checkout: `make release`. It tags HEAD (the next minor when a commit since the last tag starts with `feat`, otherwise the next patch), builds the binaries, tarballs, and `dist/zsp.rb`, pushes the commit and the tag, uploads them to the GitHub release, and commits the formula to `zapstore/homebrew-tap`. It needs `gh` signed in.
 
 ## Use
 

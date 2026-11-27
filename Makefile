@@ -16,9 +16,9 @@ endif
 # v2.0.0 -> 2.0.0. Release asset names use this.
 RELVER := $(patsubst v%,%,$(VERSION))
 
-ifneq ($(filter release publish,$(MAKECMDGOALS)),)
+ifneq ($(filter release-assets,$(MAKECMDGOALS)),)
 ifeq ($(VERSION),)
-$(error HEAD is not exactly a git tag; tag this commit, then run make release)
+$(error HEAD is not exactly a git tag)
 endif
 endif
 
@@ -43,7 +43,7 @@ RELAY_DIR ?= $(abspath ../relay)
 HOTBOX_DIR ?= $(abspath ../hotbox)
 
 .DEFAULT_GOAL := help
-.PHONY: help build darwin-arm64 linux-arm64 linux-amd64 release publish clean test test-unit test-integration test-release
+.PHONY: help build darwin-arm64 linux-arm64 linux-amd64 release release-assets clean test test-unit test-integration test-release
 
 help: ## List targets
 	@awk 'BEGIN { FS = ":.*## " } /^[a-zA-Z0-9_.-]+:.*## / { printf "  %-20s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -75,9 +75,16 @@ linux-amd64: ## Linux amd64 → dist/ only
 		CC="zig cc -target x86_64-linux-gnu" \
 		CXX="zig c++ -target x86_64-linux-gnu"
 
-# Three binaries, their tarballs, and the Homebrew formula in dist/. Does not
-# create the tag or the GitHub release; `make publish` does the upload.
-release: ## Versioned binaries, tarballs, and zsp.rb in dist/ (HEAD must be a tag)
+# Tag, build, push, and upload. release-assets runs in a second make so the
+# tag from scripts/tag.sh is the version stamped into the binaries.
+release: ## Tag HEAD, build, upload the GitHub release, and update the Homebrew tap
+	scripts/tag.sh $(VERSION)
+	$(MAKE) release-assets
+	@tag=$$(git describe --tags --exact-match HEAD); \
+	git push origin HEAD "$$tag"; \
+	scripts/publish.sh $$tag dist
+
+release-assets:
 	$(MAKE) darwin-arm64
 	$(MAKE) linux-arm64
 	$(MAKE) linux-amd64
@@ -96,9 +103,6 @@ release: ## Versioned binaries, tarballs, and zsp.rb in dist/ (HEAD must be a ta
 	@echo dist/$(NAME)-$(RELVER)-linux-arm64.tar.gz
 	@echo dist/$(NAME)-$(RELVER)-linux-amd64.tar.gz
 	@echo dist/$(NAME).rb
-
-publish: release ## Upload dist/ to the GitHub release and update the Homebrew tap (needs gh)
-	scripts/publish.sh $(VERSION) dist
 
 clean: ## Remove dist/ and symlinks
 	rm -rf dist
